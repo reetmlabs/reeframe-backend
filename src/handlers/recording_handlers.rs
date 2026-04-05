@@ -19,7 +19,9 @@ pub async fn start_recording(dep: &mut Depot, req: &mut Request, res: &mut Respo
                 }
             }
         }
-        Ok(None) => res.status_code(StatusCode::NOT_FOUND),
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+        }
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
             res.render(format!("Error fetching feed: {}", e));

@@ -9,6 +9,8 @@ use crate::recorder::RecorderManager;
 use handlers::{feed_handlers, recording_handlers};
 use tracing_subscriber;
 
+
+
 #[tokio::main]
 async fn main() {
     // Initialize logging
@@ -26,17 +28,17 @@ async fn main() {
     // Sync schema (for demo purposes, creating the table if it doesn't exist)
     let builder = db.get_database_backend();
     let schema = Schema::new(builder);
-    let create_table_stmt = builder.build(&schema.create_table_from_entity(entities::feed::Entity).if_not_exists());
+    let create_table_stmt = builder.build(schema.create_table_from_entity(entities::feed::Entity).if_not_exists());
 
-    db.execute(create_table_stmt).await.expect("Failed to create table");
+    db.execute_unprepared(create_table_stmt.to_string().as_str()).await.expect("Failed to create table");
 
     // Initialize Recorder Manager
     let recorder_manager = RecorderManager::new();
 
     // Setup Salvo router
     let router = Router::new()
-        .hoop(affix::inject("db", db))
-        .hoop(affix::inject("recorder_manager", recorder_manager))
+        .hoop(affix_state::inject(db))
+        .hoop(affix_state::inject(recorder_manager))
         .push(
             Router::with_path("feeds")
                 .post(feed_handlers::create_feed)

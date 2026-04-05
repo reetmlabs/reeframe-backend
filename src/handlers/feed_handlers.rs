@@ -41,7 +41,9 @@ pub async fn get_feed(dep: &mut Depot, req: &mut Request, res: &mut Response) {
 
     match feed::Entity::find_by_id(id).one(db).await {
         Ok(Some(f)) => res.render(Json(f)),
-        Ok(None) => res.status_code(StatusCode::NOT_FOUND),
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+        }
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
             res.render(format!("Error fetching feed: {}", e));
@@ -71,7 +73,9 @@ pub async fn update_feed(dep: &mut Depot, req: &mut Request, res: &mut Response)
                 }
             }
         }
-        Ok(None) => res.status_code(StatusCode::NOT_FOUND),
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+        }
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
             res.render(format!("Error fetching feed: {}", e));
