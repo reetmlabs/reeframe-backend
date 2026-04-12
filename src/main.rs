@@ -42,6 +42,8 @@ async fn main() {
             timezone: Set(env::var("oneward_be_timezone").unwrap_or_else(|_| "UTC".to_string())),
             ntp_server: Set(env::var("oneward_be_ntp_server").unwrap_or_else(|_| "pool.ntp.org".to_string())),
             storage_path: Set(env::var("oneward_be_storage_path").unwrap_or_else(|_| "./recordings".to_string())),
+            pre_event_cache_duration_secs: Set(10), // Default 10 secs cache
+            default_ai_recording_duration_secs: Set(10), // Default 10 secs AI recording
             reconnect_interval_secs: Set(env::var("oneward_be_reconnect_interval_secs")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(30)),
             gst_latency_ms: Set(env::var("oneward_be_gst_latency_ms")
@@ -77,6 +79,7 @@ async fn main() {
                         .delete(feed_handlers::delete_feed)
                         .push(Router::with_path("record/start").post(recording_handlers::start_recording))
                         .push(Router::with_path("record/stop").post(recording_handlers::stop_recording))
+                        .push(Router::with_path("ai-event").post(recording_handlers::handle_ai_event))
                 )
         );
 
