@@ -10,6 +10,10 @@ pub struct Model {
     pub description: Option<String>,
     pub rtsp_url: String,
     pub parameters: Option<String>, // Store as JSON string or similar
+    pub recording_quality: Option<String>, // "high", "medium", "low" or specific encoder settings
+    pub ai_recording_duration_secs: Option<i32>,
+    pub restream_enabled: bool,
+    pub restream_port: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

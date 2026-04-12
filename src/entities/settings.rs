@@ -10,6 +10,8 @@ pub struct Model {
     pub timezone: String,
     pub ntp_server: String,
     pub storage_path: String,
+    pub pre_event_cache_duration_secs: i32,
+    pub default_ai_recording_duration_secs: i32,
     pub reconnect_interval_secs: i32,
     pub gst_latency_ms: i32,
     pub gst_buffering_ms: i32,
