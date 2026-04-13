@@ -14,7 +14,7 @@ use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::Deserialize;
 
 use crate::entities::{feed, settings};
-use crate::recorder::{CameraManager, StreamQuality};
+use crate::media::{CameraManager, StreamQuality};
 
 // ---------------------------------------------------------------------------
 // connect

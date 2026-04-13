@@ -19,7 +19,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use crate::entities::{feed, settings};
-use crate::recorder::{CameraManager, TriggerType};
+use crate::media::{CameraManager, TriggerType};
 
 // ---------------------------------------------------------------------------
 // Helpers
