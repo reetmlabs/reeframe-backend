@@ -1,227 +1,272 @@
-use gstreamer as gst;
-use gst::prelude::*;
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+//! Camera management subsystem.
+//!
+//! This module is the public API surface for the recording and streaming subsystem.
+//! [`CameraManager`] is the single object injected into Salvo's application state; HTTP
+//! handlers call its methods to connect cameras, switch quality, start/stop recording, and
+//! trigger event-based recordings.
+//!
+//! # Sub-modules
+//! * [`camera_stream`] — High-res GStreamer recording pipeline per camera with pre-alarm
+//!                        rolling buffer.
+//! * [`recording`]     — Valve control, timed event recording, and DB segment indexing
+//!                        via a background task.
+//! * [`rtsp_server`]   — Backend GStreamer RTSP server (live + playback, port 8554 by
+//!                        default).
+//!
+//! # Separation of concerns
+//! The **live RTSP view** is served by [`rtsp_server::BackendRtspServer`], which runs its
+//! own `rtspsrc` connections directly and uses an `input-selector` for quality switching.
+//! The **recording pipeline** in [`camera_stream::CameraStream`] has a separate `rtspsrc`
+//! connection to the camera's high-res stream and is purely concerned with writing MP4
+//! chunks to disk.
+//!
+//! # Thread safety
+//! All state is wrapped in `Arc<Mutex<…>>` so that `CameraManager` can be cloned cheaply
+//! and used from multiple Salvo handlers concurrently.
+
+pub mod camera_stream;
+pub mod recording;
+pub mod rtsp_server;
+
+pub use camera_stream::StreamQuality;
+pub use recording::TriggerType;
+
 use anyhow::{anyhow, Result};
-use std::time::{Duration, Instant};
+use sea_orm::DatabaseConnection;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::info;
+
 use crate::entities::{feed, settings};
+use camera_stream::CameraStream;
+use recording::{recording_segment_indexer, SegmentEvent};
+use rtsp_server::BackendRtspServer;
 
-pub struct Recorder {
-    pipeline: gst::Pipeline,
-    user_recording_valve: gst::Element,
-    ai_recording_valve: gst::Element,
-    ai_stop_time: Arc<Mutex<Option<Instant>>>,
+/// Manages all connected camera feeds, the backend RTSP server, and the DB indexer.
+///
+/// Clone is cheap: all mutable state is behind `Arc<Mutex<…>>`.
+#[derive(Clone)]
+pub struct CameraManager {
+    /// Live recording camera streams, keyed by feed ID.
+    streams: Arc<Mutex<HashMap<i32, CameraStream>>>,
+    /// The shared GStreamer RTSP server instance (live view + playback).
+    rtsp_server: BackendRtspServer,
+    /// Sender side of the DB indexer channel.  Cloned into each
+    /// [`recording::RecordingController`] so all feeds share one indexer task.
+    db_tx: mpsc::Sender<SegmentEvent>,
 }
 
-impl Recorder {
-    pub fn new(feed_model: &feed::Model, global_settings: &settings::Model) -> Result<Self> {
-        gst::init()?;
+impl CameraManager {
+    /// Create a new `CameraManager`, start the RTSP server, and launch the DB indexer.
+    ///
+    /// The RTSP server binds to `rtsp_port` (typically `8554`).  The DB indexer is a
+    /// Tokio task that receives [`recording::SegmentEvent`]s from recording pipelines and
+    /// inserts rows into the `recording_segments` table.
+    ///
+    /// # Arguments
+    /// * `rtsp_port` — TCP port for the backend RTSP server (e.g. `8554`).
+    /// * `db`        — SeaORM database connection passed to the indexer task.
+    ///
+    /// # Errors
+    /// Returns an error if the RTSP server fails to start (e.g. port already in use or
+    /// GStreamer initialisation failure).
+    pub fn new(rtsp_port: u16, db: DatabaseConnection) -> Result<Self> {
+        let rtsp_server = BackendRtspServer::new(rtsp_port)?;
 
-        let rtsp_url = &feed_model.rtsp_url;
-        let storage_path = &global_settings.storage_path;
-        let chunk_duration_secs = global_settings.recording_chunk_duration_mins * 60;
-        let pre_event_cache_duration = global_settings.pre_event_cache_duration_secs;
+        // Channel buffer: 256 events handles bursts from many simultaneous cameras.
+        let (db_tx, db_rx) = mpsc::channel::<SegmentEvent>(256);
 
-        // Quality configuration
-        let encoder_settings = match feed_model.recording_quality.as_deref() {
-            Some("high") => "bitrate=4000 speed-preset=ultrafast",
-            Some("medium") => "bitrate=2000 speed-preset=ultrafast",
-            Some("low") => "bitrate=1000 speed-preset=ultrafast",
-            _ => "bitrate=2000 speed-preset=ultrafast",
-        };
+        // Spawn the background DB indexer task.
+        tokio::spawn(recording_segment_indexer(db, db_rx));
 
-        // GStreamer Pipeline Construction
-        // We use tee to split the source into multiple branches:
-        // 1. User-commanded recording branch (with valve)
-        // 2. AI-triggered recording branch (with valve and queue for caching)
-        // 3. Restreaming branch (optional)
+        info!("CameraManager initialised (RTSP port {})", rtsp_port);
 
-        let mut pipeline_str = format!(
-            "rtspsrc location={} latency={} name=src_{} ! decodebin ! videoconvert ! x264enc {} ! tee name=t_{} ",
-            rtsp_url,
-            global_settings.gst_latency_ms,
-            feed_model.id,
-            encoder_settings,
-            feed_model.id
-        );
+        Ok(Self {
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            rtsp_server,
+            db_tx,
+        })
+    }
 
-        // 1. User recording branch
-        pipeline_str.push_str(&format!(
-            "t_{}. ! queue ! valve name=u_valve_{} ! splitmuxsink location={}/feed_{}_user_%05d.mp4 max-size-time={} ",
-            feed_model.id,
-            feed_model.id,
-            storage_path,
-            feed_model.id,
-            chunk_duration_secs as u64 * 1_000_000_000
-        ));
-
-        // 2. AI recording branch
-        // The queue here provides the pre-event caching.
-        pipeline_str.push_str(&format!(
-            "t_{}. ! queue max-size-buffers=0 max-size-time={} max-size-bytes=0 ! valve name=ai_valve_{} ! splitmuxsink location={}/feed_{}_ai_%05d.mp4 max-size-time={} ",
-            feed_model.id,
-            pre_event_cache_duration as u64 * 1_000_000_000,
-            feed_model.id,
-            storage_path,
-            feed_model.id,
-            chunk_duration_secs as u64 * 1_000_000_000
-        ));
-
-        // 3. Restreaming branch
-        if feed_model.restream_enabled {
-            if let Some(port) = feed_model.restream_port {
-                pipeline_str.push_str(&format!(
-                    "t_{}. ! queue ! mpegtsmux ! udpsink host=127.0.0.1 port={} ",
-                    feed_model.id,
-                    port
-                ));
-            }
+    /// Connect to a camera feed: start the recording pipeline and register RTSP mount points.
+    ///
+    /// After a successful connect:
+    /// * Live stream is available at `rtsp://<host>:<rtsp_port>/live/feed_{id}` (low-res
+    ///   by default; switch quality with [`switch_quality`](Self::switch_quality)).
+    /// * Playback of recordings is available at
+    ///   `rtsp://<host>:<rtsp_port>/playback/feed_{id}`.
+    ///
+    /// If the feed is already connected this is a no-op and returns `Ok(())`.
+    ///
+    /// # Arguments
+    /// * `feed`     — Camera feed model from the database.
+    /// * `settings` — Global settings model from the database.
+    ///
+    /// # Errors
+    /// Returns an error if either the recording pipeline or the RTSP mount points cannot
+    /// be created.
+    pub fn connect(&self, feed: &feed::Model, settings: &settings::Model) -> Result<()> {
+        let mut streams = self.streams.lock().unwrap();
+        if streams.contains_key(&feed.id) {
+            info!("feed {}: already connected, skipping", feed.id);
+            return Ok(());
         }
 
-        let pipeline = gst::parse::launch(&pipeline_str)?
-            .dynamic_cast::<gst::Pipeline>()
-            .map_err(|_| anyhow!("Failed to cast to pipeline"))?;
+        // Register live RTSP mount (uses its own rtspsrc connections with input-selector).
+        let high_url = feed.rtsp_url_high.as_deref().unwrap_or(feed.rtsp_url.as_str());
+        self.rtsp_server
+            .add_live_feed(feed.id, &feed.rtsp_url, high_url)?;
 
-        let user_recording_valve = pipeline
-            .by_name(&format!("u_valve_{}", feed_model.id))
-            .ok_or_else(|| anyhow!("Failed to find u_valve for feed {}", feed_model.id))?;
-        
-        let ai_recording_valve = pipeline
-            .by_name(&format!("ai_valve_{}", feed_model.id))
-            .ok_or_else(|| anyhow!("Failed to find ai_valve for feed {}", feed_model.id))?;
+        // Register playback RTSP mount (splitmuxsrc reads recorded MP4 chunks).
+        self.rtsp_server
+            .add_playback_feed(feed.id, &settings.storage_path)?;
 
-        // Initialize valves to drop (not recording)
-        user_recording_valve.set_property("drop", true);
-        ai_recording_valve.set_property("drop", true);
+        // Build the high-res recording pipeline.
+        let stream = CameraStream::new(feed, settings, self.db_tx.clone())?;
+        streams.insert(feed.id, stream);
 
-        let ai_stop_time = Arc::new(Mutex::new(None));
-
-        let recorder = Self {
-            pipeline,
-            user_recording_valve,
-            ai_recording_valve,
-            ai_stop_time,
-        };
-
-        recorder.start_pipeline()?;
-
-        Ok(recorder)
-    }
-
-    fn start_pipeline(&self) -> Result<()> {
-        self.pipeline.set_state(gst::State::Playing)?;
+        info!("feed {}: connected", feed.id);
         Ok(())
     }
 
-    pub fn stop_pipeline(&self) -> Result<()> {
-        self.pipeline.set_state(gst::State::Null)?;
-        Ok(())
-    }
-
-    pub fn start_user_recording(&self) -> Result<()> {
-        info!("Starting user-commanded recording");
-        self.user_recording_valve.set_property("drop", false);
-        Ok(())
-    }
-
-    pub fn stop_user_recording(&self) -> Result<()> {
-        info!("Stopping user-commanded recording");
-        self.user_recording_valve.set_property("drop", true);
-        Ok(())
-    }
-
-    pub fn trigger_ai_recording(&self, duration: Duration) -> Result<()> {
-        info!("Triggering AI recording for {:?}", duration);
-        let mut stop_time_lock = self.ai_stop_time.lock().unwrap();
-        let new_stop_time = Instant::now() + duration;
-        
-        if let Some(current_stop_time) = *stop_time_lock {
-            if new_stop_time > current_stop_time {
-                *stop_time_lock = Some(new_stop_time);
-            }
-        } else {
-            *stop_time_lock = Some(new_stop_time);
-            self.ai_recording_valve.set_property("drop", false);
-            
-            // Spawn a thread or task to stop AI recording after duration
-            let ai_valve = self.ai_recording_valve.clone();
-            let stop_time_shared = Arc::clone(&self.ai_stop_time);
-            
-            std::thread::spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_millis(500));
-                    let mut lock = stop_time_shared.lock().unwrap();
-                    if let Some(stop_at) = *lock {
-                        if Instant::now() >= stop_at {
-                            info!("AI recording duration reached, stopping");
-                            ai_valve.set_property("drop", true);
-                            *lock = None;
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            });
-        }
-        
-        Ok(())
-    }
-}
-
-pub struct RecorderManager {
-    recorders: Arc<Mutex<HashMap<i32, Arc<Recorder>>>>,
-}
-
-impl RecorderManager {
-    pub fn new() -> Self {
-        Self {
-            recorders: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn get_or_create_recorder(&self, feed_model: &feed::Model, settings_model: &settings::Model) -> Result<Arc<Recorder>> {
-        let mut recorders = self.recorders.lock().unwrap();
-        if let Some(recorder) = recorders.get(&feed_model.id) {
-            Ok(Arc::clone(recorder))
-        } else {
-            let recorder = Arc::new(Recorder::new(feed_model, settings_model)?);
-            recorders.insert(feed_model.id, Arc::clone(&recorder));
-            Ok(recorder)
-        }
-    }
-
-    pub fn start_recording(&self, feed_model: &feed::Model, settings_model: &settings::Model) -> Result<()> {
-        let recorder = self.get_or_create_recorder(feed_model, settings_model)?;
-        recorder.start_user_recording()
-    }
-
-    pub fn stop_recording(&self, feed_id: i32) -> Result<()> {
-        let recorders = self.recorders.lock().unwrap();
-        if let Some(recorder) = recorders.get(&feed_id) {
-            recorder.stop_user_recording()?;
+    /// Disconnect a camera feed: stop the recording pipeline and remove RTSP mount points.
+    ///
+    /// Any in-progress recording chunk is finalised gracefully (EOS sent to splitmuxsink).
+    /// Any RTSP clients currently viewing the live or playback stream will be disconnected.
+    ///
+    /// # Arguments
+    /// * `feed_id` — Database ID of the feed to disconnect.
+    ///
+    /// # Errors
+    /// Returns an error if the feed is not connected or the pipeline fails to stop.
+    pub fn disconnect(&self, feed_id: i32) -> Result<()> {
+        let mut streams = self.streams.lock().unwrap();
+        if let Some(stream) = streams.remove(&feed_id) {
+            stream.stop()?;
+            self.rtsp_server.remove_feed(feed_id);
+            info!("feed {}: disconnected", feed_id);
             Ok(())
         } else {
-            Err(anyhow!("No recorder found for feed {}", feed_id))
+            Err(anyhow!("feed {}: not connected", feed_id))
         }
     }
 
-    pub fn trigger_ai_recording(&self, feed_model: &feed::Model, settings_model: &settings::Model, duration: Duration) -> Result<()> {
-        let recorder = self.get_or_create_recorder(feed_model, settings_model)?;
-        recorder.trigger_ai_recording(duration)
-    }
-
-    pub fn ensure_connected(&self, feed_model: &feed::Model, settings_model: &settings::Model) -> Result<()> {
-        self.get_or_create_recorder(feed_model, settings_model)?;
+    /// Switch the quality of the live RTSP stream served to the frontend.
+    ///
+    /// Adjusts the `active-pad` of the `input-selector` inside the live media pipeline.
+    /// The switch is seamless — the frontend does not need to reconnect.  If no client
+    /// has yet connected to the live stream the switch is noted and takes effect when
+    /// the selector becomes available.
+    ///
+    /// # Arguments
+    /// * `feed_id` — Database ID of the feed.
+    /// * `quality` — Target quality (`Low` or `High`).
+    ///
+    /// # Errors
+    /// Returns an error if the feed is not connected.
+    pub fn switch_quality(&self, feed_id: i32, quality: StreamQuality) -> Result<()> {
+        // Verify the feed is connected (streams map is the source of truth).
+        if !self.streams.lock().unwrap().contains_key(&feed_id) {
+            return Err(anyhow!("feed {}: not connected", feed_id));
+        }
+        self.rtsp_server
+            .switch_live_quality(feed_id, quality == StreamQuality::High);
         Ok(())
     }
-}
 
-impl Clone for RecorderManager {
-    fn clone(&self) -> Self {
-        Self {
-            recorders: Arc::clone(&self.recorders),
+    /// Start a user-commanded (manual) recording on the feed's high-res stream.
+    ///
+    /// The recording continues until [`stop_recording`](Self::stop_recording) is called.
+    /// If an event recording (AI / hardware / schedule) is already running, both continue
+    /// in parallel — the valve remains open until all active recordings end.
+    ///
+    /// If the feed is not yet connected, the backend connects it automatically.
+    ///
+    /// # Arguments
+    /// * `feed`     — Camera feed model (used to connect if necessary).
+    /// * `settings` — Global settings model (used to create the pipeline if necessary).
+    ///
+    /// # Errors
+    /// Returns an error if the feed cannot be connected.
+    pub fn start_recording(
+        &self,
+        feed: &feed::Model,
+        settings: &settings::Model,
+    ) -> Result<()> {
+        self.ensure_connected(feed, settings)?;
+        let streams = self.streams.lock().unwrap();
+        streams
+            .get(&feed.id)
+            .ok_or_else(|| anyhow!("feed {}: not connected", feed.id))?
+            .recording
+            .start_user_recording();
+        Ok(())
+    }
+
+    /// Stop the user-commanded recording.
+    ///
+    /// Closes the recording valve only if no event recording (AI / hardware / schedule)
+    /// is also currently active.
+    ///
+    /// # Arguments
+    /// * `feed_id` — Database ID of the feed.
+    ///
+    /// # Errors
+    /// Returns an error if the feed is not connected.
+    pub fn stop_recording(&self, feed_id: i32) -> Result<()> {
+        let streams = self.streams.lock().unwrap();
+        streams
+            .get(&feed_id)
+            .ok_or_else(|| anyhow!("feed {}: not connected", feed_id))?
+            .recording
+            .stop_user_recording();
+        Ok(())
+    }
+
+    /// Trigger a timed event recording on the feed's high-res stream.
+    ///
+    /// If an event recording is already active, its deadline is extended when `duration`
+    /// would push the end time further into the future.  This avoids restarting the
+    /// pipeline (which would lose the pre-alarm buffer) when rapid successive events fire.
+    ///
+    /// If the feed is not yet connected, the backend connects it automatically.
+    ///
+    /// # Arguments
+    /// * `feed`     — Camera feed model.
+    /// * `settings` — Global settings model.
+    /// * `trigger`  — What caused this recording (`Ai`, `Hardware`, or `Schedule`).
+    /// * `duration` — How long to record after the trigger fires.
+    ///
+    /// # Errors
+    /// Returns an error if the feed cannot be connected.
+    pub fn trigger_event(
+        &self,
+        feed: &feed::Model,
+        settings: &settings::Model,
+        trigger: TriggerType,
+        duration: Duration,
+    ) -> Result<()> {
+        self.ensure_connected(feed, settings)?;
+        let streams = self.streams.lock().unwrap();
+        streams
+            .get(&feed.id)
+            .ok_or_else(|| anyhow!("feed {}: not connected", feed.id))?
+            .recording
+            .trigger_event_recording(trigger, duration);
+        Ok(())
+    }
+
+    /// Connect the feed if it is not already connected.
+    ///
+    /// Used internally by [`start_recording`](Self::start_recording) and
+    /// [`trigger_event`](Self::trigger_event) to avoid requiring a separate `/connect`
+    /// call before recording.
+    fn ensure_connected(&self, feed: &feed::Model, settings: &settings::Model) -> Result<()> {
+        if !self.streams.lock().unwrap().contains_key(&feed.id) {
+            self.connect(feed, settings)?;
         }
+        Ok(())
     }
 }
