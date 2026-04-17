@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5800:5800"   # HTTP API
+      - "8554:8554"   # RTSP server (TCP)
+      - "8554:8554/udp"
+    environment:
+      DATABASE_URL: sqlite:///data/feeds.db?mode=rwc
+      oneward_be_rtsp_port: "8554"
+      oneward_be_recording_chunk_duration_mins: "10"
+      oneward_be_timezone: "UTC"
+      oneward_be_ntp_server: "pool.ntp.org"
+      oneward_be_storage_path: "/recordings"
+      oneward_be_reconnect_interval_secs: "30"
+      oneward_be_gst_latency_ms: "100"
+      oneward_be_gst_buffering_ms: "1000"
+      oneward_be_reserved_disk_space_mb: "1024"
+    volumes:
+      - recordings:/recordings   # recorded video segments
+      - db:/data                 # SQLite database file
+    restart: unless-stopped
+
+volumes:
+  recordings:
+  db:
