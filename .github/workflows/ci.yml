@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # SQLite-only in CI — no external DB required
+  DATABASE_URL: sqlite:./feeds.db?mode=rwc
+
+jobs:
+  ci:
+    name: fmt · clippy · build · test
+    runs-on: ubuntu-24.04
+
+    steps:
+      # ----------------------------------------------------------------
+      # Checkout
+      # ----------------------------------------------------------------
+      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # Rust toolchain (stable + rustfmt + clippy)
+      # ----------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # ----------------------------------------------------------------
+      # GStreamer native dependencies
+      # The gstreamer-* crates link against these C libraries via pkg-config.
+      # ----------------------------------------------------------------
+      - name: Install GStreamer dev packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libgstreamer-rtsp-server-1.0-dev \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav
+
+      # ----------------------------------------------------------------
+      # Cargo cache — keyed on Cargo.lock so it's invalidated on dep changes
+      # ----------------------------------------------------------------
+      - name: Cache cargo registry & build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ----------------------------------------------------------------
+      # Format check
+      # ----------------------------------------------------------------
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # ----------------------------------------------------------------
+      # Clippy (deny warnings)
+      # ----------------------------------------------------------------
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # ----------------------------------------------------------------
+      # Build
+      # ----------------------------------------------------------------
+      - name: Build
+        run: cargo build --all-targets
+
+      # ----------------------------------------------------------------
+      # Tests
+      # ----------------------------------------------------------------
+      - name: Test
+        run: cargo test --all-targets
