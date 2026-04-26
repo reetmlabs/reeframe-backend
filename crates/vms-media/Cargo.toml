@@ -1,0 +1,18 @@
+[package]
+name    = "vms-media"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vms-core      = { path = "../vms-core" }
+tokio         = { workspace = true }
+gstreamer     = { workspace = true }
+gstreamer-app = { workspace = true }
+gstreamer-video = { workspace = true }
+glib          = { workspace = true }
+bytes         = { workspace = true }
+uuid          = { workspace = true }
+chrono        = { workspace = true }
+thiserror     = { workspace = true }
+anyhow        = { workspace = true }
+tracing       = { workspace = true }
