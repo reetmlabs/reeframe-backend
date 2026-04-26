@@ -1,23 +1,94 @@
-[package]
-name = "OneWardBackend"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = [
+    "crates/vms-core",
+    "crates/vms-db",
+    "crates/vms-media",
+    "crates/vms-sources",
+    "crates/vms-actions",
+    "crates/vms-transports",
+    "crates/vms-engine",
+    "crates/vms-api",
+    "crates/vms-daemon",
+]
+resolver = "2"
 
-[dependencies]
-salvo = { version = "0.91.1", features = ["anyhow", "affix-state"] }
-sea-orm = { version = "2.0.0-rc.37", features = ["sqlx-mysql", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
-tokio = { version = "1.51.0", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-gstreamer = "0.25.0"
-gstreamer-app = "0.25.0"
-gstreamer-video = "0.25.0"
-gstreamer-rtsp-server = "0.25.0"
-gstreamer-rtsp = "0.25.0"
-gstreamer-rtp = "0.25.0"
-glib = "0.20"
-anyhow = "1.0"
-uuid = { version = "1.23.0", features = ["v4", "serde"] }
-chrono = { version = "0.4.44", features = ["serde"] }
-tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+# ─── Shared dependency versions ──────────────────────────────────────────────
+# Each crate opts in with `dep.workspace = true` in its own Cargo.toml.
+# Versions here are the single source of truth for the whole workspace.
+
+[workspace.dependencies]
+
+# Async runtime
+tokio   = { version = "1",      features = ["full"] }
+futures = "0.3"
+
+# Web framework (Salvo replaces axum)
+salvo = { version = "0.91", features = ["anyhow", "affix-state", "jwt-auth", "cors"] }
+
+# Database (SeaORM — SQLite, MySQL, PostgreSQL)
+sea-orm           = { version = "2.0.0-rc.37", features = [
+    "sqlx-sqlite", "sqlx-mysql", "sqlx-postgres",
+    "runtime-tokio-rustls", "macros",
+] }
+sea-orm-migration = { version = "2.0.0-rc.37", features = [
+    "sqlx-sqlite", "sqlx-mysql", "sqlx-postgres",
+    "runtime-tokio-rustls",
+] }
+
+# Core types
+uuid   = { version = "1",    features = ["v4", "serde"] }
+chrono = { version = "0.4",  features = ["serde"] }
+bytes  = "1"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+
+# Media (GStreamer)
+gstreamer             = "0.25"
+gstreamer-app         = "0.25"
+gstreamer-video       = "0.25"
+gstreamer-rtsp-server = "0.25"
+gstreamer-rtsp        = "0.25"
+gstreamer-rtp         = "0.25"
+glib                  = "0.20"
+
+# External sources
+rumqttc           = "0.24"
+tokio-tungstenite = "0.24"
+notify            = "6"
+
+# Transport / delivery
+reqwest      = { version = "0.12", features = ["json", "multipart", "stream"] }
+lettre       = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
+object_store = { version = "0.11", features = ["aws"] }
+
+# Scheduling
+tokio-cron-scheduler = "0.13"
+
+# Concurrency primitives
+dashmap  = "6"
+arc-swap = "1"
+
+# Error handling
+thiserror  = "2"
+anyhow     = "1"
+color-eyre = "0.6"
+
+# Observability
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Security
+aes-gcm      = "0.10"
+jsonwebtoken = "9"
+rand         = "0.8"
+base64       = "0.22"
+
+# Templates & expressions
+minijinja = "2"
+evalexpr  = "11"
