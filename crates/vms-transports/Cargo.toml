@@ -1,0 +1,18 @@
+[package]
+name    = "vms-transports"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vms-core     = { path = "../vms-core" }
+vms-db       = { path = "../vms-db" }
+tokio        = { workspace = true }
+reqwest      = { workspace = true }
+lettre       = { workspace = true }
+object_store = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+minijinja    = { workspace = true }
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
