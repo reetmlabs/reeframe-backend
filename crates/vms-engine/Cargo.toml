@@ -1,0 +1,23 @@
+[package]
+name    = "vms-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vms-core       = { path = "../vms-core" }
+vms-db         = { path = "../vms-db" }
+vms-media      = { path = "../vms-media" }
+vms-sources    = { path = "../vms-sources" }
+vms-actions    = { path = "../vms-actions" }
+vms-transports = { path = "../vms-transports" }
+tokio          = { workspace = true }
+dashmap        = { workspace = true }
+arc-swap       = { workspace = true }
+evalexpr       = { workspace = true }
+tokio-cron-scheduler = { workspace = true }
+serde_json     = { workspace = true }
+uuid           = { workspace = true }
+chrono         = { workspace = true }
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+tracing        = { workspace = true }
