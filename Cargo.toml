@@ -92,3 +92,6 @@ base64       = "0.22"
 # Templates & expressions
 minijinja = "2"
 evalexpr  = "11"
+
+# Async traits (object-safe dyn Trait with async fn)
+async-trait = "0.1"
