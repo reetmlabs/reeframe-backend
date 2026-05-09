@@ -29,6 +29,8 @@
 pub mod crypto;
 pub mod entities;
 pub mod migration;
+pub mod repos;
 
 pub use crypto::Crypto;
 pub use migration::Migrator;
+pub use repos::{CameraRepo, DestinationRepo, SourceRepo};
