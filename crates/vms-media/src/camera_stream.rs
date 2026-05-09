@@ -21,6 +21,16 @@ fn codec_for(encoding_name: &str) -> Option<CodecElements> {
             depay_factory: "rtph265depay",
             parse_factory:  "h265parse",
         }),
+        // Motion JPEG — RTP encoding name per RFC 2435
+        "JPEG" => Some(CodecElements {
+            depay_factory: "rtpjpegdepay",
+            parse_factory:  "jpegparse",
+        }),
+        // AV1 — RTP encoding name per RFC 9671
+        "AV1" => Some(CodecElements {
+            depay_factory: "rtpav1depay",
+            parse_factory:  "av1parse",
+        }),
         _ => None,
     }
 }
