@@ -142,6 +142,18 @@ pub(crate) fn build_camera_stream(
             return;
         }
 
+        // Audio pads are intentionally ignored for now (planned for Phase 2).
+        // Checking `media=audio` here avoids spurious "unsupported encoding"
+        // warnings for cameras that stream both video and audio over RTSP.
+        if structure.get::<&str>("media").ok() == Some("audio") {
+            tracing::debug!(
+                camera_id = %cam_id,
+                encoding = structure.get::<&str>("encoding-name").unwrap_or("unknown"),
+                "Audio stream detected — skipped (audio recording planned for Phase 2)",
+            );
+            return;
+        }
+
         let encoding = match structure.get::<&str>("encoding-name") {
             Ok(e) => e.to_owned(),
             Err(_) => return,
