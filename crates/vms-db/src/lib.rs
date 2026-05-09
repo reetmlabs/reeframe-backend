@@ -28,5 +28,7 @@
 
 pub mod crypto;
 pub mod entities;
+pub mod migration;
 
 pub use crypto::Crypto;
+pub use migration::Migrator;
