@@ -15,6 +15,7 @@ vms-sources    = { path = "../vms-sources" }
 vms-engine     = { path = "../vms-engine" }
 vms-api        = { path = "../vms-api" }
 tokio             = { workspace = true }
+salvo             = { workspace = true }
 figment           = { workspace = true }
 serde             = { workspace = true }
 sea-orm           = { workspace = true }

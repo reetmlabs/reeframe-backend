@@ -1,8 +1,14 @@
 mod config;
 
+use std::sync::Arc;
+
+use salvo::conn::TcpListener;
+use salvo::server::Server;
+use salvo::Listener;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
+use vms_api::{routes::build_router, state::AppState};
 use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, SourceRepo};
 use vms_media::{MediaConfig, MediaManager};
 
@@ -81,23 +87,46 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Repository layer ready");
 
     // ── Media Manager ─────────────────────────────────────────────────────────
-    let media_manager = MediaManager::new(MediaConfig {
-        recording_dir:       cfg.media.recording_dir.clone(),
-        chunk_duration_secs: cfg.media.chunk_duration_secs,
-    })
-    .map_err(|e| {
-        tracing::error!(error = %e, "Failed to initialise media manager");
-        anyhow::anyhow!(e)
-    })?;
-
+    let media_manager = Arc::new(
+        MediaManager::new(MediaConfig {
+            recording_dir:       cfg.media.recording_dir.clone(),
+            chunk_duration_secs: cfg.media.chunk_duration_secs,
+        })
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to initialise media manager");
+            anyhow::anyhow!(e)
+        })?,
+    );
     tracing::info!("Media manager ready");
+
+    // ── HTTP API ──────────────────────────────────────────────────────────────
+    let state = AppState {
+        camera_repo,
+        source_repo,
+        dest_repo,
+        media_manager: media_manager.clone(),
+    };
+
+    let router = build_router(state);
+
+    tracing::info!(bind = %cfg.api.bind, "Starting HTTP API server");
+
+    let acceptor = TcpListener::new(cfg.api.bind.clone()).bind().await;
+    let server = Server::new(acceptor);
+    let server_handle = server.handle();
+    let server_task = tokio::spawn(server.serve(router));
+
     tracing::info!("VMS Daemon started — press Ctrl+C or send SIGTERM to stop");
 
     // ── Wait for shutdown signal ───────────────────────────────────────────────
     shutdown_signal().await;
-    tracing::info!("Shutdown signal received");
+    tracing::info!("Shutdown signal received — draining HTTP connections (10 s timeout)");
 
-    // ── Graceful shutdown ─────────────────────────────────────────────────────
+    server_handle.stop_graceful(std::time::Duration::from_secs(10));
+    server_task.await.ok();
+    tracing::info!("HTTP server stopped");
+
+    // ── Graceful shutdown: media pipelines ────────────────────────────────────
     media_manager.shutdown().await.map_err(|e| {
         tracing::error!(error = %e, "Error during media manager shutdown");
         anyhow::anyhow!(e)
@@ -136,7 +165,7 @@ async fn shutdown_signal() {
     }
 }
 
-/// Extract the database type from a connection URL for safe logging.
+/// Extract the database scheme from a connection URL for safe logging.
 /// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.
 fn db_kind(url: &str) -> &str {
     url.split("://").next().unwrap_or("unknown")
