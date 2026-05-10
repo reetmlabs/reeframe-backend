@@ -1,0 +1,58 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        # ── Create service account ─────────────────────────────────────────────
+        if ! getent group onward > /dev/null 2>&1; then
+            groupadd --system onward
+        fi
+
+        if ! getent passwd onward > /dev/null 2>&1; then
+            useradd \
+                --system \
+                --gid onward \
+                --no-create-home \
+                --shell /usr/sbin/nologin \
+                --comment "OneWard VMS daemon" \
+                onward
+        fi
+
+        # ── Create data and config directories ────────────────────────────────
+        install -d -m 0750 -o onward -g onward /var/lib/onward
+        install -d -m 0750 -o onward -g onward /var/lib/onward/recordings
+
+        # Create /etc/onward and a stub env file if neither exists yet.
+        # The stub is root-only (0600) so secrets written into it are not
+        # world-readable.
+        install -d -m 0755 /etc/onward
+        if [ ! -f /etc/onward/env ]; then
+            cat > /etc/onward/env <<'EOF'
+# OneWard VMS environment — loaded by systemd before starting the daemon.
+# Protect this file: chmod 600 /etc/onward/env
+
+# REQUIRED — generate with: openssl rand -base64 32
+# VMS_ENCRYPTION_KEY=
+
+# Optional overrides (built-in defaults shown):
+# VMS_DATABASE__URL=sqlite:///var/lib/onward/onward.db
+# VMS_MEDIA__RECORDING_DIR=/var/lib/onward/recordings
+# VMS_API__BIND=0.0.0.0:8080
+# RUST_LOG=info
+EOF
+            chmod 0600 /etc/onward/env
+        fi
+
+        # ── Enable and start the service ──────────────────────────────────────
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable onward.service
+            # Only start automatically on first install, not on upgrade.
+            if [ -z "$2" ]; then
+                systemctl start onward.service || true
+            fi
+        fi
+        ;;
+esac
+
+exit 0

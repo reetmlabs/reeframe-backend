@@ -1,0 +1,35 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove)
+        # Stop and disable the service; leave data and config intact so an
+        # accidental removal does not destroy recordings.
+        if [ -d /run/systemd/system ]; then
+            systemctl stop    onward.service > /dev/null 2>&1 || true
+            systemctl disable onward.service > /dev/null 2>&1 || true
+            systemctl daemon-reload
+        fi
+        ;;
+
+    purge)
+        # Full removal requested — stop service, remove data, config, and user.
+        if [ -d /run/systemd/system ]; then
+            systemctl stop    onward.service > /dev/null 2>&1 || true
+            systemctl disable onward.service > /dev/null 2>&1 || true
+            systemctl daemon-reload
+        fi
+
+        rm -rf /var/lib/onward
+        rm -rf /etc/onward
+
+        if getent passwd onward > /dev/null 2>&1; then
+            userdel onward
+        fi
+        if getent group onward > /dev/null 2>&1; then
+            groupdel onward
+        fi
+        ;;
+esac
+
+exit 0
