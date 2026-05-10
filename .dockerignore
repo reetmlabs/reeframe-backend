@@ -1,0 +1,16 @@
+# Rust build artefacts — can be several GBs, must never enter build context
+target/
+
+# Version control
+.git/
+.gitignore
+
+# IDE / editor state
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Design docs and test helpers not needed inside the image
+design-notes/
+test_camera_server.py
