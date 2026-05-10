@@ -30,10 +30,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     if cfg.encryption_key.is_empty() {
-        tracing::warn!(
-            "VMS_ENCRYPTION_KEY is not set — credential encryption unavailable. \
+        tracing::error!(
+            "VMS_ENCRYPTION_KEY is not set. \
              Generate one with: openssl rand -base64 32"
         );
+        return Err(anyhow::anyhow!("missing encryption key"));
     }
 
     // ── Database ──────────────────────────────────────────────────────────────
