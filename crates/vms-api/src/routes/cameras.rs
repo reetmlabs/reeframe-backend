@@ -1,13 +1,15 @@
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vms_core::VmsError;
 use vms_db::{
     entities::camera::{self, RingBufferStorage},
     repos::camera::{CreateCamera, UpdateCamera},
 };
 
-use crate::state::AppState;
+use crate::{
+    error::{parse_body, parse_id, ApiError},
+    state::AppState,
+};
 
 // ── Response DTO ──────────────────────────────────────────────────────────────
 
@@ -25,7 +27,7 @@ pub struct CameraDto {
     pub ring_buffer_duration_secs: i32,
     pub ring_buffer_storage: RingBufferStorage,
     pub enabled: bool,
-    /// `true` if a GStreamer recording pipeline is currently active for this camera.
+    /// `true` if a GStreamer recording pipeline is currently active.
     pub recording: bool,
     pub created_at: chrono::DateTime<chrono::FixedOffset>,
     pub updated_at: chrono::DateTime<chrono::FixedOffset>,
@@ -69,8 +71,8 @@ pub struct CreateCameraBody {
     pub enabled: Option<bool>,
 }
 
-/// All fields are optional — only supplied fields are updated.
-/// Setting a nullable field to `null` is not supported in v0.1 (omit to leave unchanged).
+/// All fields optional — only supplied fields are updated.
+/// Clearing a nullable field to `null` is not supported in v0.1 (omit to leave unchanged).
 #[derive(Deserialize)]
 pub struct UpdateCameraBody {
     pub name: Option<String>,
@@ -86,45 +88,14 @@ pub struct UpdateCameraBody {
     pub enabled: Option<bool>,
 }
 
-// ── Error helpers ─────────────────────────────────────────────────────────────
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn err_internal(res: &mut Response, e: &VmsError) {
-    tracing::error!(error = %e, "internal server error");
-    res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-    res.render(Json(serde_json::json!({"error": e.to_string()})));
-}
-
-fn err_not_found(res: &mut Response, msg: &str) {
-    res.status_code(StatusCode::NOT_FOUND);
-    res.render(Json(serde_json::json!({"error": msg})));
-}
-
-fn err_bad_request(res: &mut Response, msg: &str) {
-    res.status_code(StatusCode::BAD_REQUEST);
-    res.render(Json(serde_json::json!({"error": msg})));
-}
-
-fn parse_id(req: &mut Request, res: &mut Response) -> Option<Uuid> {
-    let s: String = req.param("id").unwrap_or_default();
-    match s.parse::<Uuid>() {
-        Ok(id) => Some(id),
-        Err(_) => {
-            err_bad_request(res, "invalid id: expected UUID");
-            None
-        }
-    }
-}
-
-/// Build an authenticated RTSP URL from a base URL and optional credentials.
-/// Injects `user:pass@` immediately after the `rtsp://` scheme prefix.
+/// Inject `user:pass@` into an RTSP URL immediately after the scheme prefix.
 fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>) -> String {
-    match (username, password) {
-        (Some(u), Some(p)) => {
-            if let Some(rest) = base_url.strip_prefix("rtsp://") {
-                return format!("rtsp://{}:{}@{}", u, p, rest);
-            }
+    if let (Some(u), Some(p)) = (username, password) {
+        if let Some(rest) = base_url.strip_prefix("rtsp://") {
+            return format!("rtsp://{}:{}@{}", u, p, rest);
         }
-        _ => {}
     }
     base_url.to_string()
 }
@@ -133,34 +104,28 @@ fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>
 
 /// GET /cameras
 #[handler]
-pub async fn list_cameras(depot: &mut Depot, res: &mut Response) {
+pub async fn list_cameras(depot: &mut Depot) -> Result<Json<Vec<CameraDto>>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    match state.camera_repo.list().await {
-        Ok(cameras) => {
-            let dtos: Vec<CameraDto> = cameras
-                .into_iter()
-                .map(|m| {
-                    let recording = state.media_manager.is_running(m.id);
-                    CameraDto::from_model(m, recording)
-                })
-                .collect();
-            res.render(Json(dtos));
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    let cameras = state.camera_repo.list().await?;
+    let dtos = cameras
+        .into_iter()
+        .map(|m| {
+            let recording = state.media_manager.is_running(m.id);
+            CameraDto::from_model(m, recording)
+        })
+        .collect();
+    Ok(Json(dtos))
 }
 
 /// POST /cameras
 #[handler]
-pub async fn create_camera(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn create_camera(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<Json<CameraDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let body: CreateCameraBody = match req.parse_json().await {
-        Ok(b) => b,
-        Err(e) => {
-            err_bad_request(res, &e.to_string());
-            return;
-        }
-    };
+    let body: CreateCameraBody = parse_body(req).await?;
 
     let input = CreateCamera {
         name: body.name,
@@ -176,43 +141,34 @@ pub async fn create_camera(req: &mut Request, depot: &mut Depot, res: &mut Respo
         enabled: body.enabled.unwrap_or(true),
     };
 
-    match state.camera_repo.create(input).await {
-        Ok(camera) => {
-            res.status_code(StatusCode::CREATED);
-            res.render(Json(CameraDto::from_model(camera, false)));
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    let camera = state.camera_repo.create(input).await?;
+    res.status_code(StatusCode::CREATED);
+    Ok(Json(CameraDto::from_model(camera, false)))
 }
 
-/// GET /cameras/:id
+/// GET /cameras/{id}
 #[handler]
-pub async fn get_camera(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn get_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<CameraDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
-
-    match state.camera_repo.get(id).await {
-        Ok(Some(camera)) => {
-            let recording = state.media_manager.is_running(id);
-            res.render(Json(CameraDto::from_model(camera, recording)));
-        }
-        Ok(None) => err_not_found(res, &format!("camera {id} not found")),
-        Err(e) => err_internal(res, &e),
-    }
+    let id = parse_id(req)?;
+    let camera = state
+        .camera_repo
+        .get(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
+    let recording = state.media_manager.is_running(id);
+    Ok(Json(CameraDto::from_model(camera, recording)))
 }
 
-/// PATCH /cameras/:id
+/// PATCH /cameras/{id}
 #[handler]
-pub async fn update_camera(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn update_camera(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<CameraDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
-    let body: UpdateCameraBody = match req.parse_json().await {
-        Ok(b) => b,
-        Err(e) => {
-            err_bad_request(res, &e.to_string());
-            return;
-        }
-    };
+    let id = parse_id(req)?;
+    let body: UpdateCameraBody = parse_body(req).await?;
 
     let input = UpdateCamera {
         name: body.name,
@@ -228,89 +184,66 @@ pub async fn update_camera(req: &mut Request, depot: &mut Depot, res: &mut Respo
         enabled: body.enabled,
     };
 
-    match state.camera_repo.update(id, input).await {
-        Ok(camera) => {
-            let recording = state.media_manager.is_running(id);
-            res.render(Json(CameraDto::from_model(camera, recording)));
-        }
-        Err(VmsError::CameraNotFound(_)) => {
-            err_not_found(res, &format!("camera {id} not found"))
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    let camera = state.camera_repo.update(id, input).await?;
+    let recording = state.media_manager.is_running(id);
+    Ok(Json(CameraDto::from_model(camera, recording)))
 }
 
-/// DELETE /cameras/:id
+/// DELETE /cameras/{id}
 #[handler]
-pub async fn delete_camera(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn delete_camera(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
+    let id = parse_id(req)?;
 
     if state.media_manager.is_running(id) {
-        if let Err(e) = state.media_manager.stop_camera(id).await {
-            err_internal(res, &e);
-            return;
-        }
+        state.media_manager.stop_camera(id).await?;
     }
 
-    match state.camera_repo.delete(id).await {
-        Ok(()) => {
-            res.status_code(StatusCode::NO_CONTENT);
-        }
-        Err(VmsError::CameraNotFound(_)) => {
-            err_not_found(res, &format!("camera {id} not found"))
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    state.camera_repo.delete(id).await?;
+    res.status_code(StatusCode::NO_CONTENT);
+    Ok(())
 }
 
-/// POST /cameras/:id/recording/start
+/// POST /cameras/{id}/recording/start
 #[handler]
-pub async fn start_recording(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn start_recording(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
+    let id = parse_id(req)?;
 
-    let (camera, password) = match state.camera_repo.get_decrypted(id).await {
-        Ok(Some(pair)) => pair,
-        Ok(None) => {
-            err_not_found(res, &format!("camera {id} not found"));
-            return;
-        }
-        Err(e) => {
-            err_internal(res, &e);
-            return;
-        }
-    };
+    let (camera, password) = state
+        .camera_repo
+        .get_decrypted(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
 
     if !camera.enabled {
-        err_bad_request(res, "camera is disabled");
-        return;
+        return Err(ApiError::bad_request("camera is disabled"));
     }
 
-    let rtsp_url = build_rtsp_url(
-        &camera.rtsp_url,
-        camera.username.as_deref(),
-        password.as_deref(),
-    );
+    let rtsp_url =
+        build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password.as_deref());
 
-    match state.media_manager.start_camera(id, &rtsp_url).await {
-        Ok(()) => {
-            res.render(Json(serde_json::json!({"recording": true})));
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    state.media_manager.start_camera(id, &rtsp_url).await?;
+    Ok(Json(serde_json::json!({"recording": true})))
 }
 
-/// POST /cameras/:id/recording/stop
+/// POST /cameras/{id}/recording/stop
 #[handler]
-pub async fn stop_recording(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn stop_recording(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
-
-    match state.media_manager.stop_camera(id).await {
-        Ok(()) => {
-            res.status_code(StatusCode::NO_CONTENT);
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    let id = parse_id(req)?;
+    state.media_manager.stop_camera(id).await?;
+    res.status_code(StatusCode::NO_CONTENT);
+    Ok(())
 }

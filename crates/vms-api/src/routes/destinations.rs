@@ -1,13 +1,15 @@
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vms_core::VmsError;
 use vms_db::{
     entities::destination::{self, DestinationType},
     repos::destination::{CreateDestination, UpdateDestination},
 };
 
-use crate::state::AppState;
+use crate::{
+    error::{parse_body, parse_id, ApiError},
+    state::AppState,
+};
 
 // ── Credential masking ────────────────────────────────────────────────────────
 
@@ -71,8 +73,7 @@ pub struct CreateDestinationBody {
     pub name: String,
     pub description: Option<String>,
     pub dest_type: DestinationType,
-    /// Adapter-specific config. Credential fields should be provided in plaintext;
-    /// the server encrypts them before storage.
+    /// Credential fields should be plaintext; the server encrypts before storage.
     pub config: Option<serde_json::Value>,
     pub enabled: Option<bool>,
 }
@@ -87,58 +88,25 @@ pub struct UpdateDestinationBody {
     pub enabled: Option<bool>,
 }
 
-// ── Error helpers ─────────────────────────────────────────────────────────────
-
-fn err_internal(res: &mut Response, e: &VmsError) {
-    tracing::error!(error = %e, "internal server error");
-    res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-    res.render(Json(serde_json::json!({"error": e.to_string()})));
-}
-
-fn err_not_found(res: &mut Response, msg: &str) {
-    res.status_code(StatusCode::NOT_FOUND);
-    res.render(Json(serde_json::json!({"error": msg})));
-}
-
-fn err_bad_request(res: &mut Response, msg: &str) {
-    res.status_code(StatusCode::BAD_REQUEST);
-    res.render(Json(serde_json::json!({"error": msg})));
-}
-
-fn parse_id(req: &mut Request, res: &mut Response) -> Option<Uuid> {
-    let s: String = req.param("id").unwrap_or_default();
-    match s.parse::<Uuid>() {
-        Ok(id) => Some(id),
-        Err(_) => {
-            err_bad_request(res, "invalid id: expected UUID");
-            None
-        }
-    }
-}
-
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// GET /destinations
 #[handler]
-pub async fn list_destinations(depot: &mut Depot, res: &mut Response) {
+pub async fn list_destinations(depot: &mut Depot) -> Result<Json<Vec<DestinationDto>>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    match state.dest_repo.list().await {
-        Ok(dests) => res.render(Json(dests.into_iter().map(DestinationDto::from).collect::<Vec<_>>())),
-        Err(e) => err_internal(res, &e),
-    }
+    let dests = state.dest_repo.list().await?;
+    Ok(Json(dests.into_iter().map(DestinationDto::from).collect()))
 }
 
 /// POST /destinations
 #[handler]
-pub async fn create_destination(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn create_destination(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<Json<DestinationDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let body: CreateDestinationBody = match req.parse_json().await {
-        Ok(b) => b,
-        Err(e) => {
-            err_bad_request(res, &e.to_string());
-            return;
-        }
-    };
+    let body: CreateDestinationBody = parse_body(req).await?;
 
     let input = CreateDestination {
         name: body.name,
@@ -148,40 +116,36 @@ pub async fn create_destination(req: &mut Request, depot: &mut Depot, res: &mut 
         enabled: body.enabled.unwrap_or(true),
     };
 
-    match state.dest_repo.create(input).await {
-        Ok(dest) => {
-            res.status_code(StatusCode::CREATED);
-            res.render(Json(DestinationDto::from(dest)));
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    let dest = state.dest_repo.create(input).await?;
+    res.status_code(StatusCode::CREATED);
+    Ok(Json(DestinationDto::from(dest)))
 }
 
-/// GET /destinations/:id
+/// GET /destinations/{id}
 #[handler]
-pub async fn get_destination(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn get_destination(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<DestinationDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
-
-    match state.dest_repo.get(id).await {
-        Ok(Some(dest)) => res.render(Json(DestinationDto::from(dest))),
-        Ok(None) => err_not_found(res, &format!("destination {id} not found")),
-        Err(e) => err_internal(res, &e),
-    }
+    let id = parse_id(req)?;
+    let dest = state
+        .dest_repo
+        .get(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("destination {id} not found")))?;
+    Ok(Json(DestinationDto::from(dest)))
 }
 
-/// PATCH /destinations/:id
+/// PATCH /destinations/{id}
 #[handler]
-pub async fn update_destination(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn update_destination(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<DestinationDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
-    let body: UpdateDestinationBody = match req.parse_json().await {
-        Ok(b) => b,
-        Err(e) => {
-            err_bad_request(res, &e.to_string());
-            return;
-        }
-    };
+    let id = parse_id(req)?;
+    let body: UpdateDestinationBody = parse_body(req).await?;
 
     let input = UpdateDestination {
         name: body.name,
@@ -191,28 +155,20 @@ pub async fn update_destination(req: &mut Request, depot: &mut Depot, res: &mut 
         enabled: body.enabled,
     };
 
-    match state.dest_repo.update(id, input).await {
-        Ok(dest) => res.render(Json(DestinationDto::from(dest))),
-        Err(VmsError::DestinationNotFound(_)) => {
-            err_not_found(res, &format!("destination {id} not found"))
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    let dest = state.dest_repo.update(id, input).await?;
+    Ok(Json(DestinationDto::from(dest)))
 }
 
-/// DELETE /destinations/:id
+/// DELETE /destinations/{id}
 #[handler]
-pub async fn delete_destination(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+pub async fn delete_destination(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
-    let Some(id) = parse_id(req, res) else { return };
-
-    match state.dest_repo.delete(id).await {
-        Ok(()) => {
-            res.status_code(StatusCode::NO_CONTENT);
-        }
-        Err(VmsError::DestinationNotFound(_)) => {
-            err_not_found(res, &format!("destination {id} not found"))
-        }
-        Err(e) => err_internal(res, &e),
-    }
+    let id = parse_id(req)?;
+    state.dest_repo.delete(id).await?;
+    res.status_code(StatusCode::NO_CONTENT);
+    Ok(())
 }
