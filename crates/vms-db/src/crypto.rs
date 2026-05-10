@@ -14,6 +14,7 @@ const NONCE_LEN: usize = 12;
 /// Encrypted values are stored as `enc:v1:<base64(nonce || ciphertext_with_tag)>`.
 /// The 12-byte nonce is randomly generated per field per write; the GCM tag is
 /// appended to the ciphertext by the AEAD implementation.
+#[derive(Clone)]
 pub struct Crypto {
     key: [u8; 32],
 }
