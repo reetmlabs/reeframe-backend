@@ -198,14 +198,14 @@ VMS_* env vars            — highest priority
 
 ## Roadmap
 
-| Release | What ships |
-|---|---|
-| **v0.1.0** ✓ | Camera CRUD, continuous RTSP recording, REST API, Docker, .deb |
-| **v0.2.0** | Pipeline DAG engine — schedule & manual triggers, ring buffer, executor |
-| **v0.3.0** | All 14 action nodes, all 10 transport adapters |
-| **v0.4.0** | External event sources — MQTT, Home Assistant, HTTP webhook, file watcher |
-| **v0.5.0** | Full authenticated API, Prometheus metrics, OTLP tracing, ONNX object detection |
-| **v1.0.0** | ONVIF discovery, arm64 builds, community documentation |
+| Release | What ships                                                                           |
+|---|--------------------------------------------------------------------------------------|
+| **v0.1.0** ✓ | Camera CRUD, continuous RTSP recording, REST API, Docker, .deb                       |
+| **v0.2.0** | Pipeline DAG engine — schedule & manual triggers, ring buffer, executor              |
+| **v0.3.0** | All 14 action nodes, all 10 transport adapters                                       |
+| **v0.4.0** | External event sources — MQTT, Home Assistant, HTTP webhook, file watcher            |
+| **v0.5.0** | Full authenticated API, Prometheus metrics, OTLP tracing/logs, ONNX object detection |
+| **v1.0.0** | ONVIF discovery, arm64 builds, community documentation                               |
 
 Enterprise features (SSO, RBAC, facial recognition, HA clustering, tiered storage) are built on top of the same community engine in a separate private repository. The pipeline DAG, all action nodes, and all transport adapters stay open source forever.
 
