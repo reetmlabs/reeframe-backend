@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">
+  <defs>
+    <!-- Background -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c1221"/>
+      <stop offset="100%" stop-color="#1a2744"/>
+    </linearGradient>
+
+    <!-- Lens fill -->
+    <radialGradient id="lg" cx="38%" cy="38%" r="65%">
+      <stop offset="0%" stop-color="#1e4080"/>
+      <stop offset="100%" stop-color="#091629"/>
+    </radialGradient>
+
+    <!-- Lens glow (stronger) -->
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Node glow (softer) -->
+    <filter id="ng" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="100" height="100" rx="21" fill="url(#bg)"/>
+
+  <!-- ─── EDGES ──────────────────────────────────────────────── -->
+
+  <!-- Tier 1→2: Triggers → Actions (direct, solid) -->
+  <line x1="26" y1="19" x2="21" y2="40"
+        stroke="#38bdf8" stroke-width="1.3" stroke-opacity="0.5" stroke-linecap="round"/>
+  <line x1="73" y1="17" x2="75" y2="40"
+        stroke="#38bdf8" stroke-width="1.3" stroke-opacity="0.5" stroke-linecap="round"/>
+
+  <!-- Tier 1→2: Triggers → Actions (cross, dashed) -->
+  <line x1="29" y1="17" x2="70" y2="40"
+        stroke="#38bdf8" stroke-width="1.0" stroke-opacity="0.22"
+        stroke-dasharray="3,2.5" stroke-linecap="round"/>
+  <line x1="70" y1="16" x2="25" y2="40"
+        stroke="#38bdf8" stroke-width="1.0" stroke-opacity="0.22"
+        stroke-dasharray="3,2.5" stroke-linecap="round"/>
+
+  <!-- Tier 2→lens: Actions → Lens rim -->
+  <line x1="25" y1="46" x2="35" y2="49"
+        stroke="#a78bfa" stroke-width="1.5" stroke-opacity="0.65" stroke-linecap="round"/>
+  <line x1="71" y1="46" x2="65" y2="49"
+        stroke="#a78bfa" stroke-width="1.5" stroke-opacity="0.65" stroke-linecap="round"/>
+
+  <!-- Tier lens→3: Lens rim → Outputs -->
+  <line x1="38" y1="62" x2="26" y2="72"
+        stroke="#34d399" stroke-width="1.5" stroke-opacity="0.6" stroke-linecap="round"/>
+  <line x1="62" y1="62" x2="74" y2="72"
+        stroke="#34d399" stroke-width="1.5" stroke-opacity="0.6" stroke-linecap="round"/>
+
+  <!-- Tier 3→4: Outputs → Destinations (direct) -->
+  <line x1="22" y1="83" x2="31" y2="90"
+        stroke="#34d399" stroke-width="1.2" stroke-opacity="0.45" stroke-linecap="round"/>
+  <line x1="76" y1="83" x2="67" y2="90"
+        stroke="#34d399" stroke-width="1.2" stroke-opacity="0.45" stroke-linecap="round"/>
+
+  <!-- Tier 3→4: Outputs → Destinations (cross, dashed) -->
+  <line x1="25" y1="82" x2="64" y2="90"
+        stroke="#34d399" stroke-width="0.9" stroke-opacity="0.2"
+        stroke-dasharray="2.5,2" stroke-linecap="round"/>
+  <line x1="73" y1="82" x2="35" y2="90"
+        stroke="#34d399" stroke-width="0.9" stroke-opacity="0.2"
+        stroke-dasharray="2.5,2" stroke-linecap="round"/>
+
+  <!-- ─── CAMERA LENS (center) ───────────────────────────────── -->
+
+  <!-- Outer glow ring -->
+  <circle cx="50" cy="50" r="16"
+          fill="url(#lg)" stroke="#38bdf8" stroke-width="2.5"
+          filter="url(#glow)"/>
+  <!-- Iris ring -->
+  <circle cx="50" cy="50" r="10.5"
+          fill="none" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.45"/>
+
+  <!-- Pupil -->
+  <circle cx="50" cy="50" r="5" fill="#38bdf8" opacity="0.95"/>
+  <!-- Specular highlight -->
+  <circle cx="45.5" cy="45.5" r="2" fill="white" opacity="0.42"/>
+
+  <!-- ─── TIER 1 — TRIGGER NODES (top, blue) ─────────────────── -->
+
+  <circle cx="25" cy="13" r="6"
+          fill="#0c1221" stroke="#38bdf8" stroke-width="2" filter="url(#ng)"/>
+  <circle cx="25" cy="13" r="2.2" fill="#38bdf8"/>
+
+  <circle cx="73" cy="11" r="6"
+          fill="#0c1221" stroke="#38bdf8" stroke-width="2" filter="url(#ng)"/>
+  <circle cx="73" cy="11" r="2.2" fill="#38bdf8"/>
+
+  <!-- ─── TIER 2 — ACTION NODES (middle, violet) ──────────────── -->
+
+  <circle cx="20" cy="46" r="5.5"
+          fill="#0c1221" stroke="#a78bfa" stroke-width="2"/>
+  <circle cx="20" cy="46" r="2" fill="#a78bfa" opacity="0.9"/>
+
+  <circle cx="76" cy="46" r="5.5"
+          fill="#0c1221" stroke="#a78bfa" stroke-width="2"/>
+  <circle cx="76" cy="46" r="2" fill="#a78bfa" opacity="0.9"/>
+
+  <!-- ─── TIER 3 — OUTPUT NODES (lower, emerald) ──────────────── -->
+
+  <circle cx="22" cy="78" r="5.5"
+          fill="#0c1221" stroke="#34d399" stroke-width="2"/>
+  <circle cx="22" cy="78" r="2" fill="#34d399" opacity="0.9"/>
+
+  <circle cx="76" cy="78" r="5.5"
+          fill="#0c1221" stroke="#34d399" stroke-width="2"/>
+  <circle cx="76" cy="78" r="2" fill="#34d399" opacity="0.9"/>
+
+  <!-- ─── TIER 4 — DESTINATION DOTS (bottom, cyan) ────────────── -->
+
+  <circle cx="33" cy="91" r="3.5" fill="#0ea5e9" opacity="0.75"/>
+  <circle cx="66" cy="91" r="3.5" fill="#0ea5e9" opacity="0.75"/>
+</svg>
