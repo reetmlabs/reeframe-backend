@@ -31,6 +31,7 @@ pub struct UpdateSource {
 
 // ── Repository ────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct SourceRepo {
     db: DatabaseConnection,
     crypto: Crypto,

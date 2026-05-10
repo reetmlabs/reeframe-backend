@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 vms-core   = { path = "../vms-core" }
 vms-db     = { path = "../vms-db" }
+vms-media  = { path = "../vms-media" }
 vms-engine = { path = "../vms-engine" }
 tokio      = { workspace = true }
 salvo      = { workspace = true }

@@ -42,6 +42,7 @@ pub struct UpdateCamera {
 
 // ── Repository ────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct CameraRepo {
     db: DatabaseConnection,
     crypto: Crypto,

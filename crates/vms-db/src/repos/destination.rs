@@ -31,6 +31,7 @@ pub struct UpdateDestination {
 
 // ── Repository ────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct DestinationRepo {
     db: DatabaseConnection,
     crypto: Crypto,
