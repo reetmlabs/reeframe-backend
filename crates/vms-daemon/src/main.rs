@@ -91,11 +91,50 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     tracing::info!("Media manager ready");
-    tracing::info!("VMS Daemon starting");
+    tracing::info!("VMS Daemon started — press Ctrl+C or send SIGTERM to stop");
+
+    // ── Wait for shutdown signal ───────────────────────────────────────────────
+    shutdown_signal().await;
+    tracing::info!("Shutdown signal received");
+
+    // ── Graceful shutdown ─────────────────────────────────────────────────────
+    media_manager.shutdown().await.map_err(|e| {
+        tracing::error!(error = %e, "Error during media manager shutdown");
+        anyhow::anyhow!(e)
+    })?;
+
+    tracing::info!("VMS Daemon stopped");
     Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Wait for SIGINT (Ctrl+C) or SIGTERM (systemd / docker stop).
+/// Whichever arrives first triggers a clean shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let sigterm = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    // On non-Unix platforms (Windows) only Ctrl+C is available.
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c  => tracing::info!("Received SIGINT"),
+        _ = sigterm => tracing::info!("Received SIGTERM"),
+    }
+}
 
 /// Extract the database type from a connection URL for safe logging.
 /// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.
