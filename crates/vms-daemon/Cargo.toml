@@ -16,6 +16,7 @@ vms-engine     = { path = "../vms-engine" }
 vms-api        = { path = "../vms-api" }
 tokio          = { workspace = true }
 figment        = { workspace = true }
+serde          = { workspace = true }
 tracing        = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow         = { workspace = true }
