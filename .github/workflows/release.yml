@@ -1,0 +1,254 @@
+name: Release
+
+# Triggered by pushing a version tag — e.g. `git tag v0.1.0 && git push --tags`
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/onward-vms-be
+
+jobs:
+  # ── Job 1: compile the release binary ────────────────────────────────────────
+  build:
+    name: Build binary (linux/amd64)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GStreamer dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache the Cargo registry and compiled dependencies between runs.
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --bin vms-daemon
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vms-daemon-linux-amd64
+          path: target/release/vms-daemon
+          retention-days: 1
+
+  # ── Job 2: assemble .tar.gz and .deb ─────────────────────────────────────────
+  package:
+    name: Package (.tar.gz + .deb)
+    runs-on: ubuntu-22.04
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: vms-daemon-linux-amd64
+          path: artifacts/
+
+      - name: Set release version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # ── .tar.gz ──────────────────────────────────────────────────────────────
+      - name: Assemble tar archive
+        run: |
+          STAGING="onward-vms-${VERSION}-linux-amd64"
+          mkdir -p "$STAGING/bin" "$STAGING/systemd"
+
+          install -m 0755 artifacts/vms-daemon         "$STAGING/bin/vms-daemon"
+          install -m 0644 dist/onward.service           "$STAGING/systemd/onward.service"
+
+          # Minimal install instructions inside the archive
+          cat > "$STAGING/README.txt" <<EOF
+          OneWard VMS v${VERSION}
+
+          Install:
+            sudo install -m 0755 bin/vms-daemon /usr/local/bin/vms-daemon
+            sudo install -m 0644 systemd/onward.service /etc/systemd/system/onward.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now onward.service
+
+          Configuration:
+            sudo mkdir -p /etc/onward
+            echo "VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32)" | sudo tee /etc/onward/env
+            sudo chmod 600 /etc/onward/env
+          EOF
+
+          tar -czf "onward-vms-${VERSION}-linux-amd64.tar.gz" "$STAGING"
+
+      # ── .deb ─────────────────────────────────────────────────────────────────
+      - name: Assemble .deb package
+        run: |
+          PKG="onward-vms_${VERSION}_amd64"
+          mkdir -p \
+            "$PKG/DEBIAN" \
+            "$PKG/usr/local/bin" \
+            "$PKG/etc/systemd/system"
+
+          # Maintainer scripts
+          install -m 0755 dist/debian/postinst "$PKG/DEBIAN/postinst"
+          install -m 0755 dist/debian/postrm   "$PKG/DEBIAN/postrm"
+
+          # Inject the real version into the control file
+          sed "s/^Version:.*/Version: ${VERSION}/" dist/debian/control > "$PKG/DEBIAN/control"
+
+          # Payload files
+          install -m 0755 artifacts/vms-daemon  "$PKG/usr/local/bin/vms-daemon"
+          install -m 0644 dist/onward.service   "$PKG/etc/systemd/system/onward.service"
+
+          dpkg-deb --build --root-owner-group "$PKG"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            onward-vms-*.tar.gz
+            onward-vms_*.deb
+          retention-days: 1
+
+  # ── Job 3: build and push Docker image ───────────────────────────────────────
+  docker:
+    name: Docker image (ghcr.io)
+    runs-on: ubuntu-22.04
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Job 4: create GitHub Release and attach artifacts ────────────────────────
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-22.04
+    needs: [package, docker]
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so git-cliff can see all commits
+          fetch-tags: true # tags are the boundary markers for each release
+
+      # Generate the changelog section for this tag only (strips the global header).
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v3
+        id: cliff
+        with:
+          config: cliff.toml
+          args: --current --strip header
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+
+      # Combine the human-written header, the static install block, and the
+      # generated commit changelog into a single release body.
+      #
+      # Before tagging vX.Y.Z: create release-notes/vX.Y.Z.md with a short
+      # summary of the release.  The file is optional — if absent the body
+      # starts directly with the install options.
+      - name: Assemble release notes
+        env:
+          DOCKER_IMAGE: ghcr.io/${{ env.IMAGE }}:${{ github.ref_name }}
+          CHANGELOG: ${{ steps.cliff.outputs.content }}
+        run: |
+          {
+            # Per-version human-written summary (one file per release, never changes).
+            NOTES_FILE="release-notes/${GITHUB_REF_NAME}.md"
+            if [ -f "${NOTES_FILE}" ]; then
+              cat "${NOTES_FILE}"
+              echo ""
+              echo "---"
+              echo ""
+            fi
+
+            echo "## Install options"
+            echo ""
+            echo "**Docker (recommended)**"
+            echo '```bash'
+            echo "docker pull ${DOCKER_IMAGE}"
+            echo '```'
+            echo ""
+            echo "**Debian / Ubuntu (.deb)**"
+            echo '```bash'
+            echo "sudo dpkg -i onward-vms_*_amd64.deb"
+            echo "sudo sh -c 'echo VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32) >> /etc/onward/env'"
+            echo "sudo systemctl start onward.service"
+            echo '```'
+            echo ""
+            echo "**Manual (.tar.gz)**"
+            echo "See \`README.txt\` inside the archive."
+            echo ""
+            echo "---"
+            echo ""
+            echo "## What changed"
+            echo ""
+            printf '%s\n' "${CHANGELOG}"
+          } > RELEASE_NOTES.md
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OneWard VMS ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: release-assets/*
+          fail_on_unmatched_files: true
