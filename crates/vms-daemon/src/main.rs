@@ -1,6 +1,5 @@
 mod config;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -69,7 +68,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Crypto ────────────────────────────────────────────────────────────────
-    let crypto = decode_encryption_key(&cfg.encryption_key)?;
+    let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {
+        tracing::error!(error = %e, "Invalid encryption key");
+        anyhow::anyhow!(e)
+    })?;
     tracing::info!("Encryption key loaded");
 
     // ── Repositories ──────────────────────────────────────────────────────────
@@ -94,22 +96,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Decode the base64 encryption key from config into a `Crypto` instance.
-fn decode_encryption_key(b64: &str) -> anyhow::Result<Crypto> {
-    let bytes = STANDARD
-        .decode(b64)
-        .map_err(|e| anyhow::anyhow!("encryption key is not valid base64: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(anyhow::anyhow!(
-            "encryption key must decode to 32 bytes, got {}",
-            bytes.len()
-        ));
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes);
-    Ok(Crypto::from_key(key))
-}
 
 /// Extract the database type from a connection URL for safe logging.
 /// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.

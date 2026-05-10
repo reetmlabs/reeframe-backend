@@ -40,6 +40,22 @@ impl Crypto {
         Ok(Self { key })
     }
 
+    /// Decode a base64-encoded 32-byte key string (e.g. from a config file or env var).
+    pub fn from_b64(b64: &str) -> Result<Self, VmsError> {
+        let bytes = STANDARD
+            .decode(b64.trim())
+            .map_err(|e| VmsError::Config(format!("encryption key invalid base64: {e}")))?;
+        if bytes.len() != 32 {
+            return Err(VmsError::Config(format!(
+                "encryption key must decode to 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Ok(Self { key })
+    }
+
     /// Construct directly from raw key material (useful in tests).
     pub fn from_key(key: [u8; 32]) -> Self {
         Self { key }
