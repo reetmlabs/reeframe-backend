@@ -1,8 +1,12 @@
 mod config;
 
+use sea_orm::Database;
+use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
+use vms_db::Migrator;
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // ── Observability (minimal — replaced by full OTLP pipeline in step 8c) ──
     fmt()
         .json()
@@ -13,29 +17,60 @@ fn main() {
         .init();
 
     // ── Config ────────────────────────────────────────────────────────────────
-    let cfg = match config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to load configuration");
-            std::process::exit(1);
-        }
-    };
+    let cfg = config::load().map_err(|e| {
+        tracing::error!(error = %e, "Failed to load configuration");
+        anyhow::anyhow!(e)
+    })?;
 
     tracing::info!(
-        db_url       = %cfg.database.url,
-        recording_dir = %cfg.media.recording_dir.display(),
-        api_bind     = %cfg.api.bind,
-        log_level    = %cfg.log_level,
+        db  = db_kind(&cfg.database.url),
+        dir = %cfg.media.recording_dir.display(),
+        api = %cfg.api.bind,
         "Configuration loaded",
     );
 
-    // Warn instead of hard-failing on missing key — later substeps will enforce it.
     if cfg.encryption_key.is_empty() {
         tracing::warn!(
-            "VMS_ENCRYPTION_KEY is not set — credential encryption will be unavailable. \
-             Generate a key with: openssl rand -base64 32"
+            "VMS_ENCRYPTION_KEY is not set — credential encryption unavailable. \
+             Generate one with: openssl rand -base64 32"
         );
     }
 
+    // ── Database ──────────────────────────────────────────────────────────────
+    tracing::info!(db = db_kind(&cfg.database.url), "Connecting to database");
+
+    let db = Database::connect(&cfg.database.url)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Database connection failed");
+            anyhow::anyhow!(e)
+        })?;
+
+    tracing::info!("Database connected");
+
+    // ── Migrations ────────────────────────────────────────────────────────────
+    let pending = Migrator::get_pending_migrations(&db).await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to check pending migrations");
+        anyhow::anyhow!(e)
+    })?;
+
+    if pending.is_empty() {
+        tracing::info!("Database schema is up to date");
+    } else {
+        tracing::info!(count = pending.len(), "Applying migrations");
+        Migrator::up(&db, None).await.map_err(|e| {
+            tracing::error!(error = %e, "Migration failed");
+            anyhow::anyhow!(e)
+        })?;
+        tracing::info!(count = pending.len(), "Migrations applied");
+    }
+
     tracing::info!("VMS Daemon starting");
+    Ok(())
+}
+
+/// Extract the database type from a connection URL for safe logging.
+/// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.
+fn db_kind(url: &str) -> &str {
+    url.split("://").next().unwrap_or("unknown")
 }
