@@ -64,6 +64,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         # SQLite shared library (sqlx-sqlite may bundle its own; kept as fallback)
         libsqlite3-0 \
+        # Used by the HEALTHCHECK instruction below
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root service account
@@ -91,3 +93,9 @@ VOLUME ["/var/lib/onward"]
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/vms-daemon"]
+
+# Docker / container orchestrators poll this to determine whether the daemon
+# is alive and serving traffic.  start_period gives the process time to run
+# migrations and bind the socket before the first check fires.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
