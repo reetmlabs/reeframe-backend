@@ -1,69 +1,93 @@
 # syntax=docker/dockerfile:1
+#
+# Multi-stage build for vms-daemon.
+#
+# cargo-chef is used for workspace-aware dependency caching: the compiled
+# dependency layer is only invalidated when Cargo.lock or a Cargo.toml
+# changes, not on every source edit.
 
-# ============================================================
-# Stage 1: builder
-# ============================================================
-FROM rust:1-bookworm AS builder
+# ── Stage 1: chef base ────────────────────────────────────────────────────────
+# Rust toolchain + GStreamer dev libraries + cargo-chef.
+# Shared by both the planner and builder stages so apt installs are cached once.
+FROM rust:1-bookworm AS chef
 
-# GStreamer dev packages + pkg-config needed by the gstreamer-* crates
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libgstreamer1.0-dev \
         libgstreamer-plugins-base1.0-dev \
-        libgstreamer-plugins-bad1.0-dev \
-        libgstreamer-rtsp-server-1.0-dev \
+        libssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+RUN cargo install cargo-chef --locked
 
 WORKDIR /build
 
-# ------------------------------------------------------------------
-# Dependency-caching layer
-# Copy manifests first, build a stub binary, then replace with real
-# source.  This layer is only invalidated when Cargo.toml / Cargo.lock
-# change, not on every source edit.
-# ------------------------------------------------------------------
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs \
-    && cargo build --release \
-    && rm -f target/release/deps/OneWardBackend* target/release/OneWardBackend
+# ── Stage 2: planner ──────────────────────────────────────────────────────────
+# Computes the dependency recipe for the workspace.
+# Runs fast — no compilation happens here.
+FROM chef AS planner
 
-# Build the real binary
-COPY src ./src
-RUN cargo build --release
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# ============================================================
-# Stage 2: runtime
-# ============================================================
+# ── Stage 3: builder ──────────────────────────────────────────────────────────
+FROM chef AS builder
+
+# Cook workspace dependencies first.
+# This layer is only re-run when recipe.json changes (i.e. Cargo.lock /
+# Cargo.toml changed) — source-only edits skip straight to the next RUN.
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --bin vms-daemon --recipe-path recipe.json
+
+# Build the real binary.
+COPY . .
+RUN cargo build --release --bin vms-daemon
+
+# ── Stage 4: runtime ──────────────────────────────────────────────────────────
+# Minimal Debian image with only the GStreamer runtime plugins needed to
+# receive RTSP streams and write chunked MP4 recordings.
 FROM debian:bookworm-slim AS runtime
 
-# GStreamer runtime + codec plugins
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # GStreamer core
+        # GStreamer core runtime
         libgstreamer1.0-0 \
         libgstreamer-plugins-base1.0-0 \
-        libgstreamer-plugins-bad1.0-0 \
-        libgstreamer-rtsp-server-1.0-0 \
-        # Codec plugins required for RTSP re-streaming & recording
+        # Plugin sets required for RTSP receive + MP4 recording
+        # good:  rtspsrc, rtph26{4,5}depay, rtpjpegdepay, splitmuxsink, mp4mux
         gstreamer1.0-plugins-good \
+        # bad:   h264parse, h265parse, rtpav1depay, av1parse
         gstreamer1.0-plugins-bad \
-        gstreamer1.0-plugins-ugly \
+        # libav: broad codec decoding fallback (avdec_*)
         gstreamer1.0-libav \
-        # TLS + CA certs (SeaORM rustls, outbound RTSP over TLS)
+        # TLS + CA trust store (RTSPS, outbound HTTPS transports)
         libssl3 \
         ca-certificates \
-        # SQLite runtime library
+        # SQLite shared library (sqlx-sqlite may bundle its own; kept as fallback)
         libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Non-root service account
+RUN groupadd --system onward \
+    && useradd --system --gid onward --no-create-home --shell /usr/sbin/nologin onward
 
-COPY --from=builder /build/target/release/OneWardBackend ./oneward-backend
+# Persistent data directory (recordings + SQLite DB)
+RUN mkdir -p /var/lib/onward/recordings \
+    && chown -R onward:onward /var/lib/onward
 
-RUN mkdir -p recordings
+COPY --from=builder /build/target/release/vms-daemon /usr/local/bin/vms-daemon
 
-# HTTP API
-EXPOSE 5800
-# RTSP server
-EXPOSE 8554
+USER onward
 
-CMD ["./oneward-backend"]
+# Default runtime configuration — all values can be overridden via environment
+# variables or a mounted config file at /etc/onward/config.toml.
+ENV VMS_DATABASE__URL="sqlite:///var/lib/onward/onward.db" \
+    VMS_API__BIND="0.0.0.0:8080" \
+    RUST_LOG="info"
+
+# /var/lib/onward holds both the SQLite database and the recordings directory.
+# Mount a named volume here so data survives container restarts.
+VOLUME ["/var/lib/onward"]
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/vms-daemon"]
