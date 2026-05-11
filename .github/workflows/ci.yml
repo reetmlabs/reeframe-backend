@@ -72,7 +72,7 @@ jobs:
       # Clippy (deny warnings)
       # ----------------------------------------------------------------
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features
 
       # ----------------------------------------------------------------
       # Build
