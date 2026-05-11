@@ -47,12 +47,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Database ──────────────────────────────────────────────────────────────
     tracing::info!(db = db_kind(&cfg.database.url), "Connecting to database");
 
-    let db = Database::connect(&cfg.database.url)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Database connection failed");
-            anyhow::anyhow!(e)
-        })?;
+    let db = Database::connect(&cfg.database.url).await.map_err(|e| {
+        tracing::error!(error = %e, "Database connection failed");
+        anyhow::anyhow!(e)
+    })?;
 
     tracing::info!("Database connected");
 
@@ -83,13 +81,13 @@ async fn main() -> anyhow::Result<()> {
     // ── Repositories ──────────────────────────────────────────────────────────
     let camera_repo = CameraRepo::new(db.clone(), crypto.clone());
     let source_repo = SourceRepo::new(db.clone(), crypto.clone());
-    let dest_repo   = DestinationRepo::new(db.clone(), crypto);
+    let dest_repo = DestinationRepo::new(db.clone(), crypto);
     tracing::info!("Repository layer ready");
 
     // ── Media Manager ─────────────────────────────────────────────────────────
     let media_manager = Arc::new(
         MediaManager::new(MediaConfig {
-            recording_dir:       cfg.media.recording_dir.clone(),
+            recording_dir: cfg.media.recording_dir.clone(),
             chunk_duration_secs: cfg.media.chunk_duration_secs,
         })
         .map_err(|e| {
@@ -142,9 +140,7 @@ async fn main() -> anyhow::Result<()> {
 /// Whichever arrives first triggers a clean shutdown.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]

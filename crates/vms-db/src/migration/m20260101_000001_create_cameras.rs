@@ -32,12 +32,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("memory"),
                     )
-                    .col(
-                        ColumnDef::new(Camera::Enabled)
-                            .boolean()
-                            .not_null()
-                            .default(true),
-                    )
+                    .col(ColumnDef::new(Camera::Enabled).boolean().not_null().default(true))
                     .col(
                         ColumnDef::new(Camera::CreatedAt)
                             .timestamp_with_time_zone()
@@ -56,9 +51,7 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Camera::Table).to_owned())
-            .await
+        manager.drop_table(Table::drop().table(Camera::Table).to_owned()).await
     }
 }
 

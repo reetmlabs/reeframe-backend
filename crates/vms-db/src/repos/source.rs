@@ -2,11 +2,11 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrai
 use uuid::Uuid;
 use vms_core::VmsError;
 
+use super::{db_err, decrypt_config, encrypt_config, now};
 use crate::{
     crypto::Crypto,
     entities::source::{self, ActiveModel, SourceType},
 };
-use super::{db_err, decrypt_config, encrypt_config, now};
 
 // ── Input types ───────────────────────────────────────────────────────────────
 
@@ -60,10 +60,7 @@ impl SourceRepo {
 
     /// Returns the row with credential fields in the config still **encrypted**.
     pub async fn get(&self, id: Uuid) -> Result<Option<source::Model>, VmsError> {
-        source::Entity::find_by_id(id)
-            .one(&self.db)
-            .await
-            .map_err(db_err)
+        source::Entity::find_by_id(id).one(&self.db).await.map_err(db_err)
     }
 
     /// Returns the row with credential fields **decrypted** — ready for adapter use.

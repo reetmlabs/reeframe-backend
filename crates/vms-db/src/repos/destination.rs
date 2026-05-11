@@ -2,11 +2,11 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrai
 use uuid::Uuid;
 use vms_core::VmsError;
 
+use super::{db_err, decrypt_config, encrypt_config, now};
 use crate::{
     crypto::Crypto,
     entities::destination::{self, ActiveModel, DestinationType},
 };
-use super::{db_err, decrypt_config, encrypt_config, now};
 
 // ── Input types ───────────────────────────────────────────────────────────────
 
@@ -60,10 +60,7 @@ impl DestinationRepo {
 
     /// Returns the row with credential fields in the config still **encrypted**.
     pub async fn get(&self, id: Uuid) -> Result<Option<destination::Model>, VmsError> {
-        destination::Entity::find_by_id(id)
-            .one(&self.db)
-            .await
-            .map_err(db_err)
+        destination::Entity::find_by_id(id).one(&self.db).await.map_err(db_err)
     }
 
     /// Returns the row with credential fields **decrypted** — ready for adapter use.
@@ -76,17 +73,10 @@ impl DestinationRepo {
     }
 
     pub async fn list(&self) -> Result<Vec<destination::Model>, VmsError> {
-        destination::Entity::find()
-            .all(&self.db)
-            .await
-            .map_err(db_err)
+        destination::Entity::find().all(&self.db).await.map_err(db_err)
     }
 
-    pub async fn update(
-        &self,
-        id: Uuid,
-        input: UpdateDestination,
-    ) -> Result<destination::Model, VmsError> {
+    pub async fn update(&self, id: Uuid, input: UpdateDestination) -> Result<destination::Model, VmsError> {
         let dest = destination::Entity::find_by_id(id)
             .one(&self.db)
             .await

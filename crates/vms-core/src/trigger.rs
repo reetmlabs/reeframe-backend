@@ -279,11 +279,7 @@ impl TriggerContext {
     ///
     /// `params` is the validated JSON body supplied by the API caller and is
     /// forwarded as [`TriggerContext::manual_params`].
-    pub fn for_manual(
-        trigger_id: Uuid,
-        pipeline_id: Uuid,
-        params: Option<serde_json::Value>,
-    ) -> Self {
+    pub fn for_manual(trigger_id: Uuid, pipeline_id: Uuid, params: Option<serde_json::Value>) -> Self {
         Self {
             run_id: None,
             trigger_id,

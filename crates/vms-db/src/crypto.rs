@@ -24,8 +24,8 @@ impl Crypto {
     ///
     /// The variable must be a base64-encoded 32-byte key.
     pub fn from_env() -> Result<Self, VmsError> {
-        let raw = std::env::var("VMS_ENCRYPTION_KEY")
-            .map_err(|_| VmsError::Config("VMS_ENCRYPTION_KEY not set".into()))?;
+        let raw =
+            std::env::var("VMS_ENCRYPTION_KEY").map_err(|_| VmsError::Config("VMS_ENCRYPTION_KEY not set".into()))?;
         let bytes = STANDARD
             .decode(raw.trim())
             .map_err(|e| VmsError::Config(format!("VMS_ENCRYPTION_KEY invalid base64: {e}")))?;
@@ -98,8 +98,7 @@ impl Crypto {
         let plaintext = cipher
             .decrypt(nonce, ct)
             .map_err(|_| VmsError::Encryption("decryption failed — invalid key or corrupted data".into()))?;
-        String::from_utf8(plaintext)
-            .map_err(|e| VmsError::Encryption(format!("plaintext is not valid UTF-8: {e}")))
+        String::from_utf8(plaintext).map_err(|e| VmsError::Encryption(format!("plaintext is not valid UTF-8: {e}")))
     }
 
     /// Returns `true` if `value` is an encrypted string (has the `enc:v1:` prefix).

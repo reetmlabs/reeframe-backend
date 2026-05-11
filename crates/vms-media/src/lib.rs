@@ -21,7 +21,7 @@
 //! The `tee` is the fan-out point for future branches (ring buffer, analytics,
 //! live view) added in later steps.
 
-pub mod manager;
 pub(crate) mod camera_stream;
+pub mod manager;
 
 pub use manager::{MediaConfig, MediaManager};

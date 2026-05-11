@@ -14,18 +14,8 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Pipeline::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(Pipeline::Name).text().not_null())
                     .col(ColumnDef::new(Pipeline::Description).text())
-                    .col(
-                        ColumnDef::new(Pipeline::PipelineType)
-                            .text()
-                            .not_null()
-                            .default("user"),
-                    )
-                    .col(
-                        ColumnDef::new(Pipeline::Enabled)
-                            .boolean()
-                            .not_null()
-                            .default(false),
-                    )
+                    .col(ColumnDef::new(Pipeline::PipelineType).text().not_null().default("user"))
+                    .col(ColumnDef::new(Pipeline::Enabled).boolean().not_null().default(false))
                     .col(ColumnDef::new(Pipeline::CreatedBy).uuid())
                     .col(
                         ColumnDef::new(Pipeline::CreatedAt)

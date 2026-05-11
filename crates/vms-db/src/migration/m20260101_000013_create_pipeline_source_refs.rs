@@ -14,16 +14,8 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PipelineSourceRef::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(PipelineSourceRef::PipelineId)
-                            .uuid()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(PipelineSourceRef::SourceId)
-                            .uuid()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(PipelineSourceRef::PipelineId).uuid().not_null())
+                    .col(ColumnDef::new(PipelineSourceRef::SourceId).uuid().not_null())
                     .primary_key(
                         Index::create()
                             .col(PipelineSourceRef::PipelineId)

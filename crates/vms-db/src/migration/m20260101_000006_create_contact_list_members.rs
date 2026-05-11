@@ -14,16 +14,8 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(ContactListMember::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(ContactListMember::ContactListId)
-                            .uuid()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ContactListMember::ContactId)
-                            .uuid()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(ContactListMember::ContactListId).uuid().not_null())
+                    .col(ColumnDef::new(ContactListMember::ContactId).uuid().not_null())
                     .primary_key(
                         Index::create()
                             .col(ContactListMember::ContactListId)

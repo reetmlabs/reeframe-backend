@@ -15,21 +15,21 @@ fn codec_for(encoding_name: &str) -> Option<CodecElements> {
     match encoding_name.to_uppercase().as_str() {
         "H264" => Some(CodecElements {
             depay_factory: "rtph264depay",
-            parse_factory:  "h264parse",
+            parse_factory: "h264parse",
         }),
         "H265" | "HEVC" => Some(CodecElements {
             depay_factory: "rtph265depay",
-            parse_factory:  "h265parse",
+            parse_factory: "h265parse",
         }),
         // Motion JPEG — RTP encoding name per RFC 2435
         "JPEG" => Some(CodecElements {
             depay_factory: "rtpjpegdepay",
-            parse_factory:  "jpegparse",
+            parse_factory: "jpegparse",
         }),
         // AV1 — RTP encoding name per RFC 9671
         "AV1" => Some(CodecElements {
             depay_factory: "rtpav1depay",
-            parse_factory:  "av1parse",
+            parse_factory: "av1parse",
         }),
         _ => None,
     }
@@ -159,7 +159,9 @@ pub(crate) fn build_camera_stream(
             Err(_) => return,
         };
 
-        let Some(gst_pipeline) = pipeline_weak.upgrade() else { return };
+        let Some(gst_pipeline) = pipeline_weak.upgrade() else {
+            return;
+        };
         let Some(tee) = tee_weak.upgrade() else { return };
 
         let depay_name = format!("cam_{}_depay", cam_id.as_simple());
@@ -301,10 +303,7 @@ pub(crate) fn spawn_monitor(
                 // Fresh timestamp prefix → no chunk filename collisions
                 let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
                 if let Some(splitmux) = gst_pipeline.by_name(&splitmux_name) {
-                    splitmux.set_property(
-                        "location",
-                        recording_location(&recording_dir, camera_id),
-                    );
+                    splitmux.set_property("location", recording_location(&recording_dir, camera_id));
                 }
 
                 tracing::info!(
@@ -346,11 +345,7 @@ pub(crate) fn spawn_monitor(
 pub(crate) fn recording_location(base_dir: &std::path::Path, camera_id: Uuid) -> String {
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     base_dir
-        .join(format!(
-            "cam_{}_{}_chunk%05d.mp4",
-            camera_id.as_simple(),
-            ts
-        ))
+        .join(format!("cam_{}_{}_chunk%05d.mp4", camera_id.as_simple(), ts))
         .to_string_lossy()
         .to_string()
 }

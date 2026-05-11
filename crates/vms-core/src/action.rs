@@ -423,19 +423,19 @@ impl ActionConfig {
     /// discriminator string is needed without re-serializing the full config.
     pub fn action_type_str(&self) -> &'static str {
         match self {
-            Self::Transcode(_)          => "transcode",
-            Self::ExtractClip(_)        => "extract_clip",
-            Self::Snapshot(_)           => "snapshot",
-            Self::MergeClips(_)         => "merge_clips",
-            Self::Compress(_)           => "compress",
-            Self::Encrypt(_)            => "encrypt",
-            Self::Watermark(_)          => "watermark",
+            Self::Transcode(_) => "transcode",
+            Self::ExtractClip(_) => "extract_clip",
+            Self::Snapshot(_) => "snapshot",
+            Self::MergeClips(_) => "merge_clips",
+            Self::Compress(_) => "compress",
+            Self::Encrypt(_) => "encrypt",
+            Self::Watermark(_) => "watermark",
             Self::RenderNotification(_) => "render_notification",
-            Self::Delay(_)              => "delay",
-            Self::PtzMove(_)            => "ptz_move",
-            Self::StartRecording(_)     => "start_recording",
-            Self::StopRecording(_)      => "stop_recording",
-            Self::SetStreamQuality(_)   => "set_stream_quality",
+            Self::Delay(_) => "delay",
+            Self::PtzMove(_) => "ptz_move",
+            Self::StartRecording(_) => "start_recording",
+            Self::StopRecording(_) => "stop_recording",
+            Self::SetStreamQuality(_) => "set_stream_quality",
             Self::TriggerAlarmOutput(_) => "trigger_alarm_output",
         }
     }

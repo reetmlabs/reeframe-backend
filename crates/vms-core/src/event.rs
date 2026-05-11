@@ -78,11 +78,7 @@ impl Event {
     ///
     /// `source_id` and `camera_id` are extracted from `key` automatically;
     /// `occurred_at` is set to [`Utc::now`].
-    pub fn new(
-        key: &TopicKey,
-        event_type: impl Into<String>,
-        payload: serde_json::Value,
-    ) -> Self {
+    pub fn new(key: &TopicKey, event_type: impl Into<String>, payload: serde_json::Value) -> Self {
         let (source_id, camera_id) = match key {
             TopicKey::Source(id) => (Some(*id), None),
             TopicKey::Camera(id) => (None, Some(*id)),

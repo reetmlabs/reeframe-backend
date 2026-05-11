@@ -210,22 +210,16 @@ impl PipelineDag {
     ///
     /// Returns [`VmsError::DagValidation`] with a descriptive message when any
     /// rule is violated.
-    pub fn compile(
-        nodes: Vec<PipelineNode>,
-        edges: Vec<PipelineEdge>,
-    ) -> Result<Self, VmsError> {
+    pub fn compile(nodes: Vec<PipelineNode>, edges: Vec<PipelineEdge>) -> Result<Self, VmsError> {
         if nodes.is_empty() {
             return Err(VmsError::DagValidation("pipeline has no nodes".into()));
         }
 
-        let node_map: HashMap<NodeId, PipelineNode> =
-            nodes.into_iter().map(|n| (n.id, n)).collect();
+        let node_map: HashMap<NodeId, PipelineNode> = nodes.into_iter().map(|n| (n.id, n)).collect();
 
         // ── Build adjacency, parents, and edge-type maps ──────────────────────
-        let mut adjacency: HashMap<NodeId, Vec<NodeId>> =
-            node_map.keys().map(|&id| (id, vec![])).collect();
-        let mut parents: HashMap<NodeId, Vec<NodeId>> =
-            node_map.keys().map(|&id| (id, vec![])).collect();
+        let mut adjacency: HashMap<NodeId, Vec<NodeId>> = node_map.keys().map(|&id| (id, vec![])).collect();
+        let mut parents: HashMap<NodeId, Vec<NodeId>> = node_map.keys().map(|&id| (id, vec![])).collect();
         let mut edge_types: HashMap<(NodeId, NodeId), EdgeType> = HashMap::new();
 
         for edge in &edges {
@@ -241,26 +235,13 @@ impl PipelineDag {
                     edge.to_node_id
                 )));
             }
-            adjacency
-                .entry(edge.from_node_id)
-                .or_default()
-                .push(edge.to_node_id);
-            parents
-                .entry(edge.to_node_id)
-                .or_default()
-                .push(edge.from_node_id);
-            edge_types.insert(
-                (edge.from_node_id, edge.to_node_id),
-                edge.edge_type.clone(),
-            );
+            adjacency.entry(edge.from_node_id).or_default().push(edge.to_node_id);
+            parents.entry(edge.to_node_id).or_default().push(edge.from_node_id);
+            edge_types.insert((edge.from_node_id, edge.to_node_id), edge.edge_type.clone());
         }
 
         // ── Rule 1 & 2: exactly one parentless node, must be trigger_root ────
-        let roots: Vec<NodeId> = node_map
-            .keys()
-            .filter(|id| parents[id].is_empty())
-            .copied()
-            .collect();
+        let roots: Vec<NodeId> = node_map.keys().filter(|id| parents[id].is_empty()).copied().collect();
 
         if roots.len() != 1 {
             return Err(VmsError::DagValidation(format!(
@@ -315,12 +296,12 @@ impl PipelineDag {
                             node.id
                         )));
                     }
-                    let has_true = children.iter().any(|&c| {
-                        edge_types.get(&(node.id, c)) == Some(&EdgeType::TrueBranch)
-                    });
-                    let has_false = children.iter().any(|&c| {
-                        edge_types.get(&(node.id, c)) == Some(&EdgeType::FalseBranch)
-                    });
+                    let has_true = children
+                        .iter()
+                        .any(|&c| edge_types.get(&(node.id, c)) == Some(&EdgeType::TrueBranch));
+                    let has_false = children
+                        .iter()
+                        .any(|&c| edge_types.get(&(node.id, c)) == Some(&EdgeType::FalseBranch));
                     if children.len() != 2 || !has_true || !has_false {
                         return Err(VmsError::DagValidation(format!(
                             "condition node {} must have exactly 2 outgoing edges \
@@ -351,11 +332,7 @@ impl PipelineDag {
     /// `false_branch`.  For all other node types every child is returned.
     ///
     /// Returns an empty `Vec` if `node_id` is not in the graph.
-    pub fn children_to_execute(
-        &self,
-        node_id: NodeId,
-        branch_taken: Option<bool>,
-    ) -> Vec<NodeId> {
+    pub fn children_to_execute(&self, node_id: NodeId, branch_taken: Option<bool>) -> Vec<NodeId> {
         let Some(children) = self.adjacency.get(&node_id) else {
             return vec![];
         };
@@ -389,16 +366,9 @@ fn kahn_topological_sort(
     adjacency: &HashMap<NodeId, Vec<NodeId>>,
     parents: &HashMap<NodeId, Vec<NodeId>>,
 ) -> Result<Vec<NodeId>, VmsError> {
-    let mut in_degree: HashMap<NodeId, usize> = node_map
-        .keys()
-        .map(|&id| (id, parents[&id].len()))
-        .collect();
+    let mut in_degree: HashMap<NodeId, usize> = node_map.keys().map(|&id| (id, parents[&id].len())).collect();
 
-    let mut queue: VecDeque<NodeId> = in_degree
-        .iter()
-        .filter(|(_, &d)| d == 0)
-        .map(|(&id, _)| id)
-        .collect();
+    let mut queue: VecDeque<NodeId> = in_degree.iter().filter(|(_, &d)| d == 0).map(|(&id, _)| id).collect();
 
     let mut order = Vec::with_capacity(node_map.len());
 
@@ -414,9 +384,7 @@ fn kahn_topological_sort(
     }
 
     if order.len() != node_map.len() {
-        return Err(VmsError::DagValidation(
-            "pipeline contains a cycle".into(),
-        ));
+        return Err(VmsError::DagValidation("pipeline contains a cycle".into()));
     }
 
     Ok(order)

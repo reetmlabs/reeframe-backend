@@ -13,11 +13,17 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, message: msg.into() }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: msg.into(),
+        }
     }
 
     pub fn not_found(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::NOT_FOUND, message: msg.into() }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: msg.into(),
+        }
     }
 }
 
@@ -40,9 +46,7 @@ impl From<VmsError> for ApiError {
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
 
-            VmsError::DagValidation(_) | VmsError::ExpressionEval(_) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            VmsError::DagValidation(_) | VmsError::ExpressionEval(_) => StatusCode::UNPROCESSABLE_ENTITY,
 
             VmsError::Serialization(_) => StatusCode::BAD_REQUEST,
 
@@ -62,7 +66,10 @@ impl From<VmsError> for ApiError {
             tracing::error!(error = %e, "internal server error");
         }
 
-        Self { status, message: e.to_string() }
+        Self {
+            status,
+            message: e.to_string(),
+        }
     }
 }
 
@@ -76,9 +83,7 @@ pub(crate) fn parse_id(req: &mut Request) -> Result<Uuid, ApiError> {
 }
 
 /// Deserialize the request body as JSON, returning a 400 on parse failure.
-pub(crate) async fn parse_body<T: serde::de::DeserializeOwned>(
-    req: &mut Request,
-) -> Result<T, ApiError> {
+pub(crate) async fn parse_body<T: serde::de::DeserializeOwned>(req: &mut Request) -> Result<T, ApiError> {
     req.parse_json::<T>()
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))

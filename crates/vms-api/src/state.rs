@@ -8,8 +8,8 @@ use vms_media::MediaManager;
 /// `Arc` (MediaManager) so cloning is cheap.
 #[derive(Clone)]
 pub struct AppState {
-    pub camera_repo:   CameraRepo,
-    pub source_repo:   SourceRepo,
-    pub dest_repo:     DestinationRepo,
+    pub camera_repo: CameraRepo,
+    pub source_repo: SourceRepo,
+    pub dest_repo: DestinationRepo,
     pub media_manager: std::sync::Arc<MediaManager>,
 }

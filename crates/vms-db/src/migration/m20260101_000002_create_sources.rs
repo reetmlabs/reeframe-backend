@@ -16,12 +16,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Source::Description).text())
                     .col(ColumnDef::new(Source::Type).text().not_null())
                     .col(ColumnDef::new(Source::Config).json_binary().not_null())
-                    .col(
-                        ColumnDef::new(Source::Enabled)
-                            .boolean()
-                            .not_null()
-                            .default(true),
-                    )
+                    .col(ColumnDef::new(Source::Enabled).boolean().not_null().default(true))
                     .col(
                         ColumnDef::new(Source::CreatedAt)
                             .timestamp_with_time_zone()
@@ -40,9 +35,7 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Source::Table).to_owned())
-            .await
+        manager.drop_table(Table::drop().table(Source::Table).to_owned()).await
     }
 }
 

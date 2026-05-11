@@ -123,10 +123,7 @@ pub async fn create_destination(
 
 /// GET /destinations/{id}
 #[handler]
-pub async fn get_destination(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<DestinationDto>, ApiError> {
+pub async fn get_destination(req: &mut Request, depot: &mut Depot) -> Result<Json<DestinationDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let dest = state
@@ -139,10 +136,7 @@ pub async fn get_destination(
 
 /// PATCH /destinations/{id}
 #[handler]
-pub async fn update_destination(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<DestinationDto>, ApiError> {
+pub async fn update_destination(req: &mut Request, depot: &mut Depot) -> Result<Json<DestinationDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let body: UpdateDestinationBody = parse_body(req).await?;
@@ -161,11 +155,7 @@ pub async fn update_destination(
 
 /// DELETE /destinations/{id}
 #[handler]
-pub async fn delete_destination(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
+pub async fn delete_destination(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     state.dest_repo.delete(id).await?;

@@ -15,12 +15,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PipelineTrigger::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(PipelineTrigger::Id)
-                            .uuid()
-                            .not_null()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(PipelineTrigger::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(PipelineTrigger::PipelineId).uuid().not_null())
                     .col(ColumnDef::new(PipelineTrigger::TriggerType).text().not_null())
                     .col(ColumnDef::new(PipelineTrigger::SourceId).uuid())

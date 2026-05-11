@@ -57,8 +57,7 @@ impl MediaManager {
     ///
     /// `gstreamer::init()` is idempotent — safe to call multiple times.
     pub fn new(config: MediaConfig) -> Result<Self, VmsError> {
-        gstreamer::init()
-            .map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
+        gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
         Ok(Self {
             config,
@@ -98,7 +97,11 @@ impl MediaManager {
 
         self.cameras.lock().unwrap().insert(
             camera_id,
-            CameraHandle { pipeline, shutdown_tx, task },
+            CameraHandle {
+                pipeline,
+                shutdown_tx,
+                task,
+            },
         );
 
         tracing::info!(camera_id = %camera_id, rtsp_url, "Camera pipeline started");

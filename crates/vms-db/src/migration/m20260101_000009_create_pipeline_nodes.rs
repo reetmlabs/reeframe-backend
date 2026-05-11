@@ -15,12 +15,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PipelineNode::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(PipelineNode::Id)
-                            .uuid()
-                            .not_null()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(PipelineNode::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(PipelineNode::PipelineId).uuid().not_null())
                     .col(ColumnDef::new(PipelineNode::NodeType).text().not_null())
                     .col(ColumnDef::new(PipelineNode::ActionType).text())

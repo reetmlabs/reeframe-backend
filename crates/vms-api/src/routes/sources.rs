@@ -138,10 +138,7 @@ pub async fn get_source(req: &mut Request, depot: &mut Depot) -> Result<Json<Sou
 
 /// PATCH /sources/{id}
 #[handler]
-pub async fn update_source(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<SourceDto>, ApiError> {
+pub async fn update_source(req: &mut Request, depot: &mut Depot) -> Result<Json<SourceDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let body: UpdateSourceBody = parse_body(req).await?;
@@ -160,11 +157,7 @@ pub async fn update_source(
 
 /// DELETE /sources/{id}
 #[handler]
-pub async fn delete_source(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
+pub async fn delete_source(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     state.source_repo.delete(id).await?;

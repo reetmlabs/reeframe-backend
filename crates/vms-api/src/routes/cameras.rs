@@ -162,10 +162,7 @@ pub async fn get_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<Cam
 
 /// PATCH /cameras/{id}
 #[handler]
-pub async fn update_camera(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<CameraDto>, ApiError> {
+pub async fn update_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<CameraDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let body: UpdateCameraBody = parse_body(req).await?;
@@ -191,11 +188,7 @@ pub async fn update_camera(
 
 /// DELETE /cameras/{id}
 #[handler]
-pub async fn delete_camera(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
+pub async fn delete_camera(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
 
@@ -210,10 +203,7 @@ pub async fn delete_camera(
 
 /// POST /cameras/{id}/recording/start
 #[handler]
-pub async fn start_recording(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn start_recording(req: &mut Request, depot: &mut Depot) -> Result<Json<serde_json::Value>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
 
@@ -227,8 +217,7 @@ pub async fn start_recording(
         return Err(ApiError::bad_request("camera is disabled"));
     }
 
-    let rtsp_url =
-        build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password.as_deref());
+    let rtsp_url = build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password.as_deref());
 
     state.media_manager.start_camera(id, &rtsp_url).await?;
     Ok(Json(serde_json::json!({"recording": true})))
@@ -236,11 +225,7 @@ pub async fn start_recording(
 
 /// POST /cameras/{id}/recording/stop
 #[handler]
-pub async fn stop_recording(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
+pub async fn stop_recording(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     state.media_manager.stop_camera(id).await?;
