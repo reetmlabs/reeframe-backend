@@ -52,4 +52,24 @@ impl EventBus {
             })
             .subscribe()
     }
+
+    /// Publish `event` to every active subscriber on `key`.
+    ///
+    /// If no channel exists for `key` (nobody has called [`subscribe`] yet)
+    /// the event is dropped silently — there is nobody to receive it.
+    ///
+    /// If the channel exists but all receivers have been dropped,
+    /// [`broadcast::Sender::send`] returns `Err` and the event is dropped.
+    /// This is logged at TRACE and not treated as an error.
+    ///
+    /// [`subscribe`]: EventBus::subscribe
+    pub fn publish(&self, key: &TopicKey, event: Event) {
+        let Some(sender) = self.channels.get(key) else {
+            return;
+        };
+        match sender.send(event) {
+            Ok(n) => tracing::trace!(topic = %key.topic_string(), receivers = n, "event published"),
+            Err(_) => tracing::trace!(topic = %key.topic_string(), "event dropped — no active receivers"),
+        }
+    }
 }
