@@ -2,3 +2,5 @@
 //              pipeline executor, resource manager, and stat monitor.
 
 pub mod event_bus;
+
+pub use event_bus::{EventBus, DEFAULT_CAPACITY};

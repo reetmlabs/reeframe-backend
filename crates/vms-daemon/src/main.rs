@@ -10,6 +10,7 @@ use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{routes::build_router, state::AppState};
 use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, SourceRepo};
+use vms_engine::EventBus;
 use vms_media::{MediaConfig, MediaManager};
 
 #[tokio::main]
@@ -97,12 +98,17 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Media manager ready");
 
+    // ── Event Bus ─────────────────────────────────────────────────────────────
+    let event_bus = EventBus::new(vms_engine::DEFAULT_CAPACITY);
+    tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
+
     // ── HTTP API ──────────────────────────────────────────────────────────────
     let state = AppState {
         camera_repo,
         source_repo,
         dest_repo,
         media_manager: media_manager.clone(),
+        event_bus,
     };
 
     let router = build_router(state);

@@ -73,3 +73,107 @@ impl EventBus {
         }
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn make_event(key: &TopicKey) -> Event {
+        Event::new(key, "test_event", json!({"x": 1}))
+    }
+
+    // A single subscriber receives the event that was published after it subscribed.
+    #[tokio::test]
+    async fn single_subscriber_receives_published_event() {
+        let bus = EventBus::new(16);
+        let key = TopicKey::System;
+
+        let mut rx = bus.subscribe(&key);
+        bus.publish(&key, make_event(&key));
+
+        let got = rx.recv().await.unwrap();
+        assert_eq!(got.event_type, "test_event");
+    }
+
+    // Two subscribers on the same topic both receive the same event independently.
+    // This proves broadcast semantics: the event is not consumed by the first reader.
+    #[tokio::test]
+    async fn two_subscribers_both_receive_same_event() {
+        let bus = EventBus::new(16);
+        let key = TopicKey::Stat;
+
+        let mut rx1 = bus.subscribe(&key);
+        let mut rx2 = bus.subscribe(&key);
+        bus.publish(&key, make_event(&key));
+
+        assert_eq!(rx1.recv().await.unwrap().event_type, "test_event");
+        assert_eq!(rx2.recv().await.unwrap().event_type, "test_event");
+    }
+
+    // Events published to Camera(A) are invisible to a subscriber on Camera(B)
+    // and on System. Topics are completely isolated.
+    #[tokio::test]
+    async fn different_topics_do_not_cross_pollute() {
+        let bus = EventBus::new(16);
+        let cam_a = TopicKey::Camera(Uuid::new_v4());
+        let cam_b = TopicKey::Camera(Uuid::new_v4());
+        let sys = TopicKey::System;
+
+        let mut rx_a = bus.subscribe(&cam_a);
+        let mut rx_b = bus.subscribe(&cam_b);
+        let mut rx_s = bus.subscribe(&sys);
+
+        bus.publish(&cam_a, make_event(&cam_a));
+
+        // cam_a subscriber got it
+        assert!(rx_a.try_recv().is_ok());
+        // cam_b and system subscribers did not
+        assert!(rx_b.try_recv().is_err());
+        assert!(rx_s.try_recv().is_err());
+    }
+
+    // When a receiver falls behind the ring buffer capacity, it receives
+    // RecvError::Lagged(n) telling it how many messages it missed, then
+    // continues receiving normally on the next call.
+    #[tokio::test]
+    async fn lagged_receiver_reports_lag_then_recovers() {
+        use tokio::sync::broadcast::error::RecvError;
+
+        let bus = EventBus::new(2); // tiny buffer — overflows after 2 unread events
+        let key = TopicKey::Stat;
+
+        let mut rx = bus.subscribe(&key);
+
+        // Publish 4 events without consuming — buffer overflows by 2
+        for _ in 0..4 {
+            bus.publish(&key, make_event(&key));
+        }
+
+        // First recv tells us we lagged
+        match rx.recv().await {
+            Err(RecvError::Lagged(n)) => assert!(n > 0),
+            other => panic!("expected Lagged, got {other:?}"),
+        }
+
+        // After the lag the receiver is still usable and gets the next event
+        assert!(rx.recv().await.is_ok());
+    }
+
+    // Publishing to a topic that has no subscribers is a silent noop.
+    // Crucially, it must NOT create a channel entry in the map — only
+    // subscribe() creates channels.
+    #[tokio::test]
+    async fn publish_before_subscribe_is_noop_and_creates_no_channel() {
+        let bus = EventBus::new(16);
+        let key = TopicKey::Camera(Uuid::new_v4());
+
+        bus.publish(&key, make_event(&key)); // no subscriber yet
+
+        assert!(!bus.channels.contains_key(&key), "publish must not create a channel");
+    }
+}
