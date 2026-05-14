@@ -113,6 +113,23 @@ impl PipelineRepo {
         Ok(())
     }
 
+    // ── Compiled loader ───────────────────────────────────────────────────────
+
+    /// Load and compile a single pipeline by id.
+    ///
+    /// Fetches the pipeline header, nodes, edges, and triggers in four queries,
+    /// then calls `compile_pipeline`. Returns `None` if the pipeline row is gone
+    /// (race between `list_enabled` and this call).
+    pub async fn load_compiled(&self, id: Uuid) -> Result<Option<CompiledPipeline>, VmsError> {
+        let Some(p) = self.get(id).await? else {
+            return Ok(None);
+        };
+        let nodes    = self.load_nodes(id).await?;
+        let edges    = self.load_edges(id).await?;
+        let triggers = self.load_triggers(id).await?;
+        compile_pipeline(&p, nodes, edges, triggers).map(Some)
+    }
+
     // ── Graph loaders ─────────────────────────────────────────────────────────
 
     pub async fn load_nodes(&self, pipeline_id: Uuid) -> Result<Vec<PipelineNode>, VmsError> {

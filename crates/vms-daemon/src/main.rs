@@ -9,8 +9,8 @@ use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{routes::build_router, state::AppState};
-use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, SourceRepo};
-use vms_engine::EventBus;
+use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, SourceRepo};
+use vms_engine::{EventBus, PipelineRegistry};
 use vms_media::{MediaConfig, MediaManager};
 
 #[tokio::main]
@@ -80,9 +80,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Encryption key loaded");
 
     // ── Repositories ──────────────────────────────────────────────────────────
-    let camera_repo = CameraRepo::new(db.clone(), crypto.clone());
-    let source_repo = SourceRepo::new(db.clone(), crypto.clone());
-    let dest_repo = DestinationRepo::new(db.clone(), crypto);
+    let camera_repo   = CameraRepo::new(db.clone(), crypto.clone());
+    let source_repo   = SourceRepo::new(db.clone(), crypto.clone());
+    let dest_repo     = DestinationRepo::new(db.clone(), crypto);
+    let pipeline_repo = PipelineRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
     // ── Media Manager ─────────────────────────────────────────────────────────
@@ -102,13 +103,22 @@ async fn main() -> anyhow::Result<()> {
     let event_bus = EventBus::new(vms_engine::DEFAULT_CAPACITY);
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
 
+    // ── Pipeline Registry ─────────────────────────────────────────────────────
+    let pipeline_registry = PipelineRegistry::new(pipeline_repo.clone());
+    pipeline_registry.load().await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to load pipeline registry");
+        anyhow::anyhow!(e)
+    })?;
+
     // ── HTTP API ──────────────────────────────────────────────────────────────
     let state = AppState {
         camera_repo,
         source_repo,
         dest_repo,
+        pipeline_repo,
         media_manager: media_manager.clone(),
         event_bus,
+        pipeline_registry,
     };
 
     let router = build_router(state);
