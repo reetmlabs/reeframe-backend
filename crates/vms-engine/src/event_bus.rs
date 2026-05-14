@@ -34,4 +34,22 @@ impl EventBus {
             capacity,
         })
     }
+
+    /// Subscribe to a topic, returning a live [`broadcast::Receiver<Event>`].
+    ///
+    /// If no channel exists for `key` yet, one is created now (lazy init).
+    /// The receiver only delivers events published **after** this call —
+    /// there is no history replay.
+    ///
+    /// Multiple callers subscribing to the same key each get an independent
+    /// receiver; all of them receive every subsequent event on that topic.
+    pub fn subscribe(&self, key: &TopicKey) -> broadcast::Receiver<Event> {
+        self.channels
+            .entry(key.clone())
+            .or_insert_with(|| {
+                let (tx, _rx) = broadcast::channel(self.capacity);
+                tx
+            })
+            .subscribe()
+    }
 }
