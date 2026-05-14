@@ -33,4 +33,4 @@ pub mod repos;
 
 pub use crypto::Crypto;
 pub use migration::Migrator;
-pub use repos::{CameraRepo, DestinationRepo, SourceRepo};
+pub use repos::{CameraRepo, DestinationRepo, PipelineRepo, SourceRepo};
