@@ -3,6 +3,8 @@
 
 pub mod event_bus;
 pub mod pipeline_registry;
+pub mod resource_manager;
 
 pub use event_bus::{EventBus, DEFAULT_CAPACITY};
 pub use pipeline_registry::PipelineRegistry;
+pub use resource_manager::ResourceManager;
