@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
 
 use gstreamer::prelude::*;
 
@@ -6,6 +6,8 @@ use uuid::Uuid;
 use vms_core::VmsError;
 
 use crate::camera_stream::{build_camera_stream, spawn_monitor};
+use crate::ring_buffer::RingBuffer;
+use crate::ring_buffer_branch;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -135,6 +137,34 @@ impl MediaManager {
 
         tracing::info!("MediaManager shutdown complete");
         Ok(())
+    }
+
+    /// Attach a ring-buffer appsink branch to a running camera pipeline.
+    ///
+    /// Returns `VmsError::Media` if the camera is not currently running or if
+    /// GStreamer fails to link the new branch.
+    pub fn attach_ring_buffer(
+        &self,
+        camera_id:   Uuid,
+        ring_buffer: Arc<Mutex<RingBuffer>>,
+    ) -> Result<(), VmsError> {
+        let cameras = self.cameras.lock().unwrap();
+        let handle = cameras.get(&camera_id).ok_or_else(|| {
+            VmsError::Media(format!("camera {camera_id} is not running — cannot attach ring buffer"))
+        })?;
+        ring_buffer_branch::attach(&handle.pipeline, camera_id, ring_buffer)
+    }
+
+    /// Detach the ring-buffer branch from a running camera pipeline.
+    ///
+    /// No-op if the camera is not running or has no ring-buffer branch.
+    /// Cleanup is asynchronous — see [`ring_buffer_branch::detach`].
+    pub fn detach_ring_buffer(&self, camera_id: Uuid) -> Result<(), VmsError> {
+        let cameras = self.cameras.lock().unwrap();
+        let Some(handle) = cameras.get(&camera_id) else {
+            return Ok(());
+        };
+        ring_buffer_branch::detach(&handle.pipeline, camera_id)
     }
 
     /// Return `true` if a camera pipeline is currently running.
