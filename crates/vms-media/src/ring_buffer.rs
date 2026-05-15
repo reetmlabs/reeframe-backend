@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use gstreamer::prelude::*;
 use uuid::Uuid;
 use vms_core::{RingBufferMode, VmsError};
 
@@ -10,9 +12,11 @@ use vms_core::{RingBufferMode, VmsError};
 #[derive(Clone)]
 pub struct TimestampedFrame {
     /// Presentation timestamp from the GStreamer pipeline clock.
-    pub pts:  Duration,
+    pub pts:         Duration,
     /// Encoded frame bytes (H.264 / H.265 NAL units as delivered by the appsink).
-    pub data: Arc<[u8]>,
+    pub data:        Arc<[u8]>,
+    /// True when this frame carries no delta dependency (IDR / key frame).
+    pub is_keyframe: bool,
 }
 
 /// Sliding-window buffer of `TimestampedFrame`s bounded by wall-clock duration.
@@ -107,9 +111,9 @@ impl RingBufferManager {
     /// silently falls back to in-memory storage.
     pub fn start(
         &self,
-        camera_id:    Uuid,
+        camera_id:     Uuid,
         duration_secs: u32,
-        mode:         RingBufferMode,
+        mode:          RingBufferMode,
     ) -> Result<(), VmsError> {
         if self.buffers.contains_key(&camera_id) {
             return Ok(());
@@ -153,6 +157,185 @@ impl RingBufferManager {
     pub fn get(&self, camera_id: Uuid) -> Option<Arc<Mutex<RingBuffer>>> {
         self.buffers.get(&camera_id).map(|e| e.clone())
     }
+
+    /// Extract frames around `event_pts` from the ring buffer and mux them into
+    /// an MP4 file in `output_dir`.
+    ///
+    /// Extends the pre-event window by 5 seconds to ensure at least one IDR
+    /// frame is captured, then trims the result to start on the first keyframe
+    /// at or before `event_pts - pre_secs`. The output clip therefore spans
+    /// `[first_keyframe_before_start, event_pts + post_secs]`.
+    ///
+    /// The GStreamer muxer runs in `spawn_blocking` — safe to `.await` from
+    /// async code.
+    pub async fn extract_clip(
+        &self,
+        camera_id:  Uuid,
+        pre_secs:   u32,
+        post_secs:  u32,
+        event_pts:  Duration,
+        output_dir: &Path,
+    ) -> Result<PathBuf, VmsError> {
+        let ring = self.get(camera_id).ok_or_else(|| {
+            VmsError::Media(format!("no ring buffer for camera {camera_id}"))
+        })?;
+
+        // Grab a wider window so we capture an IDR frame before the clip start.
+        const KEYFRAME_SEARCH_SECS: u32 = 5;
+        let frames = {
+            let rb = ring.lock().expect("ring buffer mutex poisoned");
+            rb.extract(pre_secs + KEYFRAME_SEARCH_SECS, post_secs, event_pts)
+        };
+
+        if frames.is_empty() {
+            return Err(VmsError::Media(format!(
+                "ring buffer empty for camera {camera_id} at event PTS {event_pts:?}"
+            )));
+        }
+
+        let frames = align_to_keyframe(frames);
+
+        if frames.is_empty() {
+            return Err(VmsError::Media(format!(
+                "no keyframe found in ring buffer for camera {camera_id}"
+            )));
+        }
+
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| VmsError::Media(format!("create clip dir: {e}")))?;
+
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("clip_{}_{}.mp4", camera_id.as_simple(), ts);
+        let output_path = output_dir.join(&filename);
+
+        let out = output_path.clone();
+        tokio::task::spawn_blocking(move || mux_to_mp4(frames, &out))
+            .await
+            .map_err(|e| VmsError::Media(format!("spawn_blocking clip mux: {e}")))?
+            ?;
+
+        tracing::info!(
+            camera_id = %camera_id,
+            path = %output_path.display(),
+            "Clip extracted"
+        );
+        Ok(output_path)
+    }
+}
+
+// ── Clip extraction helpers ───────────────────────────────────────────────────
+
+/// Trim `frames` to start at the first IDR/keyframe.
+fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame> {
+    if let Some(idx) = frames.iter().position(|f| f.is_keyframe) {
+        frames.drain(..idx);
+    }
+    frames
+}
+
+/// Mux raw H.264 frames into an MP4 file at `output`.
+///
+/// Pipeline: `appsrc → h264parse → mp4mux → filesink`.
+/// PTS values are normalised to start from zero. Blocks until EOS or error.
+fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsError> {
+    gstreamer::init().ok();
+
+    let location = output
+        .to_str()
+        .ok_or_else(|| VmsError::Media("clip output path is not valid UTF-8".into()))?;
+
+    let pipeline = gstreamer::Pipeline::new();
+
+    let appsrc = gstreamer_app::AppSrc::builder()
+        .name("clip_src")
+        .format(gstreamer::Format::Time)
+        .build();
+    appsrc.set_caps(Some(
+        &gstreamer::Caps::builder("video/x-h264")
+            .field("stream-format", "byte-stream")
+            .field("alignment", "au")
+            .build(),
+    ));
+
+    let parse = gstreamer::ElementFactory::make("h264parse")
+        .build()
+        .map_err(|e| VmsError::Media(format!("h264parse: {e}")))?;
+
+    let mux = gstreamer::ElementFactory::make("mp4mux")
+        .build()
+        .map_err(|e| VmsError::Media(format!("mp4mux: {e}")))?;
+
+    let sink = gstreamer::ElementFactory::make("filesink")
+        .property("location", location)
+        .build()
+        .map_err(|e| VmsError::Media(format!("filesink: {e}")))?;
+
+    pipeline
+        .add(&appsrc)
+        .map_err(|e| VmsError::Media(format!("add appsrc: {e}")))?;
+    pipeline
+        .add(&parse)
+        .map_err(|e| VmsError::Media(format!("add h264parse: {e}")))?;
+    pipeline
+        .add(&mux)
+        .map_err(|e| VmsError::Media(format!("add mp4mux: {e}")))?;
+    pipeline
+        .add(&sink)
+        .map_err(|e| VmsError::Media(format!("add filesink: {e}")))?;
+
+    appsrc
+        .link(&parse)
+        .map_err(|e| VmsError::Media(format!("link appsrc→h264parse: {e}")))?;
+    parse
+        .link(&mux)
+        .map_err(|e| VmsError::Media(format!("link h264parse→mp4mux: {e}")))?;
+    mux.link(&sink)
+        .map_err(|e| VmsError::Media(format!("link mp4mux→filesink: {e}")))?;
+
+    pipeline
+        .set_state(gstreamer::State::Playing)
+        .map_err(|e| VmsError::Media(format!("play clip pipeline: {e}")))?;
+
+    let base_pts = frames.first().map(|f| f.pts).unwrap_or(Duration::ZERO);
+
+    for frame in &frames {
+        let normalized = frame.pts.saturating_sub(base_pts);
+        let mut buf = gstreamer::Buffer::from_slice(Arc::clone(&frame.data));
+        {
+            let b = buf.get_mut().expect("unique buffer ownership");
+            b.set_pts(gstreamer::ClockTime::from_nseconds(
+                normalized.as_nanos() as u64,
+            ));
+            if !frame.is_keyframe {
+                b.set_flags(gstreamer::BufferFlags::DELTA_UNIT);
+            }
+        }
+        appsrc
+            .push_buffer(buf)
+            .map_err(|e| VmsError::Media(format!("push frame: {e}")))?;
+    }
+
+    appsrc
+        .end_of_stream()
+        .map_err(|e| VmsError::Media(format!("clip EOS: {e}")))?;
+
+    let bus = pipeline.bus().expect("pipeline has a bus");
+    for msg in bus.iter_timed(gstreamer::ClockTime::from_seconds(60)) {
+        match msg.view() {
+            gstreamer::MessageView::Eos(_) => break,
+            gstreamer::MessageView::Error(err) => {
+                pipeline.set_state(gstreamer::State::Null).ok();
+                return Err(VmsError::Media(format!(
+                    "clip mux error: {}",
+                    err.error()
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    pipeline.set_state(gstreamer::State::Null).ok();
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -163,9 +346,14 @@ mod tests {
 
     fn frame(pts_secs: u64) -> TimestampedFrame {
         TimestampedFrame {
-            pts:  Duration::from_secs(pts_secs),
-            data: Arc::from(vec![pts_secs as u8].as_slice()),
+            pts:         Duration::from_secs(pts_secs),
+            data:        Arc::from(vec![pts_secs as u8].as_slice()),
+            is_keyframe: false,
         }
+    }
+
+    fn keyframe(pts_secs: u64) -> TimestampedFrame {
+        TimestampedFrame { is_keyframe: true, ..frame(pts_secs) }
     }
 
     // Pushing frames that span less than max_duration keeps all of them.
@@ -232,5 +420,31 @@ mod tests {
         let clip = rb.extract(10, 0, Duration::from_secs(2));
         let pts: Vec<u64> = clip.iter().map(|f| f.pts.as_secs()).collect();
         assert_eq!(pts, vec![0, 1, 2]);
+    }
+
+    // align_to_keyframe trims everything before the first IDR frame.
+    #[test]
+    fn align_to_keyframe_trims_leading_delta_frames() {
+        let frames = vec![frame(0), frame(1), keyframe(2), frame(3), frame(4)];
+        let aligned = align_to_keyframe(frames);
+        let pts: Vec<u64> = aligned.iter().map(|f| f.pts.as_secs()).collect();
+        assert_eq!(pts, vec![2, 3, 4]);
+    }
+
+    // align_to_keyframe returns all frames unchanged when the first is already a keyframe.
+    #[test]
+    fn align_to_keyframe_noop_when_already_aligned() {
+        let frames = vec![keyframe(0), frame(1), frame(2)];
+        let aligned = align_to_keyframe(frames);
+        assert_eq!(aligned.len(), 3);
+        assert!(aligned[0].is_keyframe);
+    }
+
+    // align_to_keyframe on a stream with no keyframes returns the original slice.
+    #[test]
+    fn align_to_keyframe_no_keyframe_returns_all() {
+        let frames = vec![frame(0), frame(1), frame(2)];
+        let aligned = align_to_keyframe(frames);
+        assert_eq!(aligned.len(), 3);
     }
 }

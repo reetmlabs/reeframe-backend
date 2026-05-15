@@ -82,6 +82,8 @@ pub fn attach(
                     .map(|t| Duration::from_nanos(t.nseconds()))
                     .unwrap_or(Duration::ZERO);
 
+                let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+
                 let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
                 let data: Arc<[u8]> = Arc::from(map.as_slice());
                 drop(map);
@@ -89,7 +91,7 @@ pub fn attach(
                 ring_buffer
                     .lock()
                     .expect("ring buffer mutex poisoned")
-                    .push(TimestampedFrame { pts, data });
+                    .push(TimestampedFrame { pts, data, is_keyframe });
 
                 Ok(gstreamer::FlowSuccess::Ok)
             })
