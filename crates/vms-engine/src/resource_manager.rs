@@ -7,8 +7,9 @@ use vms_core::{
     resource::{ResourceEntry, ResourceId, ResourceState},
     VmsError,
 };
+use vms_core::RingBufferMode;
 use vms_db::CameraRepo;
-use vms_media::MediaManager;
+use vms_media::{MediaManager, RingBufferManager};
 
 use crate::PipelineRegistry;
 
@@ -18,18 +19,28 @@ use crate::PipelineRegistry;
 /// ref count goes 0 → 1 and stopped when it drops back 1 → 0. This prevents
 /// duplicate GStreamer pipelines or connection pools when multiple VMS pipelines
 /// reference the same camera or destination.
+/// Default ring-buffer duration used when a pipeline requests a ring buffer
+/// but no explicit duration is stored in the camera ref.
+const DEFAULT_RING_BUFFER_SECS: u32 = 30;
+
 pub struct ResourceManager {
-    entries: DashMap<ResourceId, ResourceEntry>,
-    media:   Arc<MediaManager>,
-    cameras: CameraRepo,
+    entries:      DashMap<ResourceId, ResourceEntry>,
+    media:        Arc<MediaManager>,
+    cameras:      CameraRepo,
+    ring_buffers: Arc<RingBufferManager>,
 }
 
 impl ResourceManager {
-    pub fn new(media: Arc<MediaManager>, cameras: CameraRepo) -> Arc<Self> {
+    pub fn new(
+        media:        Arc<MediaManager>,
+        cameras:      CameraRepo,
+        ring_buffers: Arc<RingBufferManager>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             entries: DashMap::new(),
             media,
             cameras,
+            ring_buffers,
         })
     }
 
@@ -164,10 +175,9 @@ impl ResourceManager {
     async fn start(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
             ResourceId::CameraPipeline(cam_id) => self.start_camera(*cam_id).await,
-            ResourceId::RingBuffer(id) => {
-                tracing::debug!(%id, "RingBuffer start — not yet implemented");
-                Ok(())
-            }
+            ResourceId::RingBuffer(cam_id) => self
+                .ring_buffers
+                .start(*cam_id, DEFAULT_RING_BUFFER_SECS, RingBufferMode::Memory),
             ResourceId::Source(id) => {
                 tracing::debug!(%id, "Source start — not yet implemented");
                 Ok(())
@@ -186,10 +196,7 @@ impl ResourceManager {
     async fn stop(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
             ResourceId::CameraPipeline(cam_id) => self.media.stop_camera(*cam_id).await,
-            ResourceId::RingBuffer(id) => {
-                tracing::debug!(%id, "RingBuffer stop — not yet implemented");
-                Ok(())
-            }
+            ResourceId::RingBuffer(cam_id) => self.ring_buffers.stop(*cam_id),
             ResourceId::Source(id) => {
                 tracing::debug!(%id, "Source stop — not yet implemented");
                 Ok(())

@@ -11,7 +11,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{routes::build_router, state::AppState};
 use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, SourceRepo};
 use vms_engine::{EventBus, PipelineRegistry, ResourceManager};
-use vms_media::{MediaConfig, MediaManager};
+use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -99,6 +99,10 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Media manager ready");
 
+    // ── Ring Buffer Manager ───────────────────────────────────────────────────
+    let ring_buffer_manager = RingBufferManager::new(media_manager.clone());
+    tracing::info!("Ring buffer manager ready");
+
     // ── Event Bus ─────────────────────────────────────────────────────────────
     let event_bus = EventBus::new(vms_engine::DEFAULT_CAPACITY);
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
@@ -111,7 +115,11 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     // ── Resource Manager ──────────────────────────────────────────────────────
-    let resource_manager = ResourceManager::new(media_manager.clone(), camera_repo.clone());
+    let resource_manager = ResourceManager::new(
+        media_manager.clone(),
+        camera_repo.clone(),
+        ring_buffer_manager.clone(),
+    );
     resource_manager.recover(&pipeline_registry).await.map_err(|e| {
         tracing::error!(error = %e, "Failed to recover resource manager");
         anyhow::anyhow!(e)
@@ -125,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         dest_repo,
         pipeline_repo,
         media_manager: media_manager.clone(),
+        ring_buffer_manager,
         event_bus,
         pipeline_registry,
         resource_manager,
