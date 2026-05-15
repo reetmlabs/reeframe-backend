@@ -47,7 +47,8 @@ pub use action::{
 };
 
 pub use pipeline::{
-    CompiledPipeline, EdgeType, NodeId, NodeType, PipelineDag, PipelineEdge, PipelineNode, PipelineTrigger,
+    CompiledPipeline, EdgeType, NodeId, NodeType, PipelineCameraRef, PipelineDag, PipelineEdge, PipelineNode,
+    PipelineTrigger,
 };
 
 pub use node::{NodeInput, NodeOutput};

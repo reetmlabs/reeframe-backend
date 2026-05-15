@@ -10,7 +10,7 @@ use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{routes::build_router, state::AppState};
 use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, SourceRepo};
-use vms_engine::{EventBus, PipelineRegistry};
+use vms_engine::{EventBus, PipelineRegistry, ResourceManager};
 use vms_media::{MediaConfig, MediaManager};
 
 #[tokio::main]
@@ -110,6 +110,14 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!(e)
     })?;
 
+    // ── Resource Manager ──────────────────────────────────────────────────────
+    let resource_manager = ResourceManager::new(media_manager.clone(), camera_repo.clone());
+    resource_manager.recover(&pipeline_registry).await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to recover resource manager");
+        anyhow::anyhow!(e)
+    })?;
+    tracing::info!("Resource manager ready");
+
     // ── HTTP API ──────────────────────────────────────────────────────────────
     let state = AppState {
         camera_repo,
@@ -119,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         media_manager: media_manager.clone(),
         event_bus,
         pipeline_registry,
+        resource_manager,
     };
 
     let router = build_router(state);

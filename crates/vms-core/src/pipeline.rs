@@ -144,6 +144,16 @@ pub struct PipelineTrigger {
 
 // ── Compiled forms held in the registry ──────────────────────────────────────
 
+/// Camera resource requirements for one pipeline, loaded from `pipeline_camera_refs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineCameraRef {
+    pub camera_id: Uuid,
+    /// Pipeline has an `extract_clip` node — needs the ring-buffer appsink branch.
+    pub needs_ring_buffer: bool,
+    /// Pipeline has an analytics trigger or action — needs the ONNX appsink branch.
+    pub needs_analytics: bool,
+}
+
 /// A pipeline loaded, validated, and ready for execution.
 ///
 /// Held behind `Arc` inside `ArcSwap<HashMap<Uuid, Arc<CompiledPipeline>>>` in
@@ -162,6 +172,12 @@ pub struct CompiledPipeline {
     pub dag: PipelineDag,
     /// All triggers that can activate this pipeline.
     pub triggers: Vec<PipelineTrigger>,
+    /// Cameras this pipeline references, with per-camera resource flags.
+    /// Used by the Resource Manager to start/stop camera pipelines and branches.
+    pub camera_refs: Vec<PipelineCameraRef>,
+    /// Source adapter UUIDs this pipeline references.
+    /// Used by the Resource Manager to start/stop source adapters.
+    pub source_refs: Vec<Uuid>,
 }
 
 /// Topologically sorted DAG with precomputed adjacency and parent maps.

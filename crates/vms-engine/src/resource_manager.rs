@@ -10,6 +10,8 @@ use vms_core::{
 use vms_db::CameraRepo;
 use vms_media::MediaManager;
 
+use crate::PipelineRegistry;
+
 /// Ref-counted lifecycle coordinator for every shared resource the engine manages.
 ///
 /// Applies the *Minimum Activation Principle*: a resource is started when its
@@ -47,6 +49,35 @@ impl ResourceManager {
             .iter()
             .map(|r| (r.key().clone(), r.value().clone()))
             .collect()
+    }
+
+    // ── Startup recovery ─────────────────────────────────────────────────────
+
+    /// Acquire all resources required by the currently enabled pipelines in `registry`.
+    ///
+    /// Called once at daemon startup after the pipeline registry is loaded.
+    /// Ensures every camera pipeline and source adapter needed by an enabled
+    /// pipeline is running before the trigger evaluator begins firing.
+    pub async fn recover(&self, registry: &PipelineRegistry) -> Result<(), VmsError> {
+        let snapshot = registry.snapshot();
+
+        for pipeline in snapshot.values() {
+            for cam_ref in &pipeline.camera_refs {
+                self.acquire(ResourceId::CameraPipeline(cam_ref.camera_id)).await?;
+                if cam_ref.needs_ring_buffer {
+                    self.acquire(ResourceId::RingBuffer(cam_ref.camera_id)).await?;
+                }
+                if cam_ref.needs_analytics {
+                    self.acquire(ResourceId::AnalyticsBranch(cam_ref.camera_id)).await?;
+                }
+            }
+            for &source_id in &pipeline.source_refs {
+                self.acquire(ResourceId::Source(source_id)).await?;
+            }
+        }
+
+        tracing::info!(pipelines = snapshot.len(), "Resource manager recovery complete");
+        Ok(())
     }
 
     // ── Ref-count mutations ───────────────────────────────────────────────────

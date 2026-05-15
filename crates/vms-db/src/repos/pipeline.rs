@@ -2,13 +2,13 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnectio
 use uuid::Uuid;
 use vms_core::{
     action::{ActionConfig, TransportConfig},
-    pipeline::{CompiledPipeline, PipelineDag, PipelineEdge, PipelineNode, PipelineTrigger},
+    pipeline::{CompiledPipeline, PipelineCameraRef, PipelineDag, PipelineEdge, PipelineNode, PipelineTrigger},
     pipeline::{EdgeType as CoreEdgeType, NodeType as CoreNodeType},
     trigger::{TriggerConfig, TriggerType as CoreTriggerType},
     VmsError,
 };
 
-use crate::entities::{pipeline_edge, pipeline_node, pipeline_trigger};
+use crate::entities::{pipeline_camera_ref, pipeline_edge, pipeline_node, pipeline_source_ref, pipeline_trigger};
 
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
@@ -124,10 +124,39 @@ impl PipelineRepo {
         let Some(p) = self.get(id).await? else {
             return Ok(None);
         };
-        let nodes    = self.load_nodes(id).await?;
-        let edges    = self.load_edges(id).await?;
-        let triggers = self.load_triggers(id).await?;
-        compile_pipeline(&p, nodes, edges, triggers).map(Some)
+        let nodes       = self.load_nodes(id).await?;
+        let edges       = self.load_edges(id).await?;
+        let triggers    = self.load_triggers(id).await?;
+        let camera_refs = self.load_camera_refs(id).await?;
+        let source_refs = self.load_source_refs(id).await?;
+        compile_pipeline(&p, nodes, edges, triggers, camera_refs, source_refs).map(Some)
+    }
+
+    pub async fn load_camera_refs(&self, pipeline_id: Uuid) -> Result<Vec<PipelineCameraRef>, VmsError> {
+        let rows = pipeline_camera_ref::Entity::find()
+            .filter(pipeline_camera_ref::Column::PipelineId.eq(pipeline_id))
+            .all(&self.db)
+            .await
+            .map_err(db_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| PipelineCameraRef {
+                camera_id:         r.camera_id,
+                needs_ring_buffer: r.needs_ring_buffer,
+                needs_analytics:   r.needs_analytics,
+            })
+            .collect())
+    }
+
+    pub async fn load_source_refs(&self, pipeline_id: Uuid) -> Result<Vec<Uuid>, VmsError> {
+        let rows = pipeline_source_ref::Entity::find()
+            .filter(pipeline_source_ref::Column::PipelineId.eq(pipeline_id))
+            .all(&self.db)
+            .await
+            .map_err(db_err)?;
+
+        Ok(rows.into_iter().map(|r| r.source_id).collect())
     }
 
     // ── Graph loaders ─────────────────────────────────────────────────────────
@@ -261,6 +290,8 @@ pub(crate) fn compile_pipeline(
     nodes: Vec<PipelineNode>,
     edges: Vec<PipelineEdge>,
     triggers: Vec<PipelineTrigger>,
+    camera_refs: Vec<PipelineCameraRef>,
+    source_refs: Vec<Uuid>,
 ) -> Result<CompiledPipeline, VmsError> {
     let dag = PipelineDag::compile(nodes, edges)?;
     Ok(CompiledPipeline {
@@ -269,5 +300,7 @@ pub(crate) fn compile_pipeline(
         enabled: p.enabled,
         dag,
         triggers,
+        camera_refs,
+        source_refs,
     })
 }

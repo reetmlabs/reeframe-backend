@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use vms_db::{CameraRepo, DestinationRepo, PipelineRepo, SourceRepo};
-use vms_engine::{EventBus, PipelineRegistry};
+use vms_engine::{EventBus, PipelineRegistry, ResourceManager};
 use vms_media::MediaManager;
 
 /// Shared application state injected into every Salvo handler via `affix-state`.
@@ -18,4 +18,5 @@ pub struct AppState {
     pub media_manager: Arc<MediaManager>,
     pub event_bus: Arc<EventBus>,
     pub pipeline_registry: Arc<PipelineRegistry>,
+    pub resource_manager: Arc<ResourceManager>,
 }
