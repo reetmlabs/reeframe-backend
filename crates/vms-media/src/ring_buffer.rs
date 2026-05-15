@@ -1,6 +1,10 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use dashmap::DashMap;
+use uuid::Uuid;
+use vms_core::{RingBufferMode, VmsError};
 
 /// A single encoded video frame with its presentation timestamp.
 #[derive(Clone)]
@@ -70,6 +74,84 @@ impl RingBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
+    }
+}
+
+// ── RingBufferManager ─────────────────────────────────────────────────────────
+
+/// Manages one [`RingBuffer`] per camera, backed by GStreamer appsink branches.
+///
+/// Each `start` call creates a buffer and attaches an appsink branch to the
+/// camera's live tee via [`MediaManager`]. Each `stop` call detaches the branch
+/// and drops the buffer.
+pub struct RingBufferManager {
+    buffers: DashMap<Uuid, Arc<Mutex<RingBuffer>>>,
+    media:   Arc<crate::MediaManager>,
+}
+
+impl RingBufferManager {
+    pub fn new(media: Arc<crate::MediaManager>) -> Arc<Self> {
+        Arc::new(Self {
+            buffers: DashMap::new(),
+            media,
+        })
+    }
+
+    /// Start buffering frames for `camera_id`.
+    ///
+    /// Creates a [`RingBuffer`] sized to hold `duration_secs` of footage and
+    /// attaches an appsink branch to the camera's live GStreamer tee. If the
+    /// camera is already being buffered this is a no-op.
+    ///
+    /// `mode = Disk` is not yet implemented — it is accepted without error and
+    /// silently falls back to in-memory storage.
+    pub fn start(
+        &self,
+        camera_id:    Uuid,
+        duration_secs: u32,
+        mode:         RingBufferMode,
+    ) -> Result<(), VmsError> {
+        if self.buffers.contains_key(&camera_id) {
+            return Ok(());
+        }
+
+        if mode == RingBufferMode::Disk {
+            tracing::warn!(
+                camera_id = %camera_id,
+                "Disk ring buffer mode is not yet implemented — using memory"
+            );
+        }
+
+        let ring_buffer = Arc::new(Mutex::new(RingBuffer::new(
+            Duration::from_secs(u64::from(duration_secs)),
+        )));
+
+        self.media.attach_ring_buffer(camera_id, ring_buffer.clone())?;
+        self.buffers.insert(camera_id, ring_buffer);
+
+        tracing::info!(camera_id = %camera_id, duration_secs, "Ring buffer started");
+        Ok(())
+    }
+
+    /// Stop buffering frames for `camera_id` and drop the stored frames.
+    ///
+    /// Detaches the appsink branch from the GStreamer tee. No-op if no buffer
+    /// exists for this camera.
+    pub fn stop(&self, camera_id: Uuid) -> Result<(), VmsError> {
+        if self.buffers.remove(&camera_id).is_none() {
+            return Ok(());
+        }
+        self.media.detach_ring_buffer(camera_id)?;
+        tracing::info!(camera_id = %camera_id, "Ring buffer stopped");
+        Ok(())
+    }
+
+    /// Return a handle to the ring buffer for `camera_id`, or `None` if not running.
+    ///
+    /// The caller can lock the buffer to call [`RingBuffer::extract`] for clip
+    /// extraction without going through the manager.
+    pub fn get(&self, camera_id: Uuid) -> Option<Arc<Mutex<RingBuffer>>> {
+        self.buffers.get(&camera_id).map(|e| e.clone())
     }
 }
 

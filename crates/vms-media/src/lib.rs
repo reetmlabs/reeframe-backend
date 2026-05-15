@@ -27,4 +27,4 @@ pub mod ring_buffer;
 pub(crate) mod ring_buffer_branch;
 
 pub use manager::{MediaConfig, MediaManager};
-pub use ring_buffer::{RingBuffer, TimestampedFrame};
+pub use ring_buffer::{RingBuffer, RingBufferManager, TimestampedFrame};

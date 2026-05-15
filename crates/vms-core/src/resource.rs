@@ -14,6 +14,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Where a camera's ring buffer keeps its frames.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RingBufferMode {
+    /// Frames are held in a `VecDeque` in process memory.
+    Memory,
+    /// Frames are written to a rolling temp file on disk.
+    /// Not yet implemented — falls back to `Memory` at runtime.
+    Disk,
+}
+
 /// Uniquely identifies a managed resource tracked by the Resource Manager.
 ///
 /// The variant encodes both the *kind* of resource and the UUID of the entity

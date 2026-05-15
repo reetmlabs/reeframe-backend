@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 vms-core      = { path = "../vms-core" }
 tokio         = { workspace = true }
+dashmap       = { workspace = true }
 gstreamer     = { workspace = true }
 gstreamer-app = { workspace = true }
 gstreamer-video = { workspace = true }

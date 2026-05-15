@@ -33,7 +33,7 @@ pub use error::VmsError;
 
 pub use event::{Event, TopicKey};
 
-pub use resource::{ResourceEntry, ResourceId, ResourceState};
+pub use resource::{ResourceEntry, ResourceId, ResourceState, RingBufferMode};
 
 pub use trigger::{
     CompareOperator, ScheduleMode, StatMetric, SystemSignal, TriggerConfig, TriggerContext, TriggerType,
