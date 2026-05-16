@@ -10,7 +10,7 @@ use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{routes::build_router, state::AppState};
 use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, SourceRepo};
-use vms_engine::{EventBus, PipelineRegistry, ResourceManager};
+use vms_engine::{EventBus, PipelineRegistry, ResourceManager, TriggerEvaluator};
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 
 #[tokio::main]
@@ -126,6 +126,10 @@ async fn main() -> anyhow::Result<()> {
     })?;
     tracing::info!("Resource manager ready");
 
+    // ── Trigger Evaluator ─────────────────────────────────────────────────────
+    let trigger_evaluator = TriggerEvaluator::new(pipeline_registry.clone(), event_bus.clone());
+    tracing::info!("Trigger evaluator ready");
+
     // ── HTTP API ──────────────────────────────────────────────────────────────
     let state = AppState {
         camera_repo,
@@ -137,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         event_bus,
         pipeline_registry,
         resource_manager,
+        trigger_evaluator,
     };
 
     let router = build_router(state);
