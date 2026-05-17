@@ -68,6 +68,9 @@ object_store = { version = "0.11", features = ["aws"] }
 # Scheduling
 tokio-cron-scheduler = "0.13"
 
+# System metrics
+sysinfo = "0.38"
+
 # Concurrency primitives
 dashmap  = "6"
 arc-swap = "1"
