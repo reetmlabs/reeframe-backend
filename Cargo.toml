@@ -36,9 +36,10 @@ sea-orm-migration = { version = "2.0.0-rc.37", features = [
 ] }
 
 # Core types
-uuid   = { version = "1",    features = ["v4", "serde"] }
-chrono = { version = "0.4",  features = ["serde"] }
-bytes  = "1"
+uuid      = { version = "1",   features = ["v4", "serde"] }
+chrono    = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.9"
+bytes     = "1"
 
 # Serialization
 serde      = { version = "1", features = ["derive"] }
