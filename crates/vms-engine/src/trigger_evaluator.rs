@@ -1,15 +1,21 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
-use evalexpr::{eval_boolean_with_context, ContextWithMutableVariables, HashMapContext, Value as EvalValue};
+use evalexpr::{
+    eval_boolean_with_context, ContextWithMutableVariables, HashMapContext, Value as EvalValue,
+};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::Mutex;
+use tokio_cron_scheduler::{Job, JobScheduler};
 use uuid::Uuid;
 use vms_core::{
-    Event, SystemSignal, TopicKey, TriggerConfig, TriggerContext, TriggerType, VmsError,
+    Event, ScheduleMode, SystemSignal, TopicKey, TriggerConfig, TriggerContext, TriggerType,
+    VmsError,
 };
 
-use crate::{EventBus, PipelineRegistry};
+use crate::{time_helpers, EventBus, PipelineRegistry};
 
 /// Evaluates pipeline triggers and dispatches pipeline runs.
 ///
@@ -23,13 +29,19 @@ use crate::{EventBus, PipelineRegistry};
 /// [`fire_pipeline`] is currently a stub — it logs the context and returns.
 /// The real Pipeline Executor is wired in future.
 pub struct TriggerEvaluator {
-    registry:  Arc<PipelineRegistry>,
+    registry: Arc<PipelineRegistry>,
     event_bus: Arc<EventBus>,
+    /// Holds the cron scheduler after `start_schedulers` is called.
+    scheduler: Mutex<Option<JobScheduler>>,
 }
 
 impl TriggerEvaluator {
     pub fn new(registry: Arc<PipelineRegistry>, event_bus: Arc<EventBus>) -> Arc<Self> {
-        Arc::new(Self { registry, event_bus })
+        Arc::new(Self {
+            registry,
+            event_bus,
+            scheduler: Mutex::new(None),
+        })
     }
 
     // ── Manual trigger ────────────────────────────────────────────────────────
@@ -46,7 +58,7 @@ impl TriggerEvaluator {
     pub fn fire_manual(
         &self,
         pipeline_id: Uuid,
-        params:      Option<serde_json::Value>,
+        params: Option<serde_json::Value>,
     ) -> Result<(), VmsError> {
         let pipeline = self
             .registry
@@ -71,6 +83,120 @@ impl TriggerEvaluator {
 
         let ctx = TriggerContext::for_manual(trigger.id, pipeline_id, params);
         self.fire_pipeline(ctx);
+        Ok(())
+    }
+
+    // ── Schedule triggers ─────────────────────────────────────────────────────
+
+    /// Register schedule triggers (cron + interval) for all enabled pipelines
+    /// and start the underlying cron scheduler.
+    ///
+    /// - `Interval` triggers spawn a `tokio::task` that sleeps for
+    ///   `interval_secs` and fires [`fire_pipeline`] on each tick.
+    /// - `Cron` triggers are registered with `tokio-cron-scheduler`, which
+    ///   fires [`fire_pipeline`] on every matching tick. IANA timezone strings
+    ///   are parsed via `chrono-tz`; an unknown timezone falls back to UTC with
+    ///   a warning.
+    ///
+    /// The cron scheduler is stored on the struct and kept alive for the
+    /// lifetime of the `TriggerEvaluator`. Call once after `recover`.
+    pub async fn start_schedulers(self: Arc<Self>) -> Result<(), VmsError> {
+        let snapshot = self.registry.snapshot();
+
+        let scheduler = JobScheduler::new()
+            .await
+            .map_err(|e| VmsError::Config(format!("scheduler init: {e}")))?;
+
+        let mut cron_job_count: usize = 0;
+
+        for pipeline in snapshot.values() {
+            if !pipeline.enabled {
+                continue;
+            }
+            for trigger in &pipeline.triggers {
+                if !trigger.enabled {
+                    continue;
+                }
+                let TriggerConfig::Schedule { mode, timezone } = &trigger.config else {
+                    continue;
+                };
+
+                let pipeline_id = pipeline.id;
+                let trigger_id = trigger.id;
+
+                match mode {
+                    // ── Interval ──────────────────────────────────────────────
+                    ScheduleMode::Interval { interval_secs } => {
+                        let secs = *interval_secs;
+                        let ev = self.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(Duration::from_secs(secs)).await;
+                                ev.fire_pipeline(TriggerContext::for_schedule(
+                                    trigger_id,
+                                    pipeline_id,
+                                ));
+                            }
+                        });
+                        tracing::debug!(
+                            %pipeline_id, %trigger_id, interval_secs,
+                            "Interval trigger scheduled"
+                        );
+                    }
+
+                    // ── Cron ──────────────────────────────────────────────────
+                    ScheduleMode::Cron { expression } => {
+                                        let tz = time_helpers::parse_iana_tz(timezone);
+
+                        let expr = time_helpers::normalize_cron(expression);
+                        let ev = self.clone();
+
+                        let job = Job::new_async_tz(expr.clone(), tz, move |_id, _sched| {
+                            let ev = ev.clone();
+                            Box::pin(async move {
+                                ev.fire_pipeline(TriggerContext::for_schedule(
+                                    trigger_id,
+                                    pipeline_id,
+                                ));
+                            })
+                        })
+                        .map_err(|e| {
+                            VmsError::Config(format!(
+                                "invalid cron expression '{expression}' for pipeline \
+                                 {pipeline_id}: {e}"
+                            ))
+                        })?;
+
+                        scheduler
+                            .add(job)
+                            .await
+                            .map_err(|e| VmsError::Config(format!("add cron job: {e}")))?;
+
+                        cron_job_count += 1;
+                        tracing::debug!(
+                            %pipeline_id, %trigger_id,
+                            expression = %expr,
+                            timezone   = %timezone,
+                            "Cron trigger scheduled"
+                        );
+                    }
+                }
+            }
+        }
+
+        if cron_job_count > 0 {
+            scheduler
+                .start()
+                .await
+                .map_err(|e| VmsError::Config(format!("start cron scheduler: {e}")))?;
+        }
+
+        *self.scheduler.lock().await = Some(scheduler);
+
+        tracing::info!(
+            cron_jobs = cron_job_count,
+            "Trigger evaluator schedulers started"
+        );
         Ok(())
     }
 
@@ -132,7 +258,11 @@ impl TriggerEvaluator {
                     match rx.recv().await {
                         Ok(event) => ev.evaluate_event(&event),
                         Err(RecvError::Lagged(n)) => {
-                            tracing::warn!(missed = n, topic = "system/vms", "event listener lagged");
+                            tracing::warn!(
+                                missed = n,
+                                topic = "system/vms",
+                                "event listener lagged"
+                            );
                         }
                         Err(RecvError::Closed) => break,
                     }
@@ -196,7 +326,10 @@ impl TriggerEvaluator {
                     continue;
                 }
                 match &trigger.config {
-                    TriggerConfig::Event { filter, duration_secs } => {
+                    TriggerConfig::Event {
+                        filter,
+                        duration_secs,
+                    } => {
                         // Scope: if trigger is bound to a source or camera, verify the event matches.
                         if let Some(src_id) = trigger.source_id {
                             if event.source_id != Some(src_id) {
@@ -228,17 +361,17 @@ impl TriggerEvaluator {
                         }
 
                         self.fire_pipeline(TriggerContext {
-                            run_id:        None,
-                            trigger_id:    trigger.id,
-                            pipeline_id:   pipeline.id,
-                            fired_at:      Utc::now(),
-                            source_id:     event.source_id,
-                            camera_id:     event.camera_id,
-                            camera_name:   None,
+                            run_id: None,
+                            trigger_id: trigger.id,
+                            pipeline_id: pipeline.id,
+                            fired_at: Utc::now(),
+                            source_id: event.source_id,
+                            camera_id: event.camera_id,
+                            camera_name: None,
                             event_payload: Some(event.payload.clone()),
                             manual_params: None,
                             duration_secs: *duration_secs,
-                            trigger_type:  TriggerType::Event,
+                            trigger_type: TriggerType::Event,
                         });
                     }
 
@@ -255,17 +388,17 @@ impl TriggerEvaluator {
                         }
 
                         self.fire_pipeline(TriggerContext {
-                            run_id:        None,
-                            trigger_id:    trigger.id,
-                            pipeline_id:   pipeline.id,
-                            fired_at:      Utc::now(),
-                            source_id:     None,
-                            camera_id:     event.camera_id,
-                            camera_name:   None,
+                            run_id: None,
+                            trigger_id: trigger.id,
+                            pipeline_id: pipeline.id,
+                            fired_at: Utc::now(),
+                            source_id: None,
+                            camera_id: event.camera_id,
+                            camera_name: None,
                             event_payload: Some(event.payload.clone()),
                             manual_params: None,
                             duration_secs: None,
-                            trigger_type:  TriggerType::System,
+                            trigger_type: TriggerType::System,
                         });
                     }
 
@@ -332,9 +465,9 @@ fn build_event_context(event: &Event) -> HashMapContext {
 /// Map a [`SystemSignal`] to the `event_type` string published on the bus.
 fn signal_to_event_type(signal: &SystemSignal) -> &'static str {
     match signal {
-        SystemSignal::ChunkFinished    => "chunk_finished",
+        SystemSignal::ChunkFinished => "chunk_finished",
         SystemSignal::FeedDisconnected => "feed_disconnected",
-        SystemSignal::FeedReconnected  => "feed_reconnected",
+        SystemSignal::FeedReconnected => "feed_reconnected",
         SystemSignal::RecordingStarted => "recording_started",
         SystemSignal::RecordingStopped => "recording_stopped",
     }
@@ -349,9 +482,9 @@ mod tests {
 
     fn make_event(event_type: &str, payload: serde_json::Value) -> Event {
         Event {
-            topic:      "camera/test/event".into(),
-            source_id:  None,
-            camera_id:  Some(Uuid::new_v4()),
+            topic: "camera/test/event".into(),
+            source_id: None,
+            camera_id: Some(Uuid::new_v4()),
             event_type: event_type.into(),
             payload,
             occurred_at: Utc::now(),
@@ -382,8 +515,7 @@ mod tests {
             json!({"label": "car", "confidence": 0.7}),
         );
         let ctx = build_event_context(&event);
-        let result =
-            eval_boolean_with_context(r#"event.label == "person""#, &ctx);
+        let result = eval_boolean_with_context(r#"event.label == "person""#, &ctx);
         assert_eq!(result, Ok(false));
     }
 
