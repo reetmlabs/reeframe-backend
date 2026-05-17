@@ -14,7 +14,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(RunNodeResult::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(RunNodeResult::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(RunNodeResult::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(RunNodeResult::RunId).uuid().not_null())
                     .col(ColumnDef::new(RunNodeResult::NodeId).uuid().not_null())
                     .col(
@@ -25,7 +30,11 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(RunNodeResult::StartedAt).timestamp_with_time_zone())
                     .col(ColumnDef::new(RunNodeResult::CompletedAt).timestamp_with_time_zone())
-                    .col(ColumnDef::new(RunNodeResult::Output).json_binary().not_null())
+                    .col(
+                        ColumnDef::new(RunNodeResult::Output)
+                            .json_binary()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(RunNodeResult::Error).text())
                     .foreign_key(
                         ForeignKey::create()

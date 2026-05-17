@@ -1,14 +1,21 @@
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+};
 use uuid::Uuid;
 use vms_core::{
     action::{ActionConfig, TransportConfig},
-    pipeline::{CompiledPipeline, PipelineCameraRef, PipelineDag, PipelineEdge, PipelineNode, PipelineTrigger},
+    pipeline::{
+        CompiledPipeline, PipelineCameraRef, PipelineDag, PipelineEdge, PipelineNode,
+        PipelineTrigger,
+    },
     pipeline::{EdgeType as CoreEdgeType, NodeType as CoreNodeType},
     trigger::{TriggerConfig, TriggerType as CoreTriggerType},
     VmsError,
 };
 
-use crate::entities::{pipeline_camera_ref, pipeline_edge, pipeline_node, pipeline_source_ref, pipeline_trigger};
+use crate::entities::{
+    pipeline_camera_ref, pipeline_edge, pipeline_node, pipeline_source_ref, pipeline_trigger,
+};
 
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
@@ -124,15 +131,18 @@ impl PipelineRepo {
         let Some(p) = self.get(id).await? else {
             return Ok(None);
         };
-        let nodes       = self.load_nodes(id).await?;
-        let edges       = self.load_edges(id).await?;
-        let triggers    = self.load_triggers(id).await?;
+        let nodes = self.load_nodes(id).await?;
+        let edges = self.load_edges(id).await?;
+        let triggers = self.load_triggers(id).await?;
         let camera_refs = self.load_camera_refs(id).await?;
         let source_refs = self.load_source_refs(id).await?;
         compile_pipeline(&p, nodes, edges, triggers, camera_refs, source_refs).map(Some)
     }
 
-    pub async fn load_camera_refs(&self, pipeline_id: Uuid) -> Result<Vec<PipelineCameraRef>, VmsError> {
+    pub async fn load_camera_refs(
+        &self,
+        pipeline_id: Uuid,
+    ) -> Result<Vec<PipelineCameraRef>, VmsError> {
         let rows = pipeline_camera_ref::Entity::find()
             .filter(pipeline_camera_ref::Column::PipelineId.eq(pipeline_id))
             .all(&self.db)
@@ -142,9 +152,9 @@ impl PipelineRepo {
         Ok(rows
             .into_iter()
             .map(|r| PipelineCameraRef {
-                camera_id:         r.camera_id,
+                camera_id: r.camera_id,
                 needs_ring_buffer: r.needs_ring_buffer,
-                needs_analytics:   r.needs_analytics,
+                needs_analytics: r.needs_analytics,
             })
             .collect())
     }
@@ -198,28 +208,32 @@ fn node_from_db(m: pipeline_node::Model) -> Result<PipelineNode, VmsError> {
     use pipeline_node::NodeType as Db;
 
     let node_type = match m.node_type {
-        Db::TriggerRoot   => CoreNodeType::TriggerRoot,
-        Db::Action        => CoreNodeType::Action,
+        Db::TriggerRoot => CoreNodeType::TriggerRoot,
+        Db::Action => CoreNodeType::Action,
         Db::DeviceControl => CoreNodeType::DeviceControl,
-        Db::Transport     => CoreNodeType::Transport,
-        Db::Fork          => CoreNodeType::Fork,
-        Db::Condition     => CoreNodeType::Condition,
+        Db::Transport => CoreNodeType::Transport,
+        Db::Fork => CoreNodeType::Fork,
+        Db::Condition => CoreNodeType::Condition,
     };
 
     // The config JSON column stores different payloads depending on node_type.
     let (action_config, transport_config, condition_expr) = match node_type {
         CoreNodeType::Action | CoreNodeType::DeviceControl => {
-            let ac = serde_json::from_value::<ActionConfig>(m.config)
-                .map_err(|e| VmsError::Serialization(format!("node {}: action_config: {e}", m.id)))?;
+            let ac = serde_json::from_value::<ActionConfig>(m.config).map_err(|e| {
+                VmsError::Serialization(format!("node {}: action_config: {e}", m.id))
+            })?;
             (Some(ac), None, None)
         }
         CoreNodeType::Transport => {
-            let tc = serde_json::from_value::<TransportConfig>(m.config)
-                .map_err(|e| VmsError::Serialization(format!("node {}: transport_config: {e}", m.id)))?;
+            let tc = serde_json::from_value::<TransportConfig>(m.config).map_err(|e| {
+                VmsError::Serialization(format!("node {}: transport_config: {e}", m.id))
+            })?;
             (None, Some(tc), None)
         }
         CoreNodeType::Condition => {
-            let expr = m.config.get("condition_expr")
+            let expr = m
+                .config
+                .get("condition_expr")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned);
             (None, None, expr)
@@ -246,8 +260,8 @@ fn edge_from_db(m: pipeline_edge::Model) -> PipelineEdge {
     use pipeline_edge::EdgeType as Db;
 
     let edge_type = match m.edge_type {
-        Db::Default     => CoreEdgeType::Default,
-        Db::TrueBranch  => CoreEdgeType::TrueBranch,
+        Db::Default => CoreEdgeType::Default,
+        Db::TrueBranch => CoreEdgeType::TrueBranch,
         Db::FalseBranch => CoreEdgeType::FalseBranch,
     };
 
@@ -265,10 +279,10 @@ fn trigger_from_db(m: pipeline_trigger::Model) -> Result<PipelineTrigger, VmsErr
 
     let trigger_type = match m.trigger_type {
         Db::Schedule => CoreTriggerType::Schedule,
-        Db::Event    => CoreTriggerType::Event,
-        Db::System   => CoreTriggerType::System,
-        Db::Manual   => CoreTriggerType::Manual,
-        Db::Stat     => CoreTriggerType::Stat,
+        Db::Event => CoreTriggerType::Event,
+        Db::System => CoreTriggerType::System,
+        Db::Manual => CoreTriggerType::Manual,
+        Db::Stat => CoreTriggerType::Stat,
     };
 
     let config = serde_json::from_value::<TriggerConfig>(m.config)

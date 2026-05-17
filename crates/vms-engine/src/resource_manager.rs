@@ -3,11 +3,11 @@ use std::sync::Arc;
 use chrono::Utc;
 use dashmap::DashMap;
 use uuid::Uuid;
+use vms_core::RingBufferMode;
 use vms_core::{
     resource::{ResourceEntry, ResourceId, ResourceState},
     VmsError,
 };
-use vms_core::RingBufferMode;
 use vms_db::CameraRepo;
 use vms_media::{MediaManager, RingBufferManager};
 
@@ -24,16 +24,16 @@ use crate::PipelineRegistry;
 const DEFAULT_RING_BUFFER_SECS: u32 = 30;
 
 pub struct ResourceManager {
-    entries:      DashMap<ResourceId, ResourceEntry>,
-    media:        Arc<MediaManager>,
-    cameras:      CameraRepo,
+    entries: DashMap<ResourceId, ResourceEntry>,
+    media: Arc<MediaManager>,
+    cameras: CameraRepo,
     ring_buffers: Arc<RingBufferManager>,
 }
 
 impl ResourceManager {
     pub fn new(
-        media:        Arc<MediaManager>,
-        cameras:      CameraRepo,
+        media: Arc<MediaManager>,
+        cameras: CameraRepo,
         ring_buffers: Arc<RingBufferManager>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -74,12 +74,15 @@ impl ResourceManager {
 
         for pipeline in snapshot.values() {
             for cam_ref in &pipeline.camera_refs {
-                self.acquire(ResourceId::CameraPipeline(cam_ref.camera_id)).await?;
+                self.acquire(ResourceId::CameraPipeline(cam_ref.camera_id))
+                    .await?;
                 if cam_ref.needs_ring_buffer {
-                    self.acquire(ResourceId::RingBuffer(cam_ref.camera_id)).await?;
+                    self.acquire(ResourceId::RingBuffer(cam_ref.camera_id))
+                        .await?;
                 }
                 if cam_ref.needs_analytics {
-                    self.acquire(ResourceId::AnalyticsBranch(cam_ref.camera_id)).await?;
+                    self.acquire(ResourceId::AnalyticsBranch(cam_ref.camera_id))
+                        .await?;
                 }
             }
             for &source_id in &pipeline.source_refs {
@@ -87,7 +90,10 @@ impl ResourceManager {
             }
         }
 
-        tracing::info!(pipelines = snapshot.len(), "Resource manager recovery complete");
+        tracing::info!(
+            pipelines = snapshot.len(),
+            "Resource manager recovery complete"
+        );
         Ok(())
     }
 
@@ -175,9 +181,10 @@ impl ResourceManager {
     async fn start(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
             ResourceId::CameraPipeline(cam_id) => self.start_camera(*cam_id).await,
-            ResourceId::RingBuffer(cam_id) => self
-                .ring_buffers
-                .start(*cam_id, DEFAULT_RING_BUFFER_SECS, RingBufferMode::Memory),
+            ResourceId::RingBuffer(cam_id) => {
+                self.ring_buffers
+                    .start(*cam_id, DEFAULT_RING_BUFFER_SECS, RingBufferMode::Memory)
+            }
             ResourceId::Source(id) => {
                 tracing::debug!(%id, "Source start — not yet implemented");
                 Ok(())

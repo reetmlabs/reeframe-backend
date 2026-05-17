@@ -54,7 +54,11 @@ impl CameraRepo {
     }
 
     pub async fn create(&self, input: CreateCamera) -> Result<camera::Model, VmsError> {
-        let password_enc = input.password.as_deref().map(|p| self.crypto.encrypt(p)).transpose()?;
+        let password_enc = input
+            .password
+            .as_deref()
+            .map(|p| self.crypto.encrypt(p))
+            .transpose()?;
 
         let ts = now();
         let model = ActiveModel {
@@ -79,13 +83,19 @@ impl CameraRepo {
     /// Returns the camera row with `password_enc` still encrypted.
     /// Callers that need the plaintext password should use [`Self::get_decrypted`].
     pub async fn get(&self, id: Uuid) -> Result<Option<camera::Model>, VmsError> {
-        camera::Entity::find_by_id(id).one(&self.db).await.map_err(db_err)
+        camera::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)
     }
 
     /// Returns `(model, plaintext_password)`. The model's `password_enc` field
     /// still contains the encrypted value; the second tuple element is the decrypted
     /// password ready for use in an RTSP URL.
-    pub async fn get_decrypted(&self, id: Uuid) -> Result<Option<(camera::Model, Option<String>)>, VmsError> {
+    pub async fn get_decrypted(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(camera::Model, Option<String>)>, VmsError> {
         let Some(cam) = self.get(id).await? else {
             return Ok(None);
         };
@@ -129,7 +139,10 @@ impl CameraRepo {
             active.username = Set(v);
         }
         if let Some(maybe_pw) = input.password {
-            let enc = maybe_pw.as_deref().map(|p| self.crypto.encrypt(p)).transpose()?;
+            let enc = maybe_pw
+                .as_deref()
+                .map(|p| self.crypto.encrypt(p))
+                .transpose()?;
             active.password_enc = Set(enc);
         }
         if let Some(v) = input.extra_config {

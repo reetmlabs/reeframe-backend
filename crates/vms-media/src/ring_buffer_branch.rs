@@ -43,8 +43,8 @@ fn tee_name(id: Uuid) -> String {
 ///
 /// Safe to call while the pipeline is `Playing`.
 pub fn attach(
-    pipeline:    &gstreamer::Pipeline,
-    camera_id:   Uuid,
+    pipeline: &gstreamer::Pipeline,
+    camera_id: Uuid,
     ring_buffer: Arc<Mutex<RingBuffer>>,
 ) -> Result<(), VmsError> {
     let tee = pipeline
@@ -55,8 +55,8 @@ pub fn attach(
     let queue = gstreamer::ElementFactory::make("queue")
         .name(&queue_name(camera_id))
         .property("max-size-buffers", 60u32) // ~2 s at 30 fps
-        .property("max-size-bytes",   0u32)
-        .property("max-size-time",    0u64)
+        .property("max-size-bytes", 0u32)
+        .property("max-size-time", 0u64)
         .build()
         .map_err(|e| VmsError::Media(format!("ring buffer queue: {e}")))?;
 
@@ -74,7 +74,9 @@ pub fn attach(
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
-                let sample = sink.pull_sample().map_err(|_| gstreamer::FlowError::Error)?;
+                let sample = sink
+                    .pull_sample()
+                    .map_err(|_| gstreamer::FlowError::Error)?;
                 let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
 
                 let pts = buffer
@@ -84,14 +86,20 @@ pub fn attach(
 
                 let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
 
-                let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
+                let map = buffer
+                    .map_readable()
+                    .map_err(|_| gstreamer::FlowError::Error)?;
                 let data: Arc<[u8]> = Arc::from(map.as_slice());
                 drop(map);
 
                 ring_buffer
                     .lock()
                     .expect("ring buffer mutex poisoned")
-                    .push(TimestampedFrame { pts, data, is_keyframe });
+                    .push(TimestampedFrame {
+                        pts,
+                        data,
+                        is_keyframe,
+                    });
 
                 Ok(gstreamer::FlowSuccess::Ok)
             })
@@ -107,9 +115,9 @@ pub fn attach(
         .map_err(|e| VmsError::Media(format!("add ring buffer appsink: {e}")))?;
 
     // ── Link tee → queue → appsink ────────────────────────────────────────────
-    let tee_src = tee
-        .request_pad_simple("src_%u")
-        .ok_or_else(|| VmsError::Media(format!("tee src pad request failed for camera {camera_id}")))?;
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
+    })?;
     let queue_sink = queue
         .static_pad("sink")
         .ok_or_else(|| VmsError::Media("ring buffer queue has no sink pad".into()))?;
@@ -141,9 +149,15 @@ pub fn attach(
 /// Returns immediately — cleanup is asynchronous. Safe to call while `Playing`.
 /// If no branch is attached for this camera, this is a no-op.
 pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsError> {
-    let Some(queue)   = pipeline.by_name(&queue_name(camera_id)) else { return Ok(()) };
-    let Some(appsink) = pipeline.by_name(&sink_name(camera_id))  else { return Ok(()) };
-    let Some(tee)     = pipeline.by_name(&tee_name(camera_id))   else { return Ok(()) };
+    let Some(queue) = pipeline.by_name(&queue_name(camera_id)) else {
+        return Ok(());
+    };
+    let Some(appsink) = pipeline.by_name(&sink_name(camera_id)) else {
+        return Ok(());
+    };
+    let Some(tee) = pipeline.by_name(&tee_name(camera_id)) else {
+        return Ok(());
+    };
 
     // Locate the tee src pad connected to our queue's sink pad.
     let queue_sink = queue
@@ -158,10 +172,10 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
     // pad is released from a short-lived std thread once the probe signals done.
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
 
-    let pipeline_clone   = pipeline.clone();
+    let pipeline_clone = pipeline.clone();
     let queue_sink_clone = queue_sink.clone();
-    let queue_clone      = queue.clone();
-    let appsink_clone    = appsink.clone();
+    let queue_clone = queue.clone();
+    let appsink_clone = appsink.clone();
 
     tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
         pad.unlink(&queue_sink_clone).ok();
@@ -181,15 +195,13 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
     // it can deadlock because release_request_pad acquires the element lock
     // that the streaming thread already holds.
     let tee_src_clone = tee_src.clone();
-    std::thread::spawn(move || {
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(()) => {
-                tee.release_request_pad(&tee_src_clone);
-                tracing::info!(camera_id = %camera_id, "Ring buffer branch detached");
-            }
-            Err(_) => {
-                tracing::warn!(camera_id = %camera_id, "Ring buffer detach timed out waiting for probe");
-            }
+    std::thread::spawn(move || match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(()) => {
+            tee.release_request_pad(&tee_src_clone);
+            tracing::info!(camera_id = %camera_id, "Ring buffer branch detached");
+        }
+        Err(_) => {
+            tracing::warn!(camera_id = %camera_id, "Ring buffer detach timed out waiting for probe");
         }
     });
 

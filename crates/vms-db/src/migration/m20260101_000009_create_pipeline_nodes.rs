@@ -15,13 +15,22 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PipelineNode::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(PipelineNode::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(PipelineNode::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(PipelineNode::PipelineId).uuid().not_null())
                     .col(ColumnDef::new(PipelineNode::NodeType).text().not_null())
                     .col(ColumnDef::new(PipelineNode::ActionType).text())
                     .col(ColumnDef::new(PipelineNode::DestinationId).uuid())
                     .col(ColumnDef::new(PipelineNode::ContactListId).uuid())
-                    .col(ColumnDef::new(PipelineNode::Config).json_binary().not_null())
+                    .col(
+                        ColumnDef::new(PipelineNode::Config)
+                            .json_binary()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(PipelineNode::Label).text())
                     .col(ColumnDef::new(PipelineNode::PosX).double())
                     .col(ColumnDef::new(PipelineNode::PosY).double())

@@ -69,7 +69,9 @@ impl EventBus {
         };
         match sender.send(event) {
             Ok(n) => tracing::trace!(topic = %key.topic_string(), receivers = n, "event published"),
-            Err(_) => tracing::trace!(topic = %key.topic_string(), "event dropped — no active receivers"),
+            Err(_) => {
+                tracing::trace!(topic = %key.topic_string(), "event dropped — no active receivers")
+            }
         }
     }
 }
@@ -174,6 +176,9 @@ mod tests {
 
         bus.publish(&key, make_event(&key)); // no subscriber yet
 
-        assert!(!bus.channels.contains_key(&key), "publish must not create a channel");
+        assert!(
+            !bus.channels.contains_key(&key),
+            "publish must not create a channel"
+        );
     }
 }

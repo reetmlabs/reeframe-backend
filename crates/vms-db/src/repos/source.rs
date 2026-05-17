@@ -60,7 +60,10 @@ impl SourceRepo {
 
     /// Returns the row with credential fields in the config still **encrypted**.
     pub async fn get(&self, id: Uuid) -> Result<Option<source::Model>, VmsError> {
-        source::Entity::find_by_id(id).one(&self.db).await.map_err(db_err)
+        source::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)
     }
 
     /// Returns the row with credential fields **decrypted** — ready for adapter use.

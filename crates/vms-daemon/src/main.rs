@@ -80,9 +80,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Encryption key loaded");
 
     // ── Repositories ──────────────────────────────────────────────────────────
-    let camera_repo   = CameraRepo::new(db.clone(), crypto.clone());
-    let source_repo   = SourceRepo::new(db.clone(), crypto.clone());
-    let dest_repo     = DestinationRepo::new(db.clone(), crypto);
+    let camera_repo = CameraRepo::new(db.clone(), crypto.clone());
+    let source_repo = SourceRepo::new(db.clone(), crypto.clone());
+    let dest_repo = DestinationRepo::new(db.clone(), crypto);
     let pipeline_repo = PipelineRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
@@ -120,10 +120,13 @@ async fn main() -> anyhow::Result<()> {
         camera_repo.clone(),
         ring_buffer_manager.clone(),
     );
-    resource_manager.recover(&pipeline_registry).await.map_err(|e| {
-        tracing::error!(error = %e, "Failed to recover resource manager");
-        anyhow::anyhow!(e)
-    })?;
+    resource_manager
+        .recover(&pipeline_registry)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to recover resource manager");
+            anyhow::anyhow!(e)
+        })?;
     tracing::info!("Resource manager ready");
 
     // ── Trigger Evaluator ─────────────────────────────────────────────────────
@@ -179,7 +182,9 @@ async fn main() -> anyhow::Result<()> {
 /// Whichever arrives first triggers a clean shutdown.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]

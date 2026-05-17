@@ -151,7 +151,9 @@ impl NodeInput {
     /// Used by single-input action nodes (transcode, compress, encrypt, …)
     /// that operate on exactly one upstream file.
     pub fn first_artifact(&self) -> Option<&PathBuf> {
-        self.parent_outputs.iter().find_map(|o| o.artifact_path.as_ref())
+        self.parent_outputs
+            .iter()
+            .find_map(|o| o.artifact_path.as_ref())
     }
 
     /// All artifact paths from all parent outputs.

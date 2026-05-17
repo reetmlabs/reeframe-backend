@@ -11,7 +11,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(ContactList::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(ContactList::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(ContactList::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(ContactList::Name).text().not_null())
                     .col(ColumnDef::new(ContactList::Description).text())
                     .col(

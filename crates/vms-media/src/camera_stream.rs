@@ -187,20 +187,14 @@ pub(crate) fn build_camera_stream(
             return;
         };
 
-        let depay = match gstreamer::ElementFactory::make(codec.depay_factory)
-            .name(&depay_name)
-            .build()
-        {
+        let depay = match gstreamer::ElementFactory::make(codec.depay_factory).name(&depay_name).build() {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!(camera_id = %cam_id, "create {}: {e}", codec.depay_factory);
                 return;
             }
         };
-        let parse = match gstreamer::ElementFactory::make(codec.parse_factory)
-            .name(&parse_name)
-            .build()
-        {
+        let parse = match gstreamer::ElementFactory::make(codec.parse_factory).name(&parse_name).build() {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!(camera_id = %cam_id, "create {}: {e}", codec.parse_factory);
@@ -303,7 +297,8 @@ pub(crate) fn spawn_monitor(
                 // Fresh timestamp prefix → no chunk filename collisions
                 let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
                 if let Some(splitmux) = gst_pipeline.by_name(&splitmux_name) {
-                    splitmux.set_property("location", recording_location(&recording_dir, camera_id));
+                    splitmux
+                        .set_property("location", recording_location(&recording_dir, camera_id));
                 }
 
                 tracing::info!(
@@ -345,7 +340,11 @@ pub(crate) fn spawn_monitor(
 pub(crate) fn recording_location(base_dir: &std::path::Path, camera_id: Uuid) -> String {
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     base_dir
-        .join(format!("cam_{}_{}_chunk%05d.mp4", camera_id.as_simple(), ts))
+        .join(format!(
+            "cam_{}_{}_chunk%05d.mp4",
+            camera_id.as_simple(),
+            ts
+        ))
         .to_string_lossy()
         .to_string()
 }

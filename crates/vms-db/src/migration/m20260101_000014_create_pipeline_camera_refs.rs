@@ -14,8 +14,16 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PipelineCameraRef::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(PipelineCameraRef::PipelineId).uuid().not_null())
-                    .col(ColumnDef::new(PipelineCameraRef::CameraId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(PipelineCameraRef::PipelineId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PipelineCameraRef::CameraId)
+                            .uuid()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(PipelineCameraRef::NeedsRingBuffer)
                             .boolean()

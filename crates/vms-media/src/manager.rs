@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use gstreamer::prelude::*;
 
@@ -145,12 +149,14 @@ impl MediaManager {
     /// GStreamer fails to link the new branch.
     pub fn attach_ring_buffer(
         &self,
-        camera_id:   Uuid,
+        camera_id: Uuid,
         ring_buffer: Arc<Mutex<RingBuffer>>,
     ) -> Result<(), VmsError> {
         let cameras = self.cameras.lock().unwrap();
         let handle = cameras.get(&camera_id).ok_or_else(|| {
-            VmsError::Media(format!("camera {camera_id} is not running — cannot attach ring buffer"))
+            VmsError::Media(format!(
+                "camera {camera_id} is not running — cannot attach ring buffer"
+            ))
         })?;
         ring_buffer_branch::attach(&handle.pipeline, camera_id, ring_buffer)
     }

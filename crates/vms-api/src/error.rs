@@ -46,7 +46,9 @@ impl From<VmsError> for ApiError {
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
 
-            VmsError::DagValidation(_) | VmsError::ExpressionEval(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            VmsError::DagValidation(_) | VmsError::ExpressionEval(_) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
 
             VmsError::Serialization(_) => StatusCode::BAD_REQUEST,
 
@@ -83,7 +85,9 @@ pub(crate) fn parse_id(req: &mut Request) -> Result<Uuid, ApiError> {
 }
 
 /// Deserialize the request body as JSON, returning a 400 on parse failure.
-pub(crate) async fn parse_body<T: serde::de::DeserializeOwned>(req: &mut Request) -> Result<T, ApiError> {
+pub(crate) async fn parse_body<T: serde::de::DeserializeOwned>(
+    req: &mut Request,
+) -> Result<T, ApiError> {
     req.parse_json::<T>()
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))

@@ -12,9 +12,9 @@ use vms_core::{RingBufferMode, VmsError};
 #[derive(Clone)]
 pub struct TimestampedFrame {
     /// Presentation timestamp from the GStreamer pipeline clock.
-    pub pts:         Duration,
+    pub pts: Duration,
     /// Encoded frame bytes (H.264 / H.265 NAL units as delivered by the appsink).
-    pub data:        Arc<[u8]>,
+    pub data: Arc<[u8]>,
     /// True when this frame carries no delta dependency (IDR / key frame).
     pub is_keyframe: bool,
 }
@@ -28,7 +28,7 @@ pub struct TimestampedFrame {
 ///
 /// Always accessed behind an `Arc<Mutex<RingBuffer>>` — no internal locking.
 pub struct RingBuffer {
-    frames:       VecDeque<TimestampedFrame>,
+    frames: VecDeque<TimestampedFrame>,
     max_duration: Duration,
 }
 
@@ -48,7 +48,7 @@ impl RingBuffer {
         // The `> 1` guard ensures we never drop the frame we just pushed.
         while self.frames.len() > 1 {
             let latest = self.frames.back().unwrap().pts;
-            let front  = self.frames.front().unwrap().pts;
+            let front = self.frames.front().unwrap().pts;
             if latest.checked_sub(front).unwrap_or(Duration::ZERO) > self.max_duration {
                 self.frames.pop_front();
             } else {
@@ -60,9 +60,14 @@ impl RingBuffer {
     /// Return all frames whose PTS falls in `[event_pts − pre_secs, event_pts + post_secs]`.
     ///
     /// Returns an empty `Vec` if the buffer is empty or no frames fall in the window.
-    pub fn extract(&self, pre_secs: u32, post_secs: u32, event_pts: Duration) -> Vec<TimestampedFrame> {
+    pub fn extract(
+        &self,
+        pre_secs: u32,
+        post_secs: u32,
+        event_pts: Duration,
+    ) -> Vec<TimestampedFrame> {
         let start = event_pts.saturating_sub(Duration::from_secs(u64::from(pre_secs)));
-        let end   = event_pts + Duration::from_secs(u64::from(post_secs));
+        let end = event_pts + Duration::from_secs(u64::from(post_secs));
 
         self.frames
             .iter()
@@ -90,7 +95,7 @@ impl RingBuffer {
 /// and drops the buffer.
 pub struct RingBufferManager {
     buffers: DashMap<Uuid, Arc<Mutex<RingBuffer>>>,
-    media:   Arc<crate::MediaManager>,
+    media: Arc<crate::MediaManager>,
 }
 
 impl RingBufferManager {
@@ -111,9 +116,9 @@ impl RingBufferManager {
     /// silently falls back to in-memory storage.
     pub fn start(
         &self,
-        camera_id:     Uuid,
+        camera_id: Uuid,
         duration_secs: u32,
-        mode:          RingBufferMode,
+        mode: RingBufferMode,
     ) -> Result<(), VmsError> {
         if self.buffers.contains_key(&camera_id) {
             return Ok(());
@@ -126,11 +131,12 @@ impl RingBufferManager {
             );
         }
 
-        let ring_buffer = Arc::new(Mutex::new(RingBuffer::new(
-            Duration::from_secs(u64::from(duration_secs)),
-        )));
+        let ring_buffer = Arc::new(Mutex::new(RingBuffer::new(Duration::from_secs(u64::from(
+            duration_secs,
+        )))));
 
-        self.media.attach_ring_buffer(camera_id, ring_buffer.clone())?;
+        self.media
+            .attach_ring_buffer(camera_id, ring_buffer.clone())?;
         self.buffers.insert(camera_id, ring_buffer);
 
         tracing::info!(camera_id = %camera_id, duration_secs, "Ring buffer started");
@@ -170,15 +176,15 @@ impl RingBufferManager {
     /// async code.
     pub async fn extract_clip(
         &self,
-        camera_id:  Uuid,
-        pre_secs:   u32,
-        post_secs:  u32,
-        event_pts:  Duration,
+        camera_id: Uuid,
+        pre_secs: u32,
+        post_secs: u32,
+        event_pts: Duration,
         output_dir: &Path,
     ) -> Result<PathBuf, VmsError> {
-        let ring = self.get(camera_id).ok_or_else(|| {
-            VmsError::Media(format!("no ring buffer for camera {camera_id}"))
-        })?;
+        let ring = self
+            .get(camera_id)
+            .ok_or_else(|| VmsError::Media(format!("no ring buffer for camera {camera_id}")))?;
 
         // Grab a wider window so we capture an IDR frame before the clip start.
         const KEYFRAME_SEARCH_SECS: u32 = 5;
@@ -211,8 +217,7 @@ impl RingBufferManager {
         let out = output_path.clone();
         tokio::task::spawn_blocking(move || mux_to_mp4(frames, &out))
             .await
-            .map_err(|e| VmsError::Media(format!("spawn_blocking clip mux: {e}")))?
-            ?;
+            .map_err(|e| VmsError::Media(format!("spawn_blocking clip mux: {e}")))??;
 
         tracing::info!(
             camera_id = %camera_id,
@@ -304,7 +309,7 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
         {
             let b = buf.get_mut().expect("unique buffer ownership");
             b.set_pts(gstreamer::ClockTime::from_nseconds(
-                normalized.as_nanos() as u64,
+                normalized.as_nanos() as u64
             ));
             if !frame.is_keyframe {
                 b.set_flags(gstreamer::BufferFlags::DELTA_UNIT);
@@ -325,10 +330,7 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
             gstreamer::MessageView::Eos(_) => break,
             gstreamer::MessageView::Error(err) => {
                 pipeline.set_state(gstreamer::State::Null).ok();
-                return Err(VmsError::Media(format!(
-                    "clip mux error: {}",
-                    err.error()
-                )));
+                return Err(VmsError::Media(format!("clip mux error: {}", err.error())));
             }
             _ => {}
         }
@@ -346,14 +348,17 @@ mod tests {
 
     fn frame(pts_secs: u64) -> TimestampedFrame {
         TimestampedFrame {
-            pts:         Duration::from_secs(pts_secs),
-            data:        Arc::from(vec![pts_secs as u8].as_slice()),
+            pts: Duration::from_secs(pts_secs),
+            data: Arc::from(vec![pts_secs as u8].as_slice()),
             is_keyframe: false,
         }
     }
 
     fn keyframe(pts_secs: u64) -> TimestampedFrame {
-        TimestampedFrame { is_keyframe: true, ..frame(pts_secs) }
+        TimestampedFrame {
+            is_keyframe: true,
+            ..frame(pts_secs)
+        }
     }
 
     // Pushing frames that span less than max_duration keeps all of them.
@@ -376,7 +381,10 @@ mod tests {
         // latest = 10s, max_duration = 5s → frames at 0..4 should be evicted
         // frame at T=5 should survive (10 - 5 == 5, not > 5)
         let pts_values: Vec<u64> = rb.frames.iter().map(|f| f.pts.as_secs()).collect();
-        assert!(pts_values.first() == Some(&5), "oldest kept frame should be T=5, got {pts_values:?}");
+        assert!(
+            pts_values.first() == Some(&5),
+            "oldest kept frame should be T=5, got {pts_values:?}"
+        );
         assert_eq!(*pts_values.last().unwrap(), 10);
     }
 

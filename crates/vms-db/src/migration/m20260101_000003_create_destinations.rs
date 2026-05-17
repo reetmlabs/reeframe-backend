@@ -11,12 +11,22 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Destination::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Destination::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Destination::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Destination::Name).text().not_null())
                     .col(ColumnDef::new(Destination::Description).text())
                     .col(ColumnDef::new(Destination::Type).text().not_null())
                     .col(ColumnDef::new(Destination::Config).json_binary().not_null())
-                    .col(ColumnDef::new(Destination::Enabled).boolean().not_null().default(true))
+                    .col(
+                        ColumnDef::new(Destination::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
                     .col(
                         ColumnDef::new(Destination::CreatedAt)
                             .timestamp_with_time_zone()

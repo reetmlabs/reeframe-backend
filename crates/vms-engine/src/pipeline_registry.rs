@@ -63,7 +63,7 @@ impl PipelineRegistry {
             }
         }
 
-        let loaded  = map.len();
+        let loaded = map.len();
         let skipped = rows.len() - loaded;
         self.store.store(Arc::new(map));
 

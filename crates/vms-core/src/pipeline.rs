@@ -231,11 +231,14 @@ impl PipelineDag {
             return Err(VmsError::DagValidation("pipeline has no nodes".into()));
         }
 
-        let node_map: HashMap<NodeId, PipelineNode> = nodes.into_iter().map(|n| (n.id, n)).collect();
+        let node_map: HashMap<NodeId, PipelineNode> =
+            nodes.into_iter().map(|n| (n.id, n)).collect();
 
         // ── Build adjacency, parents, and edge-type maps ──────────────────────
-        let mut adjacency: HashMap<NodeId, Vec<NodeId>> = node_map.keys().map(|&id| (id, vec![])).collect();
-        let mut parents: HashMap<NodeId, Vec<NodeId>> = node_map.keys().map(|&id| (id, vec![])).collect();
+        let mut adjacency: HashMap<NodeId, Vec<NodeId>> =
+            node_map.keys().map(|&id| (id, vec![])).collect();
+        let mut parents: HashMap<NodeId, Vec<NodeId>> =
+            node_map.keys().map(|&id| (id, vec![])).collect();
         let mut edge_types: HashMap<(NodeId, NodeId), EdgeType> = HashMap::new();
 
         for edge in &edges {
@@ -251,13 +254,23 @@ impl PipelineDag {
                     edge.to_node_id
                 )));
             }
-            adjacency.entry(edge.from_node_id).or_default().push(edge.to_node_id);
-            parents.entry(edge.to_node_id).or_default().push(edge.from_node_id);
+            adjacency
+                .entry(edge.from_node_id)
+                .or_default()
+                .push(edge.to_node_id);
+            parents
+                .entry(edge.to_node_id)
+                .or_default()
+                .push(edge.from_node_id);
             edge_types.insert((edge.from_node_id, edge.to_node_id), edge.edge_type.clone());
         }
 
         // ── Rule 1 & 2: exactly one parentless node, must be trigger_root ────
-        let roots: Vec<NodeId> = node_map.keys().filter(|id| parents[id].is_empty()).copied().collect();
+        let roots: Vec<NodeId> = node_map
+            .keys()
+            .filter(|id| parents[id].is_empty())
+            .copied()
+            .collect();
 
         if roots.len() != 1 {
             return Err(VmsError::DagValidation(format!(
@@ -382,9 +395,16 @@ fn kahn_topological_sort(
     adjacency: &HashMap<NodeId, Vec<NodeId>>,
     parents: &HashMap<NodeId, Vec<NodeId>>,
 ) -> Result<Vec<NodeId>, VmsError> {
-    let mut in_degree: HashMap<NodeId, usize> = node_map.keys().map(|&id| (id, parents[&id].len())).collect();
+    let mut in_degree: HashMap<NodeId, usize> = node_map
+        .keys()
+        .map(|&id| (id, parents[&id].len()))
+        .collect();
 
-    let mut queue: VecDeque<NodeId> = in_degree.iter().filter(|(_, &d)| d == 0).map(|(&id, _)| id).collect();
+    let mut queue: VecDeque<NodeId> = in_degree
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&id, _)| id)
+        .collect();
 
     let mut order = Vec::with_capacity(node_map.len());
 

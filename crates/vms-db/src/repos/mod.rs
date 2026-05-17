@@ -29,7 +29,10 @@ pub(super) const CREDENTIAL_FIELDS: &[&str] = &[
 
 /// Encrypt all credential string fields in a JSON object (top-level keys only).
 /// Already-encrypted values (detected by the `enc:v1:` prefix) are left as-is.
-pub(super) fn encrypt_config(crypto: &Crypto, mut config: serde_json::Value) -> Result<serde_json::Value, VmsError> {
+pub(super) fn encrypt_config(
+    crypto: &Crypto,
+    mut config: serde_json::Value,
+) -> Result<serde_json::Value, VmsError> {
     if let serde_json::Value::Object(ref mut map) = config {
         for &key in CREDENTIAL_FIELDS {
             if let Some(serde_json::Value::String(s)) = map.get(key) {
@@ -45,7 +48,10 @@ pub(super) fn encrypt_config(crypto: &Crypto, mut config: serde_json::Value) -> 
 
 /// Decrypt all credential string fields in a JSON object (top-level keys only).
 /// Plain-text values (no `enc:v1:` prefix) are passed through unchanged.
-pub(super) fn decrypt_config(crypto: &Crypto, mut config: serde_json::Value) -> Result<serde_json::Value, VmsError> {
+pub(super) fn decrypt_config(
+    crypto: &Crypto,
+    mut config: serde_json::Value,
+) -> Result<serde_json::Value, VmsError> {
     if let serde_json::Value::Object(ref mut map) = config {
         for &key in CREDENTIAL_FIELDS {
             if let Some(serde_json::Value::String(s)) = map.get(key) {

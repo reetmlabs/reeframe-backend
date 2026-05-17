@@ -14,7 +14,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PipelineRun::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(PipelineRun::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(PipelineRun::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(PipelineRun::PipelineId).uuid().not_null())
                     .col(ColumnDef::new(PipelineRun::TriggerId).uuid())
                     .col(
@@ -23,8 +28,17 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(PipelineRun::TriggerContext).json_binary().not_null())
-                    .col(ColumnDef::new(PipelineRun::Status).text().not_null().default("running"))
+                    .col(
+                        ColumnDef::new(PipelineRun::TriggerContext)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PipelineRun::Status)
+                            .text()
+                            .not_null()
+                            .default("running"),
+                    )
                     .col(ColumnDef::new(PipelineRun::CompletedAt).timestamp_with_time_zone())
                     .col(ColumnDef::new(PipelineRun::Error).text())
                     .foreign_key(
