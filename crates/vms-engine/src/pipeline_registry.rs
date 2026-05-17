@@ -14,14 +14,26 @@ use vms_db::PipelineRepo;
 /// continue against the old snapshot uninterrupted.
 pub struct PipelineRegistry {
     store: ArcSwap<HashMap<Uuid, Arc<CompiledPipeline>>>,
-    repo: PipelineRepo,
+    repo: Option<PipelineRepo>,
 }
 
 impl PipelineRegistry {
     pub fn new(repo: PipelineRepo) -> Arc<Self> {
         Arc::new(Self {
             store: ArcSwap::from_pointee(HashMap::new()),
-            repo,
+            repo: Some(repo),
+        })
+    }
+
+    /// Construct a registry pre-loaded with `pipelines`. Only for unit tests —
+    /// avoids a live database connection.  `load`/`reload` are no-ops.
+    #[cfg(test)]
+    pub fn new_test(pipelines: Vec<CompiledPipeline>) -> Arc<Self> {
+        let map: HashMap<Uuid, Arc<CompiledPipeline>> =
+            pipelines.into_iter().map(|p| (p.id, Arc::new(p))).collect();
+        Arc::new(Self {
+            store: ArcSwap::from_pointee(map),
+            repo: None,
         })
     }
 
@@ -37,11 +49,14 @@ impl PipelineRegistry {
     /// Callers (API mutation handlers) should invoke this after any change to a
     /// pipeline, its nodes, edges, or triggers.
     pub async fn reload(&self) -> Result<(), VmsError> {
-        let rows = self.repo.list_enabled().await?;
+        let Some(repo) = &self.repo else {
+            return Ok(());
+        };
+        let rows = repo.list_enabled().await?;
         let mut map = HashMap::with_capacity(rows.len());
 
         for row in &rows {
-            match self.repo.load_compiled(row.id).await {
+            match repo.load_compiled(row.id).await {
                 Ok(Some(compiled)) => {
                     map.insert(compiled.id, Arc::new(compiled));
                 }
