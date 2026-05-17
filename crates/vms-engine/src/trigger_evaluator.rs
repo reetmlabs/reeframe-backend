@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use dashmap::DashMap;
 use evalexpr::{
     eval_boolean_with_context, ContextWithMutableVariables, HashMapContext, Value as EvalValue,
 };
@@ -11,8 +12,8 @@ use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use uuid::Uuid;
 use vms_core::{
-    Event, ScheduleMode, SystemSignal, TopicKey, TriggerConfig, TriggerContext, TriggerType,
-    VmsError,
+    Event, ScheduleMode, StatMetric, SystemSignal, TopicKey, TriggerConfig, TriggerContext,
+    TriggerType, VmsError,
 };
 
 use crate::{time_helpers, EventBus, PipelineRegistry};
@@ -32,7 +33,11 @@ pub struct TriggerEvaluator {
     registry: Arc<PipelineRegistry>,
     event_bus: Arc<EventBus>,
     /// Holds the cron scheduler after `start_schedulers` is called.
-    scheduler: Mutex<Option<JobScheduler>>,
+    cron_scheduler: Mutex<Option<JobScheduler>>,
+    /// Tracks the last time each stat trigger fired: (pipeline_id, trigger_id) → Instant.
+    stat_cooldowns: DashMap<(Uuid, Uuid), Instant>,
+    /// Tracks when the stat condition was first observed as true: used to enforce sustained_secs.
+    stat_sustained: DashMap<(Uuid, Uuid), Instant>,
 }
 
 impl TriggerEvaluator {
@@ -40,7 +45,9 @@ impl TriggerEvaluator {
         Arc::new(Self {
             registry,
             event_bus,
-            scheduler: Mutex::new(None),
+            cron_scheduler: Mutex::new(None),
+            stat_cooldowns: DashMap::new(),
+            stat_sustained: DashMap::new(),
         })
     }
 
@@ -146,8 +153,7 @@ impl TriggerEvaluator {
 
                     // ── Cron ──────────────────────────────────────────────────
                     ScheduleMode::Cron { expression } => {
-                                        let tz = time_helpers::parse_iana_tz(timezone);
-
+                        let tz = time_helpers::parse_iana_tz(timezone);
                         let expr = time_helpers::normalize_cron(expression);
                         let ev = self.clone();
 
@@ -191,7 +197,7 @@ impl TriggerEvaluator {
                 .map_err(|e| VmsError::Config(format!("start cron scheduler: {e}")))?;
         }
 
-        *self.scheduler.lock().await = Some(scheduler);
+        *self.cron_scheduler.lock().await = Some(scheduler);
 
         tracing::info!(
             cron_jobs = cron_job_count,
@@ -411,6 +417,114 @@ impl TriggerEvaluator {
         }
     }
 
+    // ── Stat trigger evaluation ───────────────────────────────────────────────
+
+    /// Called by the Stat Monitor with the latest reading for `metric`.
+    ///
+    /// Scans all enabled pipelines for `Stat` triggers whose metric, path, and
+    /// camera scope match the supplied sample.  For each matching trigger:
+    ///
+    /// 1. If the condition (`operator(actual, threshold)`) is **false** the
+    ///    sustained clock is reset so the next rising edge starts fresh.
+    /// 2. If the condition is **true** and `sustained_secs > 0`, the trigger
+    ///    waits until it has been continuously true for that many seconds.
+    /// 3. Once sustained, the trigger is gated by `cooldown_secs` — it will
+    ///    not fire again until at least that many seconds have elapsed since the
+    ///    last firing.
+    ///
+    /// `path` applies only to disk metrics (e.g. `"/var/lib/vms"`).
+    /// `camera_id` applies only to per-feed metrics (`FeedBitrateKbps`,
+    /// `FeedPacketLossPercent`).
+    pub fn evaluate_stat(
+        &self,
+        metric: &StatMetric,
+        path: Option<&str>,
+        camera_id: Option<Uuid>,
+        actual: f64,
+    ) {
+        let snapshot = self.registry.snapshot();
+        let now = Instant::now();
+
+        for pipeline in snapshot.values() {
+            if !pipeline.enabled {
+                continue;
+            }
+            for trigger in &pipeline.triggers {
+                if !trigger.enabled {
+                    continue;
+                }
+                let TriggerConfig::Stat {
+                    metric: t_metric,
+                    path: t_path,
+                    operator,
+                    threshold,
+                    sustained_secs,
+                    cooldown_secs,
+                } = &trigger.config
+                else {
+                    continue;
+                };
+
+                if t_metric != metric {
+                    continue;
+                }
+
+                // Per-feed metrics are scoped to a camera; others are not.
+                if matches!(
+                    metric,
+                    StatMetric::FeedBitrateKbps | StatMetric::FeedPacketLossPercent
+                ) && trigger.camera_id != camera_id
+                {
+                    continue;
+                }
+
+                // Disk metrics may be scoped to a filesystem path.
+                if let Some(tp) = t_path {
+                    if path.map_or(true, |p| p != tp.as_str()) {
+                        continue;
+                    }
+                }
+
+                let key = (pipeline.id, trigger.id);
+
+                if operator.evaluate(actual, *threshold) {
+                    // Record the first instant the condition was observed true.
+                    let observed_at = *self.stat_sustained.entry(key).or_insert(now);
+
+                    // Wait until the condition has been sustained long enough.
+                    if now.duration_since(observed_at).as_secs() as u32 >= *sustained_secs {
+                        // Enforce cooldown.
+                        let in_cooldown = *cooldown_secs > 0
+                            && self.stat_cooldowns.get(&key).map_or(false, |last| {
+                                (now.duration_since(*last).as_secs() as u32) < *cooldown_secs
+                            });
+
+                        if !in_cooldown {
+                            self.stat_cooldowns.insert(key, now);
+                            self.fire_pipeline(TriggerContext {
+                                run_id: None,
+                                trigger_id: trigger.id,
+                                pipeline_id: pipeline.id,
+                                fired_at: Utc::now(),
+                                source_id: None,
+                                camera_id,
+                                camera_name: None,
+                                event_payload: None,
+                                manual_params: None,
+                                duration_secs: None,
+                                trigger_type: TriggerType::Stat,
+                            });
+                        }
+                    }
+                } else {
+                    // Condition no longer met — reset sustained clock so the
+                    // next rising edge requires a fresh sustained period.
+                    self.stat_sustained.remove(&key);
+                }
+            }
+        }
+    }
+
     // ── Pipeline dispatch ─────────────────────────────────────────────────────
 
     /// Dispatch a pipeline run for the given trigger context.
@@ -517,6 +631,120 @@ mod tests {
         let ctx = build_event_context(&event);
         let result = eval_boolean_with_context(r#"event.label == "person""#, &ctx);
         assert_eq!(result, Ok(false));
+    }
+
+    // ── Stat trigger helpers ──────────────────────────────────────────────────
+
+    fn make_stat_pipeline(
+        pipeline_id: Uuid,
+        metric: StatMetric,
+        threshold: f64,
+        sustained_secs: u32,
+        cooldown_secs: u32,
+    ) -> vms_core::pipeline::CompiledPipeline {
+        use std::collections::HashMap;
+        use vms_core::{
+            pipeline::{CompiledPipeline, PipelineDag, PipelineTrigger},
+            CompareOperator, TriggerConfig,
+        };
+        CompiledPipeline {
+            id: pipeline_id,
+            name: "test".into(),
+            enabled: true,
+            dag: PipelineDag {
+                nodes: HashMap::new(),
+                edges: vec![],
+                topological_order: vec![],
+                adjacency: HashMap::new(),
+                parents: HashMap::new(),
+                edge_types: HashMap::new(),
+                root_id: Uuid::nil(),
+            },
+            triggers: vec![PipelineTrigger {
+                id: Uuid::new_v4(),
+                pipeline_id,
+                trigger_type: vms_core::TriggerType::Stat,
+                enabled: true,
+                source_id: None,
+                camera_id: None,
+                config: TriggerConfig::Stat {
+                    metric,
+                    path: None,
+                    operator: CompareOperator::GreaterThan,
+                    threshold,
+                    sustained_secs,
+                    cooldown_secs,
+                },
+            }],
+            camera_refs: vec![],
+            source_refs: vec![],
+        }
+    }
+
+    // Stat trigger fires when condition is met with sustained_secs == 0.
+    #[test]
+    fn stat_trigger_fires_immediately_when_sustained_zero() {
+        use vms_core::StatMetric;
+        let pipeline_id = Uuid::new_v4();
+        let pipeline = make_stat_pipeline(pipeline_id, StatMetric::CpuUsagePercent, 80.0, 0, 0);
+        let registry = PipelineRegistry::new_test(vec![pipeline]);
+        let event_bus = EventBus::new(16);
+        let ev = TriggerEvaluator::new(registry, event_bus);
+
+        // No panic; stat_cooldowns should have an entry after firing.
+        ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 90.0);
+        assert_eq!(ev.stat_cooldowns.len(), 1);
+    }
+
+    // Stat trigger does NOT fire when actual is below threshold.
+    #[test]
+    fn stat_trigger_does_not_fire_when_below_threshold() {
+        use vms_core::StatMetric;
+        let pipeline_id = Uuid::new_v4();
+        let pipeline = make_stat_pipeline(pipeline_id, StatMetric::CpuUsagePercent, 80.0, 0, 0);
+        let registry = PipelineRegistry::new_test(vec![pipeline]);
+        let event_bus = EventBus::new(16);
+        let ev = TriggerEvaluator::new(registry, event_bus);
+
+        ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 50.0);
+        assert!(ev.stat_cooldowns.is_empty());
+    }
+
+    // Stat trigger does NOT fire on the first sample when sustained_secs > 0.
+    #[test]
+    fn stat_trigger_waits_for_sustained_duration() {
+        use vms_core::StatMetric;
+        let pipeline_id = Uuid::new_v4();
+        // sustained_secs = 30 — won't fire on the first call.
+        let pipeline = make_stat_pipeline(pipeline_id, StatMetric::RamUsagePercent, 70.0, 30, 0);
+        let registry = PipelineRegistry::new_test(vec![pipeline]);
+        let event_bus = EventBus::new(16);
+        let ev = TriggerEvaluator::new(registry, event_bus);
+
+        ev.evaluate_stat(&StatMetric::RamUsagePercent, None, None, 85.0);
+        // Condition is met, but not yet sustained for 30s — no firing.
+        assert!(ev.stat_cooldowns.is_empty());
+        // The sustained clock should have started.
+        assert_eq!(ev.stat_sustained.len(), 1);
+    }
+
+    // Falling edge resets the sustained clock.
+    #[test]
+    fn stat_trigger_resets_sustained_on_falling_edge() {
+        use vms_core::StatMetric;
+        let pipeline_id = Uuid::new_v4();
+        let pipeline = make_stat_pipeline(pipeline_id, StatMetric::CpuUsagePercent, 80.0, 10, 0);
+        let registry = PipelineRegistry::new_test(vec![pipeline]);
+        let event_bus = EventBus::new(16);
+        let ev = TriggerEvaluator::new(registry, event_bus);
+
+        // Rising edge — sustained clock starts.
+        ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 90.0);
+        assert_eq!(ev.stat_sustained.len(), 1);
+
+        // Falling edge — sustained clock clears.
+        ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 50.0);
+        assert!(ev.stat_sustained.is_empty());
     }
 
     // signal_to_event_type round-trips for every variant.

@@ -131,7 +131,19 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Trigger Evaluator ─────────────────────────────────────────────────────
     let trigger_evaluator = TriggerEvaluator::new(pipeline_registry.clone(), event_bus.clone());
-    tracing::info!("Trigger evaluator ready");
+
+    trigger_evaluator.clone().start_event_listener();
+    tracing::info!("Trigger evaluator event listeners started");
+
+    trigger_evaluator
+        .clone()
+        .start_schedulers()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to start trigger schedulers");
+            anyhow::anyhow!(e)
+        })?;
+    tracing::info!("Trigger evaluator schedulers started");
 
     // ── HTTP API ──────────────────────────────────────────────────────────────
     let state = AppState {
