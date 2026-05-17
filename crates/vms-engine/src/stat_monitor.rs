@@ -1,8 +1,14 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use sysinfo::{Disks, System};
+use vms_core::{StatMetric, TriggerConfig};
 
 use crate::{PipelineRegistry, TriggerEvaluator};
+
+/// Seconds between metric samples during normal operation.
+const POLL_INTERVAL_SECS: u64 = 5;
 
 /// Polls system metrics and feeds readings to the [`TriggerEvaluator`].
 ///
@@ -24,6 +30,94 @@ impl StatMonitor {
             sys: Mutex::new(System::new()),
             disks: Mutex::new(Disks::new()),
         })
+    }
+
+    // ── Polling loop ─────────────────────────────────────────────────────────
+
+    /// Spawn the background polling loop.
+    ///
+    /// Calls [`cpu_percent`] once before entering the loop so sysinfo can
+    /// establish a CPU baseline — the first real reading is taken after
+    /// `POLL_INTERVAL_SECS`, by which point the delta is meaningful.
+    ///
+    /// Safe to call from a non-async context; only spawns, does not await.
+    pub fn start(self: Arc<Self>) {
+        tokio::spawn(async move {
+            // Establish CPU baseline before the first real sample.
+            self.cpu_percent();
+            tracing::info!(interval_secs = POLL_INTERVAL_SECS, "Stat monitor started");
+
+            loop {
+                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+                self.poll();
+            }
+        });
+    }
+
+    /// Take one sample of every active metric and feed results to the evaluator.
+    fn poll(&self) {
+        // ── CPU ───────────────────────────────────────────────────────────────
+        let cpu = self.cpu_percent();
+        tracing::trace!(cpu, "cpu_usage_percent");
+        self.evaluator
+            .evaluate_stat(&StatMetric::CpuUsagePercent, None, None, cpu);
+
+        // ── RAM ───────────────────────────────────────────────────────────────
+        let ram = self.ram_percent();
+        tracing::trace!(ram, "ram_usage_percent");
+        self.evaluator
+            .evaluate_stat(&StatMetric::RamUsagePercent, None, None, ram);
+
+        // ── Disk — only paths referenced by active triggers ───────────────────
+        for path in self.active_disk_paths() {
+            match self.disk_percent(&path) {
+                Some(pct) => {
+                    tracing::trace!(path, pct, "disk_usage_percent");
+                    self.evaluator.evaluate_stat(
+                        &StatMetric::DiskUsagePercent,
+                        Some(&path),
+                        None,
+                        pct,
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        path,
+                        "Stat trigger references a disk path not found on this system"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Collect the unique filesystem paths watched by any enabled `Stat` trigger.
+    ///
+    /// Called on every poll so newly enabled pipelines are picked up without
+    /// a restart.
+    fn active_disk_paths(&self) -> HashSet<String> {
+        let snapshot = self.registry.snapshot();
+        let mut paths = HashSet::new();
+
+        for pipeline in snapshot.values() {
+            if !pipeline.enabled {
+                continue;
+            }
+            for trigger in &pipeline.triggers {
+                if !trigger.enabled {
+                    continue;
+                }
+                if let TriggerConfig::Stat {
+                    metric: StatMetric::DiskUsagePercent,
+                    path: Some(p),
+                    ..
+                } = &trigger.config
+                {
+                    paths.insert(p.clone());
+                }
+            }
+        }
+
+        paths
     }
 
     // ── Metric samplers ───────────────────────────────────────────────────────
@@ -136,5 +230,69 @@ mod tests {
         // are absolute), so this is guaranteed to return None on any OS.
         let pct = mon.disk_percent("relative/path/no/leading/slash");
         assert!(pct.is_none());
+    }
+
+    // ── Polling helpers ───────────────────────────────────────────────────────
+
+    fn make_disk_pipeline(path: &str) -> vms_core::pipeline::CompiledPipeline {
+        use std::collections::HashMap;
+        use uuid::Uuid;
+        use vms_core::{
+            pipeline::{CompiledPipeline, PipelineDag, PipelineTrigger},
+            CompareOperator, TriggerConfig, TriggerType,
+        };
+        let id = Uuid::new_v4();
+        CompiledPipeline {
+            id,
+            name: "disk-test".into(),
+            enabled: true,
+            dag: PipelineDag {
+                nodes: HashMap::new(),
+                edges: vec![],
+                topological_order: vec![],
+                adjacency: HashMap::new(),
+                parents: HashMap::new(),
+                edge_types: HashMap::new(),
+                root_id: Uuid::nil(),
+            },
+            triggers: vec![PipelineTrigger {
+                id: Uuid::new_v4(),
+                pipeline_id: id,
+                trigger_type: TriggerType::Stat,
+                enabled: true,
+                source_id: None,
+                camera_id: None,
+                config: TriggerConfig::Stat {
+                    metric: StatMetric::DiskUsagePercent,
+                    path: Some(path.to_string()),
+                    operator: CompareOperator::GreaterThan,
+                    threshold: 90.0,
+                    sustained_secs: 0,
+                    cooldown_secs: 0,
+                },
+            }],
+            camera_refs: vec![],
+            source_refs: vec![],
+        }
+    }
+
+    #[test]
+    fn active_disk_paths_collects_unique_paths() {
+        let pipeline = make_disk_pipeline("/var/lib/vms");
+        let registry = PipelineRegistry::new_test(vec![pipeline]);
+        let event_bus = EventBus::new(16);
+        let evaluator = TriggerEvaluator::new(registry.clone(), event_bus);
+        let mon = StatMonitor::new(evaluator, registry);
+
+        let paths = mon.active_disk_paths();
+        assert_eq!(paths.len(), 1);
+        assert!(paths.contains("/var/lib/vms"));
+    }
+
+    #[test]
+    fn poll_does_not_panic() {
+        // Smoke test: poll() with an empty registry must complete without error.
+        let mon = make_monitor();
+        mon.poll();
     }
 }
