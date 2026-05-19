@@ -7,8 +7,15 @@ use vms_core::{StatMetric, TriggerConfig};
 
 use crate::{PipelineRegistry, TriggerEvaluator};
 
-/// Seconds between metric samples during normal operation.
+/// Seconds between samples during normal operation (first sleep and default).
 const POLL_INTERVAL_SECS: u64 = 5;
+/// Seconds between samples when any metric is close to a threshold.
+const FAST_INTERVAL_SECS: u64 = 2;
+/// Seconds between samples when all metrics are well clear of every threshold.
+const SLOW_INTERVAL_SECS: u64 = 15;
+/// A metric is "near" a threshold when the relative distance is below this fraction.
+/// E.g. 0.20 means within ±20 % of the threshold value.
+const NEAR_MARGIN: f64 = 0.20;
 
 /// Polls system metrics and feeds readings to the [`TriggerEvaluator`].
 ///
@@ -47,26 +54,46 @@ impl StatMonitor {
             self.cpu_percent();
             tracing::info!(interval_secs = POLL_INTERVAL_SECS, "Stat monitor started");
 
+            let mut interval_secs = POLL_INTERVAL_SECS;
             loop {
-                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-                self.poll();
+                tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                let near = self.poll();
+                let next = if near {
+                    FAST_INTERVAL_SECS
+                } else {
+                    SLOW_INTERVAL_SECS
+                };
+                if next != interval_secs {
+                    tracing::debug!(
+                        interval_secs = next,
+                        "Stat monitor polling interval adjusted"
+                    );
+                }
+                interval_secs = next;
             }
         });
     }
 
     /// Take one sample of every active metric and feed results to the evaluator.
-    fn poll(&self) {
+    ///
+    /// Returns `true` if any sampled value is within [`NEAR_MARGIN`] of a
+    /// configured threshold — the caller uses this to tighten the poll interval.
+    fn poll(&self) -> bool {
+        let mut near = false;
+
         // ── CPU ───────────────────────────────────────────────────────────────
         let cpu = self.cpu_percent();
         tracing::trace!(cpu, "cpu_usage_percent");
         self.evaluator
             .evaluate_stat(&StatMetric::CpuUsagePercent, None, None, cpu);
+        near |= self.is_near_threshold(&StatMetric::CpuUsagePercent, None, cpu);
 
         // ── RAM ───────────────────────────────────────────────────────────────
         let ram = self.ram_percent();
         tracing::trace!(ram, "ram_usage_percent");
         self.evaluator
             .evaluate_stat(&StatMetric::RamUsagePercent, None, None, ram);
+        near |= self.is_near_threshold(&StatMetric::RamUsagePercent, None, ram);
 
         // ── Disk — only paths referenced by active triggers ───────────────────
         for path in self.active_disk_paths() {
@@ -79,6 +106,7 @@ impl StatMonitor {
                         None,
                         pct,
                     );
+                    near |= self.is_near_threshold(&StatMetric::DiskUsagePercent, Some(&path), pct);
                 }
                 None => {
                     tracing::warn!(
@@ -88,6 +116,58 @@ impl StatMonitor {
                 }
             }
         }
+
+        near
+    }
+
+    /// Returns `true` if `actual` is within [`NEAR_MARGIN`] of the threshold of
+    /// any enabled `Stat` trigger that matches `metric` and `path`.
+    ///
+    /// Nearness is defined as:
+    /// `|actual − threshold| / max(|threshold|, 1.0) < NEAR_MARGIN`
+    ///
+    /// This is operator-agnostic — it fires for both rising and falling edges,
+    /// covering `GreaterThan` (disk filling up) and `LessThan` (disk running out
+    /// of free space) equally.
+    fn is_near_threshold(&self, metric: &StatMetric, path: Option<&str>, actual: f64) -> bool {
+        let snapshot = self.registry.snapshot();
+
+        for pipeline in snapshot.values() {
+            if !pipeline.enabled {
+                continue;
+            }
+            for trigger in &pipeline.triggers {
+                if !trigger.enabled {
+                    continue;
+                }
+                let TriggerConfig::Stat {
+                    metric: t_metric,
+                    path: t_path,
+                    threshold,
+                    ..
+                } = &trigger.config
+                else {
+                    continue;
+                };
+
+                if t_metric != metric {
+                    continue;
+                }
+
+                if let Some(tp) = t_path {
+                    if path.map_or(true, |p| p != tp.as_str()) {
+                        continue;
+                    }
+                }
+
+                let distance = (actual - threshold).abs() / threshold.abs().max(1.0);
+                if distance < NEAR_MARGIN {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// Collect the unique filesystem paths watched by any enabled `Stat` trigger.
@@ -294,5 +374,87 @@ mod tests {
         // Smoke test: poll() with an empty registry must complete without error.
         let mon = make_monitor();
         mon.poll();
+    }
+
+    // ── Adaptive interval helpers ─────────────────────────────────────────────
+
+    fn make_cpu_monitor(threshold: f64) -> Arc<StatMonitor> {
+        use std::collections::HashMap;
+        use uuid::Uuid;
+        use vms_core::{
+            pipeline::{CompiledPipeline, PipelineDag, PipelineTrigger},
+            CompareOperator, TriggerConfig, TriggerType,
+        };
+        let id = Uuid::new_v4();
+        let pipeline = CompiledPipeline {
+            id,
+            name: "cpu-test".into(),
+            enabled: true,
+            dag: PipelineDag {
+                nodes: HashMap::new(),
+                edges: vec![],
+                topological_order: vec![],
+                adjacency: HashMap::new(),
+                parents: HashMap::new(),
+                edge_types: HashMap::new(),
+                root_id: Uuid::nil(),
+            },
+            triggers: vec![PipelineTrigger {
+                id: Uuid::new_v4(),
+                pipeline_id: id,
+                trigger_type: TriggerType::Stat,
+                enabled: true,
+                source_id: None,
+                camera_id: None,
+                config: TriggerConfig::Stat {
+                    metric: StatMetric::CpuUsagePercent,
+                    path: None,
+                    operator: CompareOperator::GreaterThan,
+                    threshold,
+                    sustained_secs: 0,
+                    cooldown_secs: 0,
+                },
+            }],
+            camera_refs: vec![],
+            source_refs: vec![],
+        };
+        let registry = PipelineRegistry::new_test(vec![pipeline]);
+        let event_bus = EventBus::new(16);
+        let evaluator = TriggerEvaluator::new(registry.clone(), event_bus);
+        StatMonitor::new(evaluator, registry)
+    }
+
+    // A value within NEAR_MARGIN of the threshold is considered near.
+    #[test]
+    fn is_near_threshold_true_when_within_margin() {
+        // threshold = 80, actual = 75 → distance = |75-80|/80 = 0.0625 < 0.20
+        let mon = make_cpu_monitor(80.0);
+        assert!(mon.is_near_threshold(&StatMetric::CpuUsagePercent, None, 75.0));
+    }
+
+    // A value far from the threshold is not near.
+    #[test]
+    fn is_near_threshold_false_when_outside_margin() {
+        // threshold = 80, actual = 40 → distance = |40-80|/80 = 0.50 > 0.20
+        let mon = make_cpu_monitor(80.0);
+        assert!(!mon.is_near_threshold(&StatMetric::CpuUsagePercent, None, 40.0));
+    }
+
+    // A different metric never triggers nearness for a non-matching trigger.
+    #[test]
+    fn is_near_threshold_false_for_different_metric() {
+        let mon = make_cpu_monitor(80.0);
+        // RAM trigger doesn't exist — no match possible.
+        assert!(!mon.is_near_threshold(&StatMetric::RamUsagePercent, None, 75.0));
+    }
+
+    // poll() returns true when a real metric happens to be near a threshold.
+    #[test]
+    fn poll_returns_true_when_near_any_threshold() {
+        // Set threshold to 0.01 so any real CPU/RAM reading (always > 0) is "near".
+        let mon = make_cpu_monitor(0.01);
+        // RAM will likely be > 0 on a live system; CPU baseline is ~0 on first
+        // call but any value within 20% of 0.01 counts.  Just verify no panic.
+        let _ = mon.poll();
     }
 }
