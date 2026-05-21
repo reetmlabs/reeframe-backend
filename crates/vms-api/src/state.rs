@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use vms_db::{CameraRepo, DestinationRepo, PipelineRepo, SourceRepo};
+use vms_db::{CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo};
 use vms_engine::{EventBus, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator};
 use vms_media::{MediaManager, RingBufferManager};
 
@@ -15,6 +15,7 @@ pub struct AppState {
     pub source_repo: SourceRepo,
     pub dest_repo: DestinationRepo,
     pub pipeline_repo: PipelineRepo,
+    pub pipeline_run_repo: PipelineRunRepo,
     pub media_manager: Arc<MediaManager>,
     pub ring_buffer_manager: Arc<RingBufferManager>,
     pub event_bus: Arc<EventBus>,

@@ -1,11 +1,13 @@
 pub mod camera;
 pub mod destination;
 pub mod pipeline;
+pub mod pipeline_run;
 pub mod source;
 
 pub use camera::CameraRepo;
 pub use destination::DestinationRepo;
 pub use pipeline::PipelineRepo;
+pub use pipeline_run::PipelineRunRepo;
 pub use source::SourceRepo;
 
 use crate::crypto::Crypto;

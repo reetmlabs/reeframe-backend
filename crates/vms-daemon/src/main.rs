@@ -9,7 +9,9 @@ use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{routes::build_router, state::AppState};
-use vms_db::{CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, SourceRepo};
+use vms_db::{
+    CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, PipelineRunRepo, SourceRepo,
+};
 use vms_engine::{EventBus, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator};
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 
@@ -84,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
     let source_repo = SourceRepo::new(db.clone(), crypto.clone());
     let dest_repo = DestinationRepo::new(db.clone(), crypto);
     let pipeline_repo = PipelineRepo::new(db.clone());
+    let pipeline_run_repo = PipelineRunRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
     // ── Media Manager ─────────────────────────────────────────────────────────
@@ -156,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
         source_repo,
         dest_repo,
         pipeline_repo,
+        pipeline_run_repo,
         media_manager: media_manager.clone(),
         ring_buffer_manager,
         event_bus,
