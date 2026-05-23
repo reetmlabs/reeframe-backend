@@ -2,7 +2,11 @@ use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vms_db::{
-    entities::pipeline::{self, PipelineType},
+    entities::{
+        pipeline::{self, PipelineType},
+        pipeline_run,
+        run_node_result,
+    },
     repos::pipeline::{CreatePipeline, UpdatePipeline},
 };
 
@@ -38,6 +42,65 @@ impl From<pipeline::Model> for PipelineDto {
     }
 }
 
+// -- Run / node-result DTOs ---------------------------------------------------
+
+#[derive(Serialize)]
+pub struct PipelineRunDto {
+    pub id: Uuid,
+    pub pipeline_id: Uuid,
+    pub trigger_id: Option<Uuid>,
+    pub triggered_at: chrono::DateTime<chrono::FixedOffset>,
+    pub status: vms_db::entities::pipeline_run::RunStatus,
+    pub completed_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub error: Option<String>,
+}
+
+impl From<pipeline_run::Model> for PipelineRunDto {
+    fn from(m: pipeline_run::Model) -> Self {
+        Self {
+            id: m.id,
+            pipeline_id: m.pipeline_id,
+            trigger_id: m.trigger_id,
+            triggered_at: m.triggered_at,
+            status: m.status,
+            completed_at: m.completed_at,
+            error: m.error,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct NodeResultDto {
+    pub id: Uuid,
+    pub node_id: Uuid,
+    pub status: vms_db::entities::run_node_result::NodeResultStatus,
+    pub started_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub completed_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub output: serde_json::Value,
+    pub error: Option<String>,
+}
+
+impl From<run_node_result::Model> for NodeResultDto {
+    fn from(m: run_node_result::Model) -> Self {
+        Self {
+            id: m.id,
+            node_id: m.node_id,
+            status: m.status,
+            started_at: m.started_at,
+            completed_at: m.completed_at,
+            output: m.output,
+            error: m.error,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PipelineRunDetailDto {
+    #[serde(flatten)]
+    pub run: PipelineRunDto,
+    pub nodes: Vec<NodeResultDto>,
+}
+
 // -- Request bodies ------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -52,6 +115,11 @@ pub struct CreatePipelineBody {
 pub struct UpdatePipelineBody {
     pub name: Option<String>,
     pub description: Option<Option<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct TriggerPipelineBody {
+    pub params: Option<serde_json::Value>,
 }
 
 // -- Handlers ------------------------------------------------------------------
@@ -209,4 +277,77 @@ async fn set_enabled(
         .ok_or_else(|| ApiError::not_found(format!("pipeline {id} not found")))?;
 
     Ok(Json(PipelineDto::from(updated)))
+}
+
+/// POST /pipelines/:id/trigger
+#[handler]
+pub async fn trigger_pipeline(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let id = parse_id(req)?;
+    let body: TriggerPipelineBody = parse_body(req).await?;
+
+    state
+        .trigger_evaluator
+        .fire_manual(id, body.params)
+        .map_err(ApiError::from)?;
+
+    res.status_code(StatusCode::ACCEPTED);
+    Ok(())
+}
+
+/// GET /pipelines/:id/runs
+#[handler]
+pub async fn list_runs(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<Vec<PipelineRunDto>>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let id = parse_id(req)?;
+    let limit = req.query::<u64>("limit").unwrap_or(50).clamp(1, 200);
+
+    let runs = state
+        .pipeline_run_repo
+        .list_runs_for_pipeline(id, limit)
+        .await?;
+
+    Ok(Json(runs.into_iter().map(PipelineRunDto::from).collect()))
+}
+
+/// GET /pipelines/:id/runs/:run_id
+#[handler]
+pub async fn get_run(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<PipelineRunDetailDto>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let pipeline_id = parse_id(req)?;
+    let run_id: Uuid = req
+        .param::<String>("run_id")
+        .unwrap_or_default()
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid run_id: expected UUID"))?;
+
+    let run = state
+        .pipeline_run_repo
+        .get_run(run_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("run {run_id} not found")))?;
+
+    if run.pipeline_id != pipeline_id {
+        return Err(ApiError::not_found(format!("run {run_id} not found")));
+    }
+
+    let nodes = state
+        .pipeline_run_repo
+        .list_node_results_for_run(run_id)
+        .await?;
+
+    Ok(Json(PipelineRunDetailDto {
+        run: PipelineRunDto::from(run),
+        nodes: nodes.into_iter().map(NodeResultDto::from).collect(),
+    }))
 }

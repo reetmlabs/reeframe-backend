@@ -1,4 +1,4 @@
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
 use vms_core::VmsError;
 
@@ -138,6 +138,32 @@ impl PipelineRunRepo {
     pub async fn get_run(&self, run_id: Uuid) -> Result<Option<pipeline_run::Model>, VmsError> {
         pipeline_run::Entity::find_by_id(run_id)
             .one(&self.db)
+            .await
+            .map_err(db_err)
+    }
+
+    /// Most-recent runs for a pipeline, newest first.
+    pub async fn list_runs_for_pipeline(
+        &self,
+        pipeline_id: Uuid,
+        limit: u64,
+    ) -> Result<Vec<pipeline_run::Model>, VmsError> {
+        pipeline_run::Entity::find()
+            .filter(pipeline_run::Column::PipelineId.eq(pipeline_id))
+            .order_by_desc(pipeline_run::Column::TriggeredAt)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(db_err)
+    }
+
+    pub async fn list_node_results_for_run(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<run_node_result::Model>, VmsError> {
+        run_node_result::Entity::find()
+            .filter(run_node_result::Column::RunId.eq(run_id))
+            .all(&self.db)
             .await
             .map_err(db_err)
     }
