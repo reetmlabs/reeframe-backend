@@ -45,10 +45,10 @@ fn codec_for(encoding_name: &str) -> Option<CodecElements> {
 /// depayloader + parser into the running pipeline:
 ///
 /// ```text
-/// rtspsrc --(pad-added)--► [rtph264depay|rtph265depay] --► [h264parse|h265parse]
+/// rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse]
 ///                                                                      │
 ///                                                                      ▼
-///                                                      tee --► queue --► splitmuxsink (MP4)
+///                                                      tee ---> queue ---> splitmuxsink (MP4)
 /// ```
 ///
 /// Elements that vary per-camera are named `cam_{id}_{role}` so the reconnect
@@ -102,7 +102,7 @@ pub(crate) fn build_camera_stream(
         .add_many([&src, &tee, &queue, &splitmux])
         .map_err(|e| VmsError::Media(format!("add_many: {e}")))?;
 
-    // tee --► queue --► splitmux (recording branch)
+    // tee ---> queue ---> splitmux (recording branch)
     let tee_src = tee
         .request_pad_simple("src_%u")
         .ok_or_else(|| VmsError::Media("tee: no src_%u pad template".into()))?;

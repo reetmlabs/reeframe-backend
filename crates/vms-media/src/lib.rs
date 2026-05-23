@@ -10,10 +10,10 @@
 //! # GStreamer element graph (per camera)
 //!
 //! ```text
-//! rtspsrc --(pad-added)--► [rtph264depay|rtph265depay] --► [h264parse|h265parse]
+//! rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse]
 //!                                                                      │
 //!                                                                      ▼
-//!                                                      tee --► queue --► splitmuxsink (MP4)
+//!                                                      tee ---> queue ---> splitmuxsink (MP4)
 //! ```
 //!
 //! The codec is detected at runtime from the camera's SDP (`encoding-name`

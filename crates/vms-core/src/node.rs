@@ -19,7 +19,7 @@
 //!       ▼
 //! [action handler]  ->  NodeOutput { artifact_path, text, metadata, … }
 //!       │
-//!       └─► forwarded to child nodes as their NodeInput::parent_outputs
+//!       └─-> forwarded to child nodes as their NodeInput::parent_outputs
 //! ```
 
 use std::path::PathBuf;
