@@ -13,7 +13,7 @@ use crate::camera_stream::{build_camera_stream, spawn_monitor};
 use crate::ring_buffer::RingBuffer;
 use crate::ring_buffer_branch;
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// -- Config --------------------------------------------------------------------
 
 /// Configuration for the Media Manager.
 pub struct MediaConfig {
@@ -32,7 +32,7 @@ impl Default for MediaConfig {
     }
 }
 
-// ── Internal per-camera handle ────────────────────────────────────────────────
+// -- Internal per-camera handle ------------------------------------------------
 
 struct CameraHandle {
     /// Keeps the pipeline alive alongside the monitor task.
@@ -44,15 +44,15 @@ struct CameraHandle {
     task: tokio::task::JoinHandle<()>,
 }
 
-// ── MediaManager ──────────────────────────────────────────────────────────────
+// -- MediaManager --------------------------------------------------------------
 
 /// Manages per-camera GStreamer pipelines.
 ///
 /// Each started camera gets one pipeline:
-/// `rtspsrc → rtph264depay → h264parse → tee → queue → splitmuxsink`
+/// `rtspsrc -> rtph264depay -> h264parse -> tee -> queue -> splitmuxsink`
 ///
 /// A background tokio task monitors the GStreamer bus for errors and EOS events
-/// and automatically reconnects with exponential backoff (2 s → 60 s).
+/// and automatically reconnects with exponential backoff (2 s -> 60 s).
 pub struct MediaManager {
     config: MediaConfig,
     cameras: Mutex<HashMap<Uuid, CameraHandle>>,

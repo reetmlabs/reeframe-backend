@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::error::VmsError;
 
-// ── Auth provider ─────────────────────────────────────────────────────────────
+// -- Auth provider -------------------------------------------------------------
 
 /// Verifies API tokens and manages authenticated sessions.
 ///
@@ -57,7 +57,7 @@ pub struct AuthClaims {
     pub expires_at: i64,
 }
 
-// ── Analytics provider ────────────────────────────────────────────────────────
+// -- Analytics provider --------------------------------------------------------
 
 /// Runs AI inference on camera frames and returns detections.
 ///
@@ -142,7 +142,7 @@ pub enum AnalyticsCapability {
     Custom(String),
 }
 
-// ── Audit sink ────────────────────────────────────────────────────────────────
+// -- Audit sink ----------------------------------------------------------------
 
 /// Records security-relevant events for compliance and forensics.
 ///
@@ -197,7 +197,7 @@ pub enum AuditOutcome {
     Denied,
 }
 
-// ── Cluster coordinator ───────────────────────────────────────────────────────
+// -- Cluster coordinator -------------------------------------------------------
 
 /// Manages distributed state and failover across VMS nodes.
 ///

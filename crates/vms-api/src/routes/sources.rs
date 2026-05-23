@@ -11,7 +11,7 @@ use crate::{
     state::AppState,
 };
 
-// ── Credential masking ────────────────────────────────────────────────────────
+// -- Credential masking --------------------------------------------------------
 
 /// Keys whose values are masked with `"***"` in GET responses.
 /// Must stay in sync with `vms_db::repos::CREDENTIAL_FIELDS`.
@@ -40,7 +40,7 @@ fn mask_config(mut config: serde_json::Value) -> serde_json::Value {
     config
 }
 
-// ── DTOs ──────────────────────────────────────────────────────────────────────
+// -- DTOs ----------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct SourceDto {
@@ -90,7 +90,7 @@ pub struct UpdateSourceBody {
     pub enabled: Option<bool>,
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// -- Handlers ------------------------------------------------------------------
 
 /// GET /sources
 #[handler]

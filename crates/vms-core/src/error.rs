@@ -9,8 +9,8 @@
 //!
 //! Blanket `From` implementations are provided for the two most common
 //! standard-library / ecosystem error types:
-//! - [`std::io::Error`] → [`VmsError::Io`]
-//! - [`serde_json::Error`] → [`VmsError::Serialization`]
+//! - [`std::io::Error`] -> [`VmsError::Io`]
+//! - [`serde_json::Error`] -> [`VmsError::Serialization`]
 //!
 //! Other conversions (SeaORM, GStreamer, etc.) live in the crates that introduce
 //! those dependencies, keeping `vms-core` dependency-free.

@@ -4,7 +4,7 @@ use gstreamer::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-// ── Supported codecs ──────────────────────────────────────────────────────────
+// -- Supported codecs ----------------------------------------------------------
 
 struct CodecElements {
     depay_factory: &'static str,
@@ -35,7 +35,7 @@ fn codec_for(encoding_name: &str) -> Option<CodecElements> {
     }
 }
 
-// ── Camera stream builder ─────────────────────────────────────────────────────
+// -- Camera stream builder -----------------------------------------------------
 
 /// Build a per-camera GStreamer pipeline for continuous recording.
 ///
@@ -45,10 +45,10 @@ fn codec_for(encoding_name: &str) -> Option<CodecElements> {
 /// depayloader + parser into the running pipeline:
 ///
 /// ```text
-/// rtspsrc ──(pad-added)──► [rtph264depay|rtph265depay] ──► [h264parse|h265parse]
+/// rtspsrc --(pad-added)--► [rtph264depay|rtph265depay] --► [h264parse|h265parse]
 ///                                                                      │
 ///                                                                      ▼
-///                                                      tee ──► queue ──► splitmuxsink (MP4)
+///                                                      tee --► queue --► splitmuxsink (MP4)
 /// ```
 ///
 /// Elements that vary per-camera are named `cam_{id}_{role}` so the reconnect
@@ -61,7 +61,7 @@ pub(crate) fn build_camera_stream(
 ) -> Result<gstreamer::Pipeline, VmsError> {
     let gst_pipeline = gstreamer::Pipeline::new();
 
-    // ── rtspsrc ───────────────────────────────────────────────────────────────
+    // -- rtspsrc ---------------------------------------------------------------
     let src = gstreamer::ElementFactory::make("rtspsrc")
         .name(format!("cam_{}_src", camera_id.as_simple()))
         .property("location", rtsp_url)
@@ -69,13 +69,13 @@ pub(crate) fn build_camera_stream(
         .build()
         .map_err(|e| VmsError::Media(format!("rtspsrc: {e}")))?;
 
-    // ── Tee (fan-out point — recording branch now, ring buffer / analytics later)
+    // -- Tee (fan-out point — recording branch now, ring buffer / analytics later)
     let tee = gstreamer::ElementFactory::make("tee")
         .name(format!("cam_{}_tee", camera_id.as_simple()))
         .build()
         .map_err(|e| VmsError::Media(format!("tee: {e}")))?;
 
-    // ── Recording branch: queue → splitmuxsink ────────────────────────────────
+    // -- Recording branch: queue -> splitmuxsink --------------------------------
     let queue = gstreamer::ElementFactory::make("queue")
         .name(format!("cam_{}_recqueue", camera_id.as_simple()))
         .property("max-size-time", 10_000_000_000u64) // 10 s jitter buffer
@@ -95,14 +95,14 @@ pub(crate) fn build_camera_stream(
         .build()
         .map_err(|e| VmsError::Media(format!("splitmuxsink: {e}")))?;
 
-    // ── Assemble static part of the pipeline ──────────────────────────────────
+    // -- Assemble static part of the pipeline ----------------------------------
     // Depayloader + parser are NOT added here — they are created dynamically
     // in the pad-added callback once we know the codec from the camera's SDP.
     gst_pipeline
         .add_many([&src, &tee, &queue, &splitmux])
         .map_err(|e| VmsError::Media(format!("add_many: {e}")))?;
 
-    // tee ──► queue ──► splitmux (recording branch)
+    // tee --► queue --► splitmux (recording branch)
     let tee_src = tee
         .request_pad_simple("src_%u")
         .ok_or_else(|| VmsError::Media("tee: no src_%u pad template".into()))?;
@@ -111,13 +111,13 @@ pub(crate) fn build_camera_stream(
         .ok_or_else(|| VmsError::Media("queue: no sink pad".into()))?;
     tee_src
         .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee→queue: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link tee->queue: {e}")))?;
 
     queue
         .link(&splitmux)
-        .map_err(|e| VmsError::Media(format!("link queue→splitmux: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link queue->splitmux: {e}")))?;
 
-    // ── Dynamic codec wiring ──────────────────────────────────────────────────
+    // -- Dynamic codec wiring --------------------------------------------------
     // rtspsrc only exposes src pads after it receives the SDP from the camera,
     // so we must wire the depay+parse chain at pad-added time.
     //
@@ -167,7 +167,7 @@ pub(crate) fn build_camera_stream(
         let depay_name = format!("cam_{}_depay", cam_id.as_simple());
         let parse_name = format!("cam_{}_parse", cam_id.as_simple());
 
-        // ── Reconnect path: elements exist, just re-link the src pad ─────────
+        // -- Reconnect path: elements exist, just re-link the src pad ---------
         if let Some(depay) = gst_pipeline.by_name(&depay_name) {
             let sink = match depay.static_pad("sink") {
                 Some(p) => p,
@@ -175,13 +175,13 @@ pub(crate) fn build_camera_stream(
             };
             if !sink.is_linked() {
                 if let Err(e) = src_pad.link(&sink) {
-                    tracing::error!(camera_id = %cam_id, "re-link rtspsrc→depay: {e}");
+                    tracing::error!(camera_id = %cam_id, "re-link rtspsrc->depay: {e}");
                 }
             }
             return;
         }
 
-        // ── First connection: create depay + parse for the negotiated codec ───
+        // -- First connection: create depay + parse for the negotiated codec ---
         let Some(codec) = codec_for(&encoding) else {
             tracing::warn!(camera_id = %cam_id, encoding, "Unsupported RTP encoding — camera feed ignored");
             return;
@@ -207,9 +207,9 @@ pub(crate) fn build_camera_stream(
             return;
         }
 
-        // depay → parse → tee
+        // depay -> parse -> tee
         if let Err(e) = gstreamer::Element::link_many([&depay, &parse, &tee]) {
-            tracing::error!(camera_id = %cam_id, "link depay→parse→tee: {e}");
+            tracing::error!(camera_id = %cam_id, "link depay->parse->tee: {e}");
             return;
         }
 
@@ -218,13 +218,13 @@ pub(crate) fn build_camera_stream(
             el.sync_state_with_parent().ok();
         }
 
-        // Link rtspsrc src pad → depay sink
+        // Link rtspsrc src pad -> depay sink
         let sink = match depay.static_pad("sink") {
             Some(p) => p,
             None => return,
         };
         if let Err(e) = src_pad.link(&sink) {
-            tracing::error!(camera_id = %cam_id, encoding, "rtspsrc→depay link: {e}");
+            tracing::error!(camera_id = %cam_id, encoding, "rtspsrc->depay link: {e}");
             return;
         }
 
@@ -234,11 +234,11 @@ pub(crate) fn build_camera_stream(
     Ok(gst_pipeline)
 }
 
-// ── Reconnect monitor task ────────────────────────────────────────────────────
+// -- Reconnect monitor task ----------------------------------------------------
 
 /// Spawn a tokio task that watches the GStreamer bus and reconnects on error/EOS.
 ///
-/// Backoff: 2 s → 4 s → … → 60 s cap, reset to 2 s after a successful restart.
+/// Backoff: 2 s -> 4 s -> … -> 60 s cap, reset to 2 s after a successful restart.
 /// On each reconnect the splitmuxsink location gets a fresh timestamp so chunks
 /// from different sessions never collide on disk.
 pub(crate) fn spawn_monitor(
@@ -253,13 +253,13 @@ pub(crate) fn spawn_monitor(
         const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
         loop {
-            // ── Shutdown check ────────────────────────────────────────────────
+            // -- Shutdown check ------------------------------------------------
             match shutdown_rx.try_recv() {
                 Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
 
-            // ── Drain bus ─────────────────────────────────────────────────────
+            // -- Drain bus -----------------------------------------------------
             let mut needs_reconnect = false;
 
             while let Some(msg) = bus.pop() {
@@ -294,7 +294,7 @@ pub(crate) fn spawn_monitor(
             if needs_reconnect {
                 gst_pipeline.set_state(gstreamer::State::Null).ok();
 
-                // Fresh timestamp prefix → no chunk filename collisions
+                // Fresh timestamp prefix -> no chunk filename collisions
                 let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
                 if let Some(splitmux) = gst_pipeline.by_name(&splitmux_name) {
                     splitmux
@@ -332,7 +332,7 @@ pub(crate) fn spawn_monitor(
     })
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// -- Helpers -------------------------------------------------------------------
 
 /// Unique chunk file location string for a recording session.
 ///

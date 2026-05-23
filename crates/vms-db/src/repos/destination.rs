@@ -8,7 +8,7 @@ use crate::{
     entities::destination::{self, ActiveModel, DestinationType},
 };
 
-// ── Input types ───────────────────────────────────────────────────────────────
+// -- Input types ---------------------------------------------------------------
 
 pub struct CreateDestination {
     pub name: String,
@@ -29,7 +29,7 @@ pub struct UpdateDestination {
     pub enabled: Option<bool>,
 }
 
-// ── Repository ────────────────────────────────────────────────────────────────
+// -- Repository ----------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct DestinationRepo {

@@ -86,7 +86,7 @@ impl RingBuffer {
     }
 }
 
-// ── RingBufferManager ─────────────────────────────────────────────────────────
+// -- RingBufferManager ---------------------------------------------------------
 
 /// Manages one [`RingBuffer`] per camera, backed by GStreamer appsink branches.
 ///
@@ -228,7 +228,7 @@ impl RingBufferManager {
     }
 }
 
-// ── Clip extraction helpers ───────────────────────────────────────────────────
+// -- Clip extraction helpers ---------------------------------------------------
 
 /// Trim `frames` to start at the first IDR/keyframe.
 fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame> {
@@ -240,7 +240,7 @@ fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame>
 
 /// Mux raw H.264 frames into an MP4 file at `output`.
 ///
-/// Pipeline: `appsrc → h264parse → mp4mux → filesink`.
+/// Pipeline: `appsrc -> h264parse -> mp4mux -> filesink`.
 /// PTS values are normalised to start from zero. Blocks until EOS or error.
 fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsError> {
     gstreamer::init().ok();
@@ -290,12 +290,12 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
 
     appsrc
         .link(&parse)
-        .map_err(|e| VmsError::Media(format!("link appsrc→h264parse: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link appsrc->h264parse: {e}")))?;
     parse
         .link(&mux)
-        .map_err(|e| VmsError::Media(format!("link h264parse→mp4mux: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link h264parse->mp4mux: {e}")))?;
     mux.link(&sink)
-        .map_err(|e| VmsError::Media(format!("link mp4mux→filesink: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link mp4mux->filesink: {e}")))?;
 
     pipeline
         .set_state(gstreamer::State::Playing)
@@ -340,7 +340,7 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
     Ok(())
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -378,7 +378,7 @@ mod tests {
         for s in 0..=10 {
             rb.push(frame(s));
         }
-        // latest = 10s, max_duration = 5s → frames at 0..4 should be evicted
+        // latest = 10s, max_duration = 5s -> frames at 0..4 should be evicted
         // frame at T=5 should survive (10 - 5 == 5, not > 5)
         let pts_values: Vec<u64> = rb.frames.iter().map(|f| f.pts.as_secs()).collect();
         assert!(
@@ -424,7 +424,7 @@ mod tests {
         for s in 0..=5 {
             rb.push(frame(s));
         }
-        // event at T=2, pre=10 → start = saturating_sub → 0
+        // event at T=2, pre=10 -> start = saturating_sub -> 0
         let clip = rb.extract(10, 0, Duration::from_secs(2));
         let pts: Vec<u64> = clip.iter().map(|f| f.pts.as_secs()).collect();
         assert_eq!(pts, vec![0, 1, 2]);

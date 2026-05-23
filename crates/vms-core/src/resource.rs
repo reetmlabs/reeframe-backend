@@ -2,8 +2,8 @@
 //!
 //! The Resource Manager applies a *Minimum Activation Principle*: a shared
 //! resource (camera pipeline, ring-buffer, analytics branch, destination pool)
-//! is started the first time its reference count goes from 0 → 1 and stopped
-//! the moment it drops back to 1 → 0.  This avoids duplicate GStreamer
+//! is started the first time its reference count goes from 0 -> 1 and stopped
+//! the moment it drops back to 1 -> 0.  This avoids duplicate GStreamer
 //! pipelines or connection pools when multiple VMS pipelines reference the
 //! same camera or destination.
 //!
@@ -33,7 +33,7 @@ pub enum RingBufferMode {
 pub enum ResourceId {
     /// An external source adapter (MQTT, Home Assistant WebSocket, HTTP poller, etc.).
     Source(Uuid),
-    /// The GStreamer pipeline for a camera (`rtspsrc → rtph264depay → tee`).
+    /// The GStreamer pipeline for a camera (`rtspsrc -> rtph264depay -> tee`).
     CameraPipeline(Uuid),
     /// The ring-buffer `appsink` branch and its drain task for a camera.
     RingBuffer(Uuid),
@@ -46,7 +46,7 @@ pub enum ResourceId {
 /// Lifecycle state of a managed resource.
 ///
 /// State transitions follow the sequence:
-/// `Stopped` → `Starting` → `Running` → `Stopping` → `Stopped`
+/// `Stopped` -> `Starting` -> `Running` -> `Stopping` -> `Stopped`
 ///
 /// If an error occurs at any point the resource moves to `Error(reason)`.
 /// The Resource Manager will attempt a restart the next time a pipeline

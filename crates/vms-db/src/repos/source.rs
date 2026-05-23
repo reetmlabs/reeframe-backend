@@ -8,7 +8,7 @@ use crate::{
     entities::source::{self, ActiveModel, SourceType},
 };
 
-// ── Input types ───────────────────────────────────────────────────────────────
+// -- Input types ---------------------------------------------------------------
 
 pub struct CreateSource {
     pub name: String,
@@ -29,7 +29,7 @@ pub struct UpdateSource {
     pub enabled: Option<bool>,
 }
 
-// ── Repository ────────────────────────────────────────────────────────────────
+// -- Repository ----------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct SourceRepo {

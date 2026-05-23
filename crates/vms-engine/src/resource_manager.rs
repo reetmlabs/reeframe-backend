@@ -16,7 +16,7 @@ use crate::PipelineRegistry;
 /// Ref-counted lifecycle coordinator for every shared resource the engine manages.
 ///
 /// Applies the *Minimum Activation Principle*: a resource is started when its
-/// ref count goes 0 → 1 and stopped when it drops back 1 → 0. This prevents
+/// ref count goes 0 -> 1 and stopped when it drops back 1 -> 0. This prevents
 /// duplicate GStreamer pipelines or connection pools when multiple VMS pipelines
 /// reference the same camera or destination.
 /// Default ring-buffer duration used when a pipeline requests a ring buffer
@@ -44,7 +44,7 @@ impl ResourceManager {
         })
     }
 
-    // ── Read API ──────────────────────────────────────────────────────────────
+    // -- Read API --------------------------------------------------------------
 
     /// Return a snapshot of the entry for `id`, or `None` if the resource has
     /// never been acquired.
@@ -62,7 +62,7 @@ impl ResourceManager {
             .collect()
     }
 
-    // ── Startup recovery ─────────────────────────────────────────────────────
+    // -- Startup recovery -----------------------------------------------------
 
     /// Acquire all resources required by the currently enabled pipelines in `registry`.
     ///
@@ -97,10 +97,10 @@ impl ResourceManager {
         Ok(())
     }
 
-    // ── Ref-count mutations ───────────────────────────────────────────────────
+    // -- Ref-count mutations ---------------------------------------------------
 
     /// Increment the ref count for `id`. Starts the resource if the count goes
-    /// from 0 → 1 (or the resource is in an `Error` state and needs a retry).
+    /// from 0 -> 1 (or the resource is in an `Error` state and needs a retry).
     pub async fn acquire(&self, id: ResourceId) -> Result<(), VmsError> {
         let should_start = {
             let mut entry = self.entries.entry(id.clone()).or_default();
@@ -176,7 +176,7 @@ impl ResourceManager {
         Ok(())
     }
 
-    // ── Start / stop dispatch ─────────────────────────────────────────────────
+    // -- Start / stop dispatch -------------------------------------------------
 
     async fn start(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
@@ -228,10 +228,10 @@ impl ResourceManager {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// -- Helpers -------------------------------------------------------------------
 
 /// Inject credentials into an RTSP URL if both username and password are present.
-/// `rtsp://host/path` + (user, pass) → `rtsp://user:pass@host/path`
+/// `rtsp://host/path` + (user, pass) -> `rtsp://user:pass@host/path`
 fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>) -> String {
     if let (Some(u), Some(p)) = (username, password) {
         if let Some(rest) = base_url.strip_prefix("rtsp://") {

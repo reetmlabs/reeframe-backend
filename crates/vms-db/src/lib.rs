@@ -23,8 +23,8 @@
 //! | [`entities::pipeline_edge`] | `pipeline_edges` | DAG edges connecting nodes |
 //! | [`entities::pipeline_run`] | `pipeline_runs` | Execution history record |
 //! | [`entities::run_node_result`] | `run_node_results` | Per-node execution results within a run |
-//! | [`entities::pipeline_source_ref`] | `pipeline_source_refs` | Resource Manager: pipeline → source refs |
-//! | [`entities::pipeline_camera_ref`] | `pipeline_camera_refs` | Resource Manager: pipeline → camera refs |
+//! | [`entities::pipeline_source_ref`] | `pipeline_source_refs` | Resource Manager: pipeline -> source refs |
+//! | [`entities::pipeline_camera_ref`] | `pipeline_camera_refs` | Resource Manager: pipeline -> camera refs |
 
 pub mod crypto;
 pub mod entities;

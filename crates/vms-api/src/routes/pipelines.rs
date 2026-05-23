@@ -11,7 +11,7 @@ use crate::{
     state::AppState,
 };
 
-// ── Response DTO ──────────────────────────────────────────────────────────────
+// -- Response DTO --------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct PipelineDto {
@@ -38,7 +38,7 @@ impl From<pipeline::Model> for PipelineDto {
     }
 }
 
-// ── Request bodies ────────────────────────────────────────────────────────────
+// -- Request bodies ------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct CreatePipelineBody {
@@ -54,7 +54,7 @@ pub struct UpdatePipelineBody {
     pub description: Option<Option<String>>,
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// -- Handlers ------------------------------------------------------------------
 
 /// GET /pipelines
 #[handler]

@@ -6,7 +6,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-// ── Sub-sections ──────────────────────────────────────────────────────────────
+// -- Sub-sections --------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DatabaseConfig {
@@ -57,7 +57,7 @@ impl Default for ApiConfig {
     }
 }
 
-// ── Root config ───────────────────────────────────────────────────────────────
+// -- Root config ---------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -85,9 +85,9 @@ impl Default for AppConfig {
     }
 }
 
-// ── Loader ────────────────────────────────────────────────────────────────────
+// -- Loader --------------------------------------------------------------------
 
-/// Load `AppConfig` from a layered set of sources (lowest → highest priority):
+/// Load `AppConfig` from a layered set of sources (lowest -> highest priority):
 ///
 /// 1. Built-in defaults (`AppConfig::default()`)
 /// 2. `/etc/onward/config.toml`  — system-wide config (silently skipped if absent)

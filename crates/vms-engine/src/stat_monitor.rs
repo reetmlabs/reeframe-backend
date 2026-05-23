@@ -39,7 +39,7 @@ impl StatMonitor {
         })
     }
 
-    // ── Polling loop ─────────────────────────────────────────────────────────
+    // -- Polling loop ---------------------------------------------------------
 
     /// Spawn the background polling loop.
     ///
@@ -81,21 +81,21 @@ impl StatMonitor {
     fn poll(&self) -> bool {
         let mut near = false;
 
-        // ── CPU ───────────────────────────────────────────────────────────────
+        // -- CPU ---------------------------------------------------------------
         let cpu = self.cpu_percent();
         tracing::trace!(cpu, "cpu_usage_percent");
         self.evaluator
             .evaluate_stat(&StatMetric::CpuUsagePercent, None, None, cpu);
         near |= self.is_near_threshold(&StatMetric::CpuUsagePercent, None, cpu);
 
-        // ── RAM ───────────────────────────────────────────────────────────────
+        // -- RAM ---------------------------------------------------------------
         let ram = self.ram_percent();
         tracing::trace!(ram, "ram_usage_percent");
         self.evaluator
             .evaluate_stat(&StatMetric::RamUsagePercent, None, None, ram);
         near |= self.is_near_threshold(&StatMetric::RamUsagePercent, None, ram);
 
-        // ── Disk — only paths referenced by active triggers ───────────────────
+        // -- Disk — only paths referenced by active triggers -------------------
         for path in self.active_disk_paths() {
             match self.disk_percent(&path) {
                 Some(pct) => {
@@ -200,7 +200,7 @@ impl StatMonitor {
         paths
     }
 
-    // ── Metric samplers ───────────────────────────────────────────────────────
+    // -- Metric samplers -------------------------------------------------------
 
     /// Aggregate CPU utilisation across all cores (0–100 %).
     ///
@@ -248,7 +248,7 @@ impl StatMonitor {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -312,7 +312,7 @@ mod tests {
         assert!(pct.is_none());
     }
 
-    // ── Polling helpers ───────────────────────────────────────────────────────
+    // -- Polling helpers -------------------------------------------------------
 
     fn make_disk_pipeline(path: &str) -> vms_core::pipeline::CompiledPipeline {
         use std::collections::HashMap;
@@ -376,7 +376,7 @@ mod tests {
         mon.poll();
     }
 
-    // ── Adaptive interval helpers ─────────────────────────────────────────────
+    // -- Adaptive interval helpers ---------------------------------------------
 
     fn make_cpu_monitor(threshold: f64) -> Arc<StatMonitor> {
         use std::collections::HashMap;
@@ -427,7 +427,7 @@ mod tests {
     // A value within NEAR_MARGIN of the threshold is considered near.
     #[test]
     fn is_near_threshold_true_when_within_margin() {
-        // threshold = 80, actual = 75 → distance = |75-80|/80 = 0.0625 < 0.20
+        // threshold = 80, actual = 75 -> distance = |75-80|/80 = 0.0625 < 0.20
         let mon = make_cpu_monitor(80.0);
         assert!(mon.is_near_threshold(&StatMetric::CpuUsagePercent, None, 75.0));
     }
@@ -435,7 +435,7 @@ mod tests {
     // A value far from the threshold is not near.
     #[test]
     fn is_near_threshold_false_when_outside_margin() {
-        // threshold = 80, actual = 40 → distance = |40-80|/80 = 0.50 > 0.20
+        // threshold = 80, actual = 40 -> distance = |40-80|/80 = 0.50 > 0.20
         let mon = make_cpu_monitor(80.0);
         assert!(!mon.is_near_threshold(&StatMetric::CpuUsagePercent, None, 40.0));
     }

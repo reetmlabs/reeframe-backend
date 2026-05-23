@@ -13,7 +13,7 @@ use vms_db::{
     PipelineRunRepo,
 };
 
-// ── Executor ──────────────────────────────────────────────────────────────────
+// -- Executor ------------------------------------------------------------------
 
 /// Executes a compiled pipeline DAG for a given trigger context.
 ///
@@ -47,7 +47,7 @@ impl PipelineExecutor {
     ) -> Result<(), VmsError> {
         let trigger_json = serde_json::to_value(&ctx)?;
 
-        // ── 1. Create run row (Running) ───────────────────────────────────────
+        // -- 1. Create run row (Running) ---------------------------------------
         let run = self
             .repo
             .create_run(pipeline.id, Some(ctx.trigger_id), trigger_json)
@@ -63,19 +63,19 @@ impl PipelineExecutor {
             "Pipeline run started",
         );
 
-        // ── 2. Pre-create node-result rows (Pending) ──────────────────────────
+        // -- 2. Pre-create node-result rows (Pending) --------------------------
         let mut result_ids: HashMap<NodeId, Uuid> = HashMap::new();
         for &node_id in &pipeline.dag.topological_order {
             let row = self.repo.create_node_result(run_id, node_id).await?;
             result_ids.insert(node_id, row.id);
         }
 
-        // ── 3. Walk the DAG ───────────────────────────────────────────────────
+        // -- 3. Walk the DAG ---------------------------------------------------
         let outcome = self
             .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids)
             .await;
 
-        // ── 4. Finalise run ───────────────────────────────────────────────────
+        // -- 4. Finalise run ---------------------------------------------------
         match &outcome {
             Ok(()) => {
                 self.repo
@@ -99,7 +99,7 @@ impl PipelineExecutor {
         outcome
     }
 
-    // ── DAG walk ──────────────────────────────────────────────────────────────
+    // -- DAG walk --------------------------------------------------------------
 
     /// Concurrent DAG walk using a [`JoinSet`].
     ///
@@ -255,7 +255,7 @@ impl PipelineExecutor {
     }
 }
 
-// ── Child-activation helper ───────────────────────────────────────────────────
+// -- Child-activation helper ---------------------------------------------------
 
 /// Returns `true` if the child on `edge_type` should be treated as actively
 /// receiving output from `parent_type`.
@@ -278,7 +278,7 @@ pub(crate) fn child_is_active(
     }
 }
 
-// ── Node execution stubs ──────────────────────────────────────────────────────
+// -- Node execution stubs ------------------------------------------------------
 
 /// Execute a single pipeline node and return its output.
 ///
@@ -340,7 +340,7 @@ pub(crate) fn build_condition_context(parent_outputs: &[serde_json::Value]) -> H
     ctx
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -377,7 +377,7 @@ mod tests {
         TriggerContext::for_schedule(Uuid::new_v4(), pid)
     }
 
-    // ── child_is_active ───────────────────────────────────────────────────────
+    // -- child_is_active -------------------------------------------------------
 
     #[test]
     fn non_condition_activates_all_children() {
@@ -410,7 +410,7 @@ mod tests {
         ));
     }
 
-    // ── build_condition_context ───────────────────────────────────────────────
+    // -- build_condition_context -----------------------------------------------
 
     #[test]
     fn condition_context_exposes_parent_fields() {
@@ -427,7 +427,7 @@ mod tests {
         assert!(evalexpr::eval_boolean_with_context("x > 1", &ctx).is_err());
     }
 
-    // ── execute_node ──────────────────────────────────────────────────────────
+    // -- execute_node ----------------------------------------------------------
 
     #[tokio::test]
     async fn trigger_root_returns_context_json() {
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(out, serde_json::Value::Null);
     }
 
-    // ── DAG structural sanity (no DB — compile only) ──────────────────────────
+    // -- DAG structural sanity (no DB — compile only) --------------------------
 
     #[test]
     fn dag_compile_root_to_transport() {

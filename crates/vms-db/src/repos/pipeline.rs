@@ -20,7 +20,7 @@ use crate::entities::{
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
 
-// ── Input types ───────────────────────────────────────────────────────────────
+// -- Input types ---------------------------------------------------------------
 
 pub struct CreatePipeline {
     pub name: String,
@@ -33,7 +33,7 @@ pub struct UpdatePipeline {
     pub description: Option<Option<String>>,
 }
 
-// ── Repository ────────────────────────────────────────────────────────────────
+// -- Repository ----------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct PipelineRepo {
@@ -120,7 +120,7 @@ impl PipelineRepo {
         Ok(())
     }
 
-    // ── Compiled loader ───────────────────────────────────────────────────────
+    // -- Compiled loader -------------------------------------------------------
 
     /// Load and compile a single pipeline by id.
     ///
@@ -169,7 +169,7 @@ impl PipelineRepo {
         Ok(rows.into_iter().map(|r| r.source_id).collect())
     }
 
-    // ── Graph loaders ─────────────────────────────────────────────────────────
+    // -- Graph loaders ---------------------------------------------------------
 
     pub async fn load_nodes(&self, pipeline_id: Uuid) -> Result<Vec<PipelineNode>, VmsError> {
         let rows = pipeline_node::Entity::find()
@@ -202,7 +202,7 @@ impl PipelineRepo {
     }
 }
 
-// ── DB-to-domain translation ──────────────────────────────────────────────────
+// -- DB-to-domain translation --------------------------------------------------
 
 fn node_from_db(m: pipeline_node::Model) -> Result<PipelineNode, VmsError> {
     use pipeline_node::NodeType as Db;

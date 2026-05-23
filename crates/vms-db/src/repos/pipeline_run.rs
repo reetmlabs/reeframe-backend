@@ -9,7 +9,7 @@ use crate::entities::{
 
 use super::{db_err, now};
 
-// ── Repository ────────────────────────────────────────────────────────────────
+// -- Repository ----------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct PipelineRunRepo {
@@ -21,7 +21,7 @@ impl PipelineRunRepo {
         Self { db }
     }
 
-    // ── Run lifecycle ─────────────────────────────────────────────────────────
+    // -- Run lifecycle ---------------------------------------------------------
 
     /// Insert a new `pipeline_runs` row in `Running` state.
     ///
@@ -69,7 +69,7 @@ impl PipelineRunRepo {
         Ok(())
     }
 
-    // ── Node result lifecycle ─────────────────────────────────────────────────
+    // -- Node result lifecycle -------------------------------------------------
 
     /// Insert a `run_node_results` row in `Pending` state.
     ///
@@ -133,7 +133,7 @@ impl PipelineRunRepo {
         Ok(())
     }
 
-    // ── Queries ───────────────────────────────────────────────────────────────
+    // -- Queries ---------------------------------------------------------------
 
     pub async fn get_run(&self, run_id: Uuid) -> Result<Option<pipeline_run::Model>, VmsError> {
         pipeline_run::Entity::find_by_id(run_id)

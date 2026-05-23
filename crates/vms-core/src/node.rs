@@ -11,13 +11,13 @@
 //! TriggerContext
 //!       │
 //!       ▼
-//! NodeOutput::from_trigger_context   ← seed output for the trigger-root node
+//! NodeOutput::from_trigger_context   <- seed output for the trigger-root node
 //!       │
 //!       ▼  (executor stores in run_node_results)
 //! NodeInput { parent_outputs: [root_output], trigger_ctx }
 //!       │
 //!       ▼
-//! [action handler]  →  NodeOutput { artifact_path, text, metadata, … }
+//! [action handler]  ->  NodeOutput { artifact_path, text, metadata, … }
 //!       │
 //!       └─► forwarded to child nodes as their NodeInput::parent_outputs
 //! ```
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::pipeline::NodeId;
 use crate::trigger::TriggerContext;
 
-// ── Node output ───────────────────────────────────────────────────────────────
+// -- Node output ---------------------------------------------------------------
 
 /// The result produced by a node after execution.
 ///
@@ -125,7 +125,7 @@ impl NodeOutput {
     }
 }
 
-// ── Node input ────────────────────────────────────────────────────────────────
+// -- Node input ----------------------------------------------------------------
 
 /// What a node receives when the executor schedules it for execution.
 ///

@@ -11,7 +11,7 @@ use crate::{
     state::AppState,
 };
 
-// ── Credential masking ────────────────────────────────────────────────────────
+// -- Credential masking --------------------------------------------------------
 
 const CREDENTIAL_FIELDS: &[&str] = &[
     "password",
@@ -38,7 +38,7 @@ fn mask_config(mut config: serde_json::Value) -> serde_json::Value {
     config
 }
 
-// ── DTOs ──────────────────────────────────────────────────────────────────────
+// -- DTOs ----------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct DestinationDto {
@@ -88,7 +88,7 @@ pub struct UpdateDestinationBody {
     pub enabled: Option<bool>,
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// -- Handlers ------------------------------------------------------------------
 
 /// GET /destinations
 #[handler]
