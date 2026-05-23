@@ -1,10 +1,12 @@
 mod cameras;
 mod destinations;
 mod health;
+mod pipelines;
 mod sources;
 
 pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
+pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
 
 use salvo::prelude::*;
@@ -51,6 +53,19 @@ pub fn build_router(state: AppState) -> Router {
                         .get(destinations::get_destination)
                         .patch(destinations::update_destination)
                         .delete(destinations::delete_destination),
+                ),
+        )
+        .push(
+            Router::with_path("pipelines")
+                .get(pipelines::list_pipelines)
+                .post(pipelines::create_pipeline)
+                .push(
+                    Router::with_path("{id}")
+                        .get(pipelines::get_pipeline)
+                        .patch(pipelines::update_pipeline)
+                        .delete(pipelines::delete_pipeline)
+                        .push(Router::with_path("enable").post(pipelines::enable_pipeline))
+                        .push(Router::with_path("disable").post(pipelines::disable_pipeline)),
                 ),
         )
 }
