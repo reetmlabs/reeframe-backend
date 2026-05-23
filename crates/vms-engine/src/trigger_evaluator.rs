@@ -16,7 +16,7 @@ use vms_core::{
     TriggerType, VmsError,
 };
 
-use crate::{time_helpers, EventBus, PipelineRegistry};
+use crate::{time_helpers, EventBus, PipelineExecutor, PipelineRegistry};
 
 /// Evaluates pipeline triggers and dispatches pipeline runs.
 ///
@@ -26,12 +26,10 @@ use crate::{time_helpers, EventBus, PipelineRegistry};
 /// - `System`   — fired via the same EventBus loop on the system topic.
 /// - `Schedule` — fired by the cron / interval scheduler.
 /// - `Stat`     — fired when a metric event crosses a threshold.
-///
-/// [`fire_pipeline`] is currently a stub — it logs the context and returns.
-/// The real Pipeline Executor is wired in future.
 pub struct TriggerEvaluator {
     registry: Arc<PipelineRegistry>,
     event_bus: Arc<EventBus>,
+    executor: Option<Arc<PipelineExecutor>>,
     /// Holds the cron scheduler after `start_schedulers` is called.
     cron_scheduler: Mutex<Option<JobScheduler>>,
     /// Tracks the last time each stat trigger fired: (pipeline_id, trigger_id) → Instant.
@@ -41,10 +39,31 @@ pub struct TriggerEvaluator {
 }
 
 impl TriggerEvaluator {
-    pub fn new(registry: Arc<PipelineRegistry>, event_bus: Arc<EventBus>) -> Arc<Self> {
+    pub fn new(
+        registry: Arc<PipelineRegistry>,
+        event_bus: Arc<EventBus>,
+        executor: Arc<PipelineExecutor>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             registry,
             event_bus,
+            executor: Some(executor),
+            cron_scheduler: Mutex::new(None),
+            stat_cooldowns: DashMap::new(),
+            stat_sustained: DashMap::new(),
+        })
+    }
+
+    /// Test-only constructor — no executor, `fire_pipeline` logs and returns.
+    #[cfg(test)]
+    pub(crate) fn new_without_executor(
+        registry: Arc<PipelineRegistry>,
+        event_bus: Arc<EventBus>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            event_bus,
+            executor: None,
             cron_scheduler: Mutex::new(None),
             stat_cooldowns: DashMap::new(),
             stat_sustained: DashMap::new(),
@@ -529,15 +548,34 @@ impl TriggerEvaluator {
 
     /// Dispatch a pipeline run for the given trigger context.
     ///
-    /// Stub — logs the firing event. Replaced by the real Pipeline Executor.
+    /// Looks up the pipeline in the registry and spawns an async task that
+    /// calls [`PipelineExecutor::execute`].  If no executor is wired (test
+    /// builds) the firing is only logged.
     pub(crate) fn fire_pipeline(&self, ctx: TriggerContext) {
-        tracing::info!(
-            pipeline_id  = %ctx.pipeline_id,
-            trigger_id   = %ctx.trigger_id,
-            trigger_type = ?ctx.trigger_type,
-            fired_at     = %ctx.fired_at,
-            "Pipeline trigger fired",
-        );
+        let Some(executor) = self.executor.clone() else {
+            tracing::info!(
+                pipeline_id  = %ctx.pipeline_id,
+                trigger_id   = %ctx.trigger_id,
+                trigger_type = ?ctx.trigger_type,
+                fired_at     = %ctx.fired_at,
+                "Pipeline trigger fired (no executor wired)",
+            );
+            return;
+        };
+
+        let Some(pipeline) = self.registry.get(ctx.pipeline_id) else {
+            tracing::warn!(
+                pipeline_id = %ctx.pipeline_id,
+                "Pipeline not found in registry at fire time — skipping",
+            );
+            return;
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = executor.execute(ctx, pipeline).await {
+                tracing::error!(error = %e, "Pipeline execution failed");
+            }
+        });
     }
 }
 
@@ -689,7 +727,7 @@ mod tests {
         let pipeline = make_stat_pipeline(pipeline_id, StatMetric::CpuUsagePercent, 80.0, 0, 0);
         let registry = PipelineRegistry::new_test(vec![pipeline]);
         let event_bus = EventBus::new(16);
-        let ev = TriggerEvaluator::new(registry, event_bus);
+        let ev = TriggerEvaluator::new_without_executor(registry, event_bus);
 
         // No panic; stat_cooldowns should have an entry after firing.
         ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 90.0);
@@ -704,7 +742,7 @@ mod tests {
         let pipeline = make_stat_pipeline(pipeline_id, StatMetric::CpuUsagePercent, 80.0, 0, 0);
         let registry = PipelineRegistry::new_test(vec![pipeline]);
         let event_bus = EventBus::new(16);
-        let ev = TriggerEvaluator::new(registry, event_bus);
+        let ev = TriggerEvaluator::new_without_executor(registry, event_bus);
 
         ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 50.0);
         assert!(ev.stat_cooldowns.is_empty());
@@ -719,7 +757,7 @@ mod tests {
         let pipeline = make_stat_pipeline(pipeline_id, StatMetric::RamUsagePercent, 70.0, 30, 0);
         let registry = PipelineRegistry::new_test(vec![pipeline]);
         let event_bus = EventBus::new(16);
-        let ev = TriggerEvaluator::new(registry, event_bus);
+        let ev = TriggerEvaluator::new_without_executor(registry, event_bus);
 
         ev.evaluate_stat(&StatMetric::RamUsagePercent, None, None, 85.0);
         // Condition is met, but not yet sustained for 30s — no firing.
@@ -736,7 +774,7 @@ mod tests {
         let pipeline = make_stat_pipeline(pipeline_id, StatMetric::CpuUsagePercent, 80.0, 10, 0);
         let registry = PipelineRegistry::new_test(vec![pipeline]);
         let event_bus = EventBus::new(16);
-        let ev = TriggerEvaluator::new(registry, event_bus);
+        let ev = TriggerEvaluator::new_without_executor(registry, event_bus);
 
         // Rising edge — sustained clock starts.
         ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 90.0);

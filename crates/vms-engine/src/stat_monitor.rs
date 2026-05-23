@@ -258,7 +258,7 @@ mod tests {
     fn make_monitor() -> Arc<StatMonitor> {
         let registry = PipelineRegistry::new_test(vec![]);
         let event_bus = EventBus::new(16);
-        let evaluator = TriggerEvaluator::new(registry.clone(), event_bus);
+        let evaluator = TriggerEvaluator::new_without_executor(registry.clone(), event_bus);
         StatMonitor::new(evaluator, registry)
     }
 
@@ -361,7 +361,7 @@ mod tests {
         let pipeline = make_disk_pipeline("/var/lib/vms");
         let registry = PipelineRegistry::new_test(vec![pipeline]);
         let event_bus = EventBus::new(16);
-        let evaluator = TriggerEvaluator::new(registry.clone(), event_bus);
+        let evaluator = TriggerEvaluator::new_without_executor(registry.clone(), event_bus);
         let mon = StatMonitor::new(evaluator, registry);
 
         let paths = mon.active_disk_paths();
@@ -420,7 +420,7 @@ mod tests {
         };
         let registry = PipelineRegistry::new_test(vec![pipeline]);
         let event_bus = EventBus::new(16);
-        let evaluator = TriggerEvaluator::new(registry.clone(), event_bus);
+        let evaluator = TriggerEvaluator::new_without_executor(registry.clone(), event_bus);
         StatMonitor::new(evaluator, registry)
     }
 

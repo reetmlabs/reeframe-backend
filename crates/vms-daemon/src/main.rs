@@ -12,7 +12,9 @@ use vms_api::{routes::build_router, state::AppState};
 use vms_db::{
     CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, PipelineRunRepo, SourceRepo,
 };
-use vms_engine::{EventBus, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator};
+use vms_engine::{
+    EventBus, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
+};
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 
 #[tokio::main]
@@ -132,8 +134,13 @@ async fn main() -> anyhow::Result<()> {
         })?;
     tracing::info!("Resource manager ready");
 
+    // ── Pipeline Executor ─────────────────────────────────────────────────────
+    let pipeline_executor = PipelineExecutor::new(pipeline_run_repo.clone());
+    tracing::info!("Pipeline executor ready");
+
     // ── Trigger Evaluator ─────────────────────────────────────────────────────
-    let trigger_evaluator = TriggerEvaluator::new(pipeline_registry.clone(), event_bus.clone());
+    let trigger_evaluator =
+        TriggerEvaluator::new(pipeline_registry.clone(), event_bus.clone(), pipeline_executor);
 
     trigger_evaluator.clone().start_event_listener();
     tracing::info!("Trigger evaluator event listeners started");
