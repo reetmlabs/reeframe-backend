@@ -69,26 +69,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root service account
-RUN groupadd --system onward \
-    && useradd --system --gid onward --no-create-home --shell /usr/sbin/nologin onward
+RUN groupadd --system reeframe \
+    && useradd --system --gid reeframe --no-create-home --shell /usr/sbin/nologin reeframe
 
 # Persistent data directory (recordings + SQLite DB)
-RUN mkdir -p /var/lib/onward/recordings \
-    && chown -R onward:onward /var/lib/onward
+RUN mkdir -p /var/lib/reeframe/recordings \
+    && chown -R reeframe:reeframe /var/lib/reeframe
 
 COPY --from=builder /build/target/release/vms-daemon /usr/local/bin/vms-daemon
 
-USER onward
+USER reeframe
 
 # Default runtime configuration — all values can be overridden via environment
-# variables or a mounted config file at /etc/onward/config.toml.
-ENV VMS_DATABASE__URL="sqlite:///var/lib/onward/onward.db" \
+# variables or a mounted config file at /etc/reeframe/config.toml.
+ENV VMS_DATABASE__URL="sqlite:///var/lib/reeframe/reeframe.db" \
     VMS_API__BIND="0.0.0.0:8080" \
     RUST_LOG="info"
 
-# /var/lib/onward holds both the SQLite database and the recordings directory.
+# /var/lib/reeframe holds both the SQLite database and the recordings directory.
 # Mount a named volume here so data survives container restarts.
-VOLUME ["/var/lib/onward"]
+VOLUME ["/var/lib/reeframe"]
 
 EXPOSE 8080
 

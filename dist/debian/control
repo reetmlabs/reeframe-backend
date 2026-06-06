@@ -1,17 +1,17 @@
-Package: onward-vms
+Package: reeframe-backend
 Version: 0.1.0
 Architecture: amd64
-Maintainer: OneWard VMS Contributors <mo.armoun@gmail.com>
+Maintainer: Reeframe VMS Contributors <mo.armoun@gmail.com>
 Section: video
 Priority: optional
-Homepage: https://github.com/yourorg/onward-vms
-Description: OneWard VMS — pipeline-driven video management system
+Homepage: https://github.com/yourorg/reeframe-backend
+Description: Reeframe VMS — pipeline-driven video management system
  A Rust-native video management system built around a composable pipeline DAG.
  Records RTSP camera streams as chunked MP4 files, with automatic reconnection
  and per-credential AES-256-GCM encryption at rest.
  .
  This package installs the community edition daemon (vms-daemon) and a systemd
- unit file. An encryption key must be set in /etc/onward/env before the service
+ unit file. An encryption key must be set in /etc/reeframe/env before the service
  can start.
 Depends: libgstreamer1.0-0 (>= 1.20),
          gstreamer1.0-plugins-base (>= 1.20),

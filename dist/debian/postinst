@@ -4,52 +4,52 @@ set -e
 case "$1" in
     configure)
         # ── Create service account ─────────────────────────────────────────────
-        if ! getent group onward > /dev/null 2>&1; then
-            groupadd --system onward
+        if ! getent group reeframe > /dev/null 2>&1; then
+            groupadd --system reeframe
         fi
 
-        if ! getent passwd onward > /dev/null 2>&1; then
+        if ! getent passwd reeframe > /dev/null 2>&1; then
             useradd \
                 --system \
-                --gid onward \
+                --gid reeframe \
                 --no-create-home \
                 --shell /usr/sbin/nologin \
-                --comment "OneWard VMS daemon" \
-                onward
+                --comment "Reeframe VMS daemon" \
+                reeframe
         fi
 
         # ── Create data and config directories ────────────────────────────────
-        install -d -m 0750 -o onward -g onward /var/lib/onward
-        install -d -m 0750 -o onward -g onward /var/lib/onward/recordings
+        install -d -m 0750 -o reeframe -g reeframe /var/lib/reeframe
+        install -d -m 0750 -o reeframe -g reeframe /var/lib/reeframe/recordings
 
-        # Create /etc/onward and a stub env file if neither exists yet.
+        # Create /etc/reeframe and a stub env file if neither exists yet.
         # The stub is root-only (0600) so secrets written into it are not
         # world-readable.
-        install -d -m 0755 /etc/onward
-        if [ ! -f /etc/onward/env ]; then
-            cat > /etc/onward/env <<'EOF'
-# OneWard VMS environment — loaded by systemd before starting the daemon.
-# Protect this file: chmod 600 /etc/onward/env
+        install -d -m 0755 /etc/reeframe
+        if [ ! -f /etc/reeframe/env ]; then
+            cat > /etc/reeframe/env <<'EOF'
+# Reeframe VMS environment — loaded by systemd before starting the daemon.
+# Protect this file: chmod 600 /etc/reeframe/env
 
 # REQUIRED — generate with: openssl rand -base64 32
 # VMS_ENCRYPTION_KEY=
 
 # Optional overrides (built-in defaults shown):
-# VMS_DATABASE__URL=sqlite:///var/lib/onward/onward.db
-# VMS_MEDIA__RECORDING_DIR=/var/lib/onward/recordings
+# VMS_DATABASE__URL=sqlite:///var/lib/reeframe/reeframe.db
+# VMS_MEDIA__RECORDING_DIR=/var/lib/reeframe/recordings
 # VMS_API__BIND=0.0.0.0:8080
 # RUST_LOG=info
 EOF
-            chmod 0600 /etc/onward/env
+            chmod 0600 /etc/reeframe/env
         fi
 
         # ── Enable and start the service ──────────────────────────────────────
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload
-            systemctl enable onward.service
+            systemctl enable reeframe.service
             # Only start automatically on first install, not on upgrade.
             if [ -z "$2" ]; then
-                systemctl start onward.service || true
+                systemctl start reeframe.service || true
             fi
         fi
         ;;
