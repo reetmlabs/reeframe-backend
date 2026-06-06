@@ -91,7 +91,7 @@ impl RingBuffer {
     }
 }
 
-// -- RingBufferManager ---------------------------------------------------------
+// -- RingBufferManager --
 
 /// Manages one [`RingBuffer`] per camera, backed by GStreamer appsink branches.
 ///
@@ -244,7 +244,7 @@ impl RingBufferManager {
     }
 }
 
-// -- Clip extraction helpers ---------------------------------------------------
+// -- Clip extraction helpers --
 
 /// Trim `frames` to start at the first IDR/keyframe.
 fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame> {
@@ -356,7 +356,7 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
     Ok(())
 }
 
-// -- Tests ---------------------------------------------------------------------
+// -- Tests --
 
 #[cfg(test)]
 mod tests {

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .with_span_list(true)
         .init();
 
-    // -- Config ----------------------------------------------------------------
+    // -- Config --
     let cfg = config::load().map_err(|e| {
         tracing::error!(error = %e, "Failed to load configuration");
         anyhow::anyhow!(e)
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("missing encryption key"));
     }
 
-    // -- Database --------------------------------------------------------------
+    // -- Database --
     tracing::info!(db = db_kind(&cfg.database.url), "Connecting to database");
 
     let db = Database::connect(&cfg.database.url).await.map_err(|e| {
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Database connected");
 
-    // -- Migrations ------------------------------------------------------------
+    // -- Migrations --
     let pending = Migrator::get_pending_migrations(&db).await.map_err(|e| {
         tracing::error!(error = %e, "Failed to check pending migrations");
         anyhow::anyhow!(e)
@@ -76,14 +76,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(count = pending.len(), "Migrations applied");
     }
 
-    // -- Crypto ----------------------------------------------------------------
+    // -- Crypto --
     let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {
         tracing::error!(error = %e, "Invalid encryption key");
         anyhow::anyhow!(e)
     })?;
     tracing::info!("Encryption key loaded");
 
-    // -- Repositories ----------------------------------------------------------
+    // -- Repositories --
     let camera_repo = CameraRepo::new(db.clone(), crypto.clone());
     let source_repo = SourceRepo::new(db.clone(), crypto.clone());
     let dest_repo = DestinationRepo::new(db.clone(), crypto);
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
     let pipeline_run_repo = PipelineRunRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
-    // -- Media Manager ---------------------------------------------------------
+    // -- Media Manager --
     let media_manager = Arc::new(
         MediaManager::new(MediaConfig {
             recording_dir: cfg.media.recording_dir.clone(),
@@ -104,22 +104,22 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Media manager ready");
 
-    // -- Ring Buffer Manager ---------------------------------------------------
+    // -- Ring Buffer Manager --
     let ring_buffer_manager = RingBufferManager::new(media_manager.clone());
     tracing::info!("Ring buffer manager ready");
 
-    // -- Event Bus -------------------------------------------------------------
+    // -- Event Bus --
     let event_bus = EventBus::new(vms_engine::DEFAULT_CAPACITY);
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
 
-    // -- Pipeline Registry -----------------------------------------------------
+    // -- Pipeline Registry --
     let pipeline_registry = PipelineRegistry::new(pipeline_repo.clone());
     pipeline_registry.load().await.map_err(|e| {
         tracing::error!(error = %e, "Failed to load pipeline registry");
         anyhow::anyhow!(e)
     })?;
 
-    // -- Resource Manager ------------------------------------------------------
+    // -- Resource Manager --
     let resource_manager = ResourceManager::new(
         media_manager.clone(),
         camera_repo.clone(),
@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
         })?;
     tracing::info!("Resource manager ready");
 
-    // -- Pipeline Executor -----------------------------------------------------
+    // -- Pipeline Executor --
     let pipeline_executor = PipelineExecutor::new(
         pipeline_run_repo.clone(),
         media_manager.clone(),
@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Pipeline executor ready");
 
-    // -- Trigger Evaluator -----------------------------------------------------
+    // -- Trigger Evaluator --
     let trigger_evaluator =
         TriggerEvaluator::new(pipeline_registry.clone(), event_bus.clone(), pipeline_executor);
 
@@ -160,12 +160,12 @@ async fn main() -> anyhow::Result<()> {
         })?;
     tracing::info!("Trigger evaluator schedulers started");
 
-    // -- Stat Monitor ---------------------------------------------------------
+    // -- Stat Monitor --
     let stat_monitor = StatMonitor::new(trigger_evaluator.clone(), pipeline_registry.clone());
     stat_monitor.clone().start();
     tracing::info!("Stat monitor started");
 
-    // -- HTTP API --------------------------------------------------------------
+    // -- HTTP API --
     let state = AppState {
         camera_repo,
         source_repo,
@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("VMS Daemon started — press Ctrl+C or send SIGTERM to stop");
 
-    // -- Wait for shutdown signal -----------------------------------------------
+    // -- Wait for shutdown signal --
     shutdown_signal().await;
     tracing::info!("Shutdown signal received — draining HTTP connections (10 s timeout)");
 
@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
     server_task.await.ok();
     tracing::info!("HTTP server stopped");
 
-    // -- Graceful shutdown: media pipelines ------------------------------------
+    // -- Graceful shutdown: media pipelines --
     media_manager.shutdown().await.map_err(|e| {
         tracing::error!(error = %e, "Error during media manager shutdown");
         anyhow::anyhow!(e)
@@ -210,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// -- Helpers -------------------------------------------------------------------
+// -- Helpers --
 
 /// Wait for SIGINT (Ctrl+C) or SIGTERM (systemd / docker stop).
 /// Whichever arrives first triggers a clean shutdown.

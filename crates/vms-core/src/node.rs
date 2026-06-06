@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::pipeline::NodeId;
 use crate::trigger::TriggerContext;
 
-// -- Node output ---------------------------------------------------------------
+// -- Node output --
 
 /// The result produced by a node after execution.
 ///
@@ -125,7 +125,7 @@ impl NodeOutput {
     }
 }
 
-// -- Node input ----------------------------------------------------------------
+// -- Node input --
 
 /// What a node receives when the executor schedules it for execution.
 ///

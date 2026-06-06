@@ -75,7 +75,7 @@ impl From<VmsError> for ApiError {
     }
 }
 
-// -- Shared handler helpers ----------------------------------------------------
+// -- Shared handler helpers --
 
 /// Extract and parse the `{id}` path parameter as a UUID.
 pub(crate) fn parse_id(req: &mut Request) -> Result<Uuid, ApiError> {

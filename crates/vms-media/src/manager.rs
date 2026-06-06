@@ -13,7 +13,7 @@ use crate::camera_stream::{build_camera_stream, spawn_monitor};
 use crate::ring_buffer::RingBuffer;
 use crate::ring_buffer_branch;
 
-// -- Config --------------------------------------------------------------------
+// -- Config --
 
 /// Configuration for the Media Manager.
 pub struct MediaConfig {
@@ -32,7 +32,7 @@ impl Default for MediaConfig {
     }
 }
 
-// -- Internal per-camera handle ------------------------------------------------
+// -- Internal per-camera handle --
 
 struct CameraHandle {
     /// Keeps the pipeline alive alongside the monitor task.
@@ -44,7 +44,7 @@ struct CameraHandle {
     task: tokio::task::JoinHandle<()>,
 }
 
-// -- MediaManager --------------------------------------------------------------
+// -- MediaManager --
 
 /// Manages per-camera GStreamer pipelines.
 ///
@@ -234,7 +234,7 @@ impl MediaManager {
     }
 }
 
-// -- Snapshot helper -----------------------------------------------------------
+// -- Snapshot helper --
 
 /// Attach a one-shot decode branch to the live camera tee, pull one frame, detach.
 ///

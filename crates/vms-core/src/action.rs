@@ -30,7 +30,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// -- Supporting enums ----------------------------------------------------------
+// -- Supporting enums --
 
 /// Order in which clips are sorted when merging.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,7 +111,7 @@ pub enum NotificationFormat {
     Markdown,
 }
 
-// -- PTZ command ---------------------------------------------------------------
+// -- PTZ command --
 
 /// A PTZ movement command dispatched to a camera via the `ptz_move` action.
 ///
@@ -151,7 +151,7 @@ pub enum PtzCommand {
     },
 }
 
-// -- Per-action configuration structs -----------------------------------------
+// -- Per-action configuration structs --
 
 /// Configuration for the `transcode` action.
 ///
@@ -367,7 +367,7 @@ pub struct TriggerAlarmOutputConfig {
     pub duration_secs: u32,
 }
 
-// -- ActionConfig enum ---------------------------------------------------------
+// -- ActionConfig enum --
 
 /// Discriminated union of all action node configurations.
 ///
@@ -441,7 +441,7 @@ impl ActionConfig {
     }
 }
 
-// -- Transport node config -----------------------------------------------------
+// -- Transport node config --
 
 /// Optional template overrides for a transport node.
 ///

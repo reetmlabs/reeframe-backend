@@ -19,7 +19,7 @@ use vms_core::VmsError;
 
 use crate::ring_buffer::{RingBuffer, TimestampedFrame};
 
-// -- Element name helpers ------------------------------------------------------
+// -- Element name helpers --
 
 pub(crate) fn queue_name(id: Uuid) -> String {
     format!("cam_{}_rbqueue", id.as_simple())
@@ -33,7 +33,7 @@ fn tee_name(id: Uuid) -> String {
     format!("cam_{}_tee", id.as_simple())
 }
 
-// -- Public API ----------------------------------------------------------------
+// -- Public API --
 
 /// Attach a `queue -> appsink` branch to the live tee of camera `camera_id`.
 ///
@@ -51,7 +51,7 @@ pub fn attach(
         .by_name(&tee_name(camera_id))
         .ok_or_else(|| VmsError::Media(format!("tee not found for camera {camera_id}")))?;
 
-    // -- queue -----------------------------------------------------------------
+    // -- queue --
     let queue = gstreamer::ElementFactory::make("queue")
         .name(&queue_name(camera_id))
         .property("max-size-buffers", 60u32) // ~2 s at 30 fps
@@ -60,7 +60,7 @@ pub fn attach(
         .build()
         .map_err(|e| VmsError::Media(format!("ring buffer queue: {e}")))?;
 
-    // -- appsink ---------------------------------------------------------------
+    // -- appsink --
     // `drop = true` so a slow ring-buffer lock never stalls the recording branch.
     // `sync = false` so the appsink processes frames as fast as they arrive.
     let appsink = gstreamer_app::AppSink::builder()
@@ -70,7 +70,7 @@ pub fn attach(
         .sync(false)
         .build();
 
-    // -- Wire the appsink callback ---------------------------------------------
+    // -- Wire the appsink callback --
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -106,7 +106,7 @@ pub fn attach(
             .build(),
     );
 
-    // -- Add elements to the pipeline ------------------------------------------
+    // -- Add elements to the pipeline --
     pipeline
         .add(&queue)
         .map_err(|e| VmsError::Media(format!("add ring buffer queue: {e}")))?;
@@ -114,7 +114,7 @@ pub fn attach(
         .add(&appsink)
         .map_err(|e| VmsError::Media(format!("add ring buffer appsink: {e}")))?;
 
-    // -- Link tee -> queue -> appsink --------------------------------------------
+    // -- Link tee -> queue -> appsink --
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
         VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
     })?;
@@ -129,7 +129,7 @@ pub fn attach(
         .link(&appsink)
         .map_err(|e| VmsError::Media(format!("link rbqueue->appsink: {e}")))?;
 
-    // -- Bring new elements to the pipeline's current state --------------------
+    // -- Bring new elements to the pipeline's current state --
     for el in [&queue, appsink.upcast_ref::<gstreamer::Element>()] {
         el.sync_state_with_parent()
             .map_err(|e| VmsError::Media(format!("sync ring buffer state: {e}")))?;

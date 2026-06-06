@@ -11,7 +11,7 @@ use crate::{
     state::AppState,
 };
 
-// -- Response DTO --------------------------------------------------------------
+// -- Response DTO --
 
 /// Camera as returned by the API — `password_enc` is never exposed.
 #[derive(Serialize)]
@@ -54,7 +54,7 @@ impl CameraDto {
     }
 }
 
-// -- Request bodies ------------------------------------------------------------
+// -- Request bodies --
 
 #[derive(Deserialize)]
 pub struct CreateCameraBody {
@@ -88,7 +88,7 @@ pub struct UpdateCameraBody {
     pub enabled: Option<bool>,
 }
 
-// -- Internal helpers ----------------------------------------------------------
+// -- Internal helpers --
 
 /// Inject `user:pass@` into an RTSP URL immediately after the scheme prefix.
 fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>) -> String {
@@ -100,7 +100,7 @@ fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>
     base_url.to_string()
 }
 
-// -- Handlers ------------------------------------------------------------------
+// -- Handlers --
 
 /// GET /cameras
 #[handler]

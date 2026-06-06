@@ -17,7 +17,7 @@ use vms_db::{
 };
 use vms_media::{MediaManager, RingBufferManager};
 
-// -- Executor ------------------------------------------------------------------
+// -- Executor --
 
 /// Executes a compiled pipeline DAG for a given trigger context.
 ///
@@ -64,7 +64,7 @@ impl PipelineExecutor {
     ) -> Result<(), VmsError> {
         let trigger_json = serde_json::to_value(&ctx)?;
 
-        // -- 1. Create run row (Running) ---------------------------------------
+        // -- 1. Create run row (Running) --
         let run = self
             .repo
             .create_run(pipeline.id, Some(ctx.trigger_id), trigger_json)
@@ -80,14 +80,14 @@ impl PipelineExecutor {
             "Pipeline run started",
         );
 
-        // -- 2. Pre-create node-result rows (Pending) --------------------------
+        // -- 2. Pre-create node-result rows (Pending) --
         let mut result_ids: HashMap<NodeId, Uuid> = HashMap::new();
         for &node_id in &pipeline.dag.topological_order {
             let row = self.repo.create_node_result(run_id, node_id).await?;
             result_ids.insert(node_id, row.id);
         }
 
-        // -- 3. Walk the DAG ---------------------------------------------------
+        // -- 3. Walk the DAG --
         let action_ctx = ActionContext {
             media: Some(self.media.clone()),
             ring_buffer: Some(self.ring_buffer.clone()),
@@ -97,7 +97,7 @@ impl PipelineExecutor {
             .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx)
             .await;
 
-        // -- 4. Finalise run ---------------------------------------------------
+        // -- 4. Finalise run --
         match &outcome {
             Ok(()) => {
                 self.repo
@@ -121,7 +121,7 @@ impl PipelineExecutor {
         outcome
     }
 
-    // -- DAG walk --------------------------------------------------------------
+    // -- DAG walk --
 
     /// Concurrent DAG walk using a [`JoinSet`].
     ///
@@ -285,7 +285,7 @@ impl PipelineExecutor {
     }
 }
 
-// -- Child-activation helper ---------------------------------------------------
+// -- Child-activation helper --
 
 /// Returns `true` if the child on `edge_type` should be treated as actively
 /// receiving output from `parent_type`.
@@ -308,7 +308,7 @@ pub(crate) fn child_is_active(
     }
 }
 
-// -- Node execution ------------------------------------------------------------
+// -- Node execution --
 
 /// Execute a single pipeline node and return its [`NodeOutput`].
 ///
@@ -404,7 +404,7 @@ pub(crate) fn build_condition_context(parent_outputs: &[NodeOutput]) -> HashMapC
     ctx
 }
 
-// -- Tests ---------------------------------------------------------------------
+// -- Tests --
 
 #[cfg(test)]
 mod tests {
@@ -449,7 +449,7 @@ mod tests {
         }
     }
 
-    // -- child_is_active -------------------------------------------------------
+    // -- child_is_active --
 
     #[test]
     fn non_condition_activates_all_children() {
@@ -482,7 +482,7 @@ mod tests {
         ));
     }
 
-    // -- build_condition_context -----------------------------------------------
+    // -- build_condition_context --
 
     #[test]
     fn condition_context_exposes_parent_metadata() {
@@ -499,7 +499,7 @@ mod tests {
         assert!(evalexpr::eval_boolean_with_context("x > 1", &ctx).is_err());
     }
 
-    // -- execute_node ----------------------------------------------------------
+    // -- execute_node --
 
     #[tokio::test]
     async fn trigger_root_embeds_pipeline_id() {
@@ -589,7 +589,7 @@ mod tests {
         assert!(out.success);
     }
 
-    // -- DAG structural sanity (no DB — compile only) --------------------------
+    // -- DAG structural sanity (no DB — compile only) --
 
     #[test]
     fn dag_compile_root_to_transport() {

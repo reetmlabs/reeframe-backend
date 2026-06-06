@@ -27,7 +27,7 @@ pub mod plugin;
 pub mod resource;
 pub mod trigger;
 
-// -- Flat re-exports for ergonomic use in other crates -------------------------
+// -- Flat re-exports for ergonomic use in other crates --
 
 pub use error::VmsError;
 

@@ -15,7 +15,7 @@ use crate::{
     state::AppState,
 };
 
-// -- Response DTO --------------------------------------------------------------
+// -- Response DTO --
 
 #[derive(Serialize)]
 pub struct PipelineDto {
@@ -42,7 +42,7 @@ impl From<pipeline::Model> for PipelineDto {
     }
 }
 
-// -- Run / node-result DTOs ---------------------------------------------------
+// -- Run / node-result DTOs --
 
 #[derive(Serialize)]
 pub struct PipelineRunDto {
@@ -101,7 +101,7 @@ pub struct PipelineRunDetailDto {
     pub nodes: Vec<NodeResultDto>,
 }
 
-// -- Request bodies ------------------------------------------------------------
+// -- Request bodies --
 
 #[derive(Deserialize)]
 pub struct CreatePipelineBody {
@@ -122,7 +122,7 @@ pub struct TriggerPipelineBody {
     pub params: Option<serde_json::Value>,
 }
 
-// -- Handlers ------------------------------------------------------------------
+// -- Handlers --
 
 /// GET /pipelines
 #[handler]

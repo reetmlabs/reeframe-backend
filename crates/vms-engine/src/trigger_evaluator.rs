@@ -70,7 +70,7 @@ impl TriggerEvaluator {
         })
     }
 
-    // -- Manual trigger --------------------------------------------------------
+    // -- Manual trigger --
 
     /// Fire the pipeline identified by `pipeline_id` as a manual trigger.
     ///
@@ -112,7 +112,7 @@ impl TriggerEvaluator {
         Ok(())
     }
 
-    // -- Schedule triggers -----------------------------------------------------
+    // -- Schedule triggers --
 
     /// Register schedule triggers (cron + interval) for all enabled pipelines
     /// and start the underlying cron scheduler.
@@ -151,7 +151,7 @@ impl TriggerEvaluator {
                 let trigger_id = trigger.id;
 
                 match mode {
-                    // -- Interval ----------------------------------------------
+                    // -- Interval --
                     ScheduleMode::Interval { interval_secs } => {
                         let secs = *interval_secs;
                         let ev = self.clone();
@@ -170,7 +170,7 @@ impl TriggerEvaluator {
                         );
                     }
 
-                    // -- Cron --------------------------------------------------
+                    // -- Cron --
                     ScheduleMode::Cron { expression } => {
                         let tz = time_helpers::parse_iana_tz(timezone);
                         let expr = time_helpers::normalize_cron(expression);
@@ -225,7 +225,7 @@ impl TriggerEvaluator {
         Ok(())
     }
 
-    // -- Event listener --------------------------------------------------------
+    // -- Event listener --
 
     /// Subscribe to all EventBus topics referenced by enabled pipelines and
     /// spawn background listener tasks that call [`evaluate_event`] for each
@@ -274,7 +274,7 @@ impl TriggerEvaluator {
             }
         }
 
-        // -- TopicKey::System --------------------------------------------------
+        // -- TopicKey::System --
         {
             let mut rx = self.event_bus.subscribe(&TopicKey::System);
             let ev = self.clone();
@@ -296,7 +296,7 @@ impl TriggerEvaluator {
             });
         }
 
-        // -- TopicKey::Camera(id) ----------------------------------------------
+        // -- TopicKey::Camera(id) --
         for cam_id in camera_ids {
             let mut rx = self.event_bus.subscribe(&TopicKey::Camera(cam_id));
             let ev = self.clone();
@@ -313,7 +313,7 @@ impl TriggerEvaluator {
             });
         }
 
-        // -- TopicKey::Source(id) ----------------------------------------------
+        // -- TopicKey::Source(id) --
         for src_id in source_ids {
             let mut rx = self.event_bus.subscribe(&TopicKey::Source(src_id));
             let ev = self.clone();
@@ -333,7 +333,7 @@ impl TriggerEvaluator {
         tracing::info!("Trigger evaluator event listeners started");
     }
 
-    // -- Event evaluation ------------------------------------------------------
+    // -- Event evaluation --
 
     /// Evaluate all enabled pipeline triggers against `event`.
     ///
@@ -436,7 +436,7 @@ impl TriggerEvaluator {
         }
     }
 
-    // -- Stat trigger evaluation -----------------------------------------------
+    // -- Stat trigger evaluation --
 
     /// Called by the Stat Monitor with the latest reading for `metric`.
     ///
@@ -544,7 +544,7 @@ impl TriggerEvaluator {
         }
     }
 
-    // -- Pipeline dispatch -----------------------------------------------------
+    // -- Pipeline dispatch --
 
     /// Dispatch a pipeline run for the given trigger context.
     ///
@@ -579,7 +579,7 @@ impl TriggerEvaluator {
     }
 }
 
-// -- Module-level helpers ------------------------------------------------------
+// -- Module-level helpers --
 
 /// Build an evalexpr context from `event` for filter expression evaluation.
 ///
@@ -625,7 +625,7 @@ fn signal_to_event_type(signal: &SystemSignal) -> &'static str {
     }
 }
 
-// -- Tests ---------------------------------------------------------------------
+// -- Tests --
 
 #[cfg(test)]
 mod tests {
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(result, Ok(false));
     }
 
-    // -- Stat trigger helpers --------------------------------------------------
+    // -- Stat trigger helpers --
 
     fn make_stat_pipeline(
         pipeline_id: Uuid,

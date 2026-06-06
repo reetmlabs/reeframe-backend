@@ -32,7 +32,7 @@ use crate::trigger::{TriggerConfig, TriggerType};
 /// UUID alias used as the primary key for all nodes within a pipeline.
 pub type NodeId = Uuid;
 
-// -- Node / edge enums ---------------------------------------------------------
+// -- Node / edge enums --
 
 /// Discriminator that determines how the executor processes a pipeline node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,7 +74,7 @@ pub enum EdgeType {
     FalseBranch,
 }
 
-// -- Core graph types ----------------------------------------------------------
+// -- Core graph types --
 
 /// A raw pipeline node row loaded from the database before compilation.
 ///
@@ -142,7 +142,7 @@ pub struct PipelineTrigger {
     pub enabled: bool,
 }
 
-// -- Compiled forms held in the registry --------------------------------------
+// -- Compiled forms held in the registry --
 
 /// Camera resource requirements for one pipeline, loaded from `pipeline_camera_refs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,7 +234,7 @@ impl PipelineDag {
         let node_map: HashMap<NodeId, PipelineNode> =
             nodes.into_iter().map(|n| (n.id, n)).collect();
 
-        // -- Build adjacency, parents, and edge-type maps ----------------------
+        // -- Build adjacency, parents, and edge-type maps --
         let mut adjacency: HashMap<NodeId, Vec<NodeId>> =
             node_map.keys().map(|&id| (id, vec![])).collect();
         let mut parents: HashMap<NodeId, Vec<NodeId>> =
@@ -265,7 +265,7 @@ impl PipelineDag {
             edge_types.insert((edge.from_node_id, edge.to_node_id), edge.edge_type.clone());
         }
 
-        // -- Rule 1 & 2: exactly one parentless node, must be trigger_root ----
+        // -- Rule 1 & 2: exactly one parentless node, must be trigger_root --
         let roots: Vec<NodeId> = node_map
             .keys()
             .filter(|id| parents[id].is_empty())
@@ -286,10 +286,10 @@ impl PipelineDag {
             ));
         }
 
-        // -- Rule 3: no cycles ------------------------------------------------
+        // -- Rule 3: no cycles --
         let topological_order = kahn_topological_sort(&node_map, &adjacency, &parents)?;
 
-        // -- Rules 4–7: per-node structural checks ----------------------------
+        // -- Rules 4–7: per-node structural checks --
         for node in node_map.values() {
             let children = &adjacency[&node.id];
 
@@ -383,7 +383,7 @@ impl PipelineDag {
     }
 }
 
-// -- Kahn's topological sort ---------------------------------------------------
+// -- Kahn's topological sort --
 
 /// Topologically sort `node_map` using Kahn's algorithm.
 ///
@@ -426,7 +426,7 @@ fn kahn_topological_sort(
     Ok(order)
 }
 
-// -- Tests ---------------------------------------------------------------------
+// -- Tests --
 
 #[cfg(test)]
 mod tests {

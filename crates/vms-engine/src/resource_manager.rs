@@ -44,7 +44,7 @@ impl ResourceManager {
         })
     }
 
-    // -- Read API --------------------------------------------------------------
+    // -- Read API --
 
     /// Return a snapshot of the entry for `id`, or `None` if the resource has
     /// never been acquired.
@@ -62,7 +62,7 @@ impl ResourceManager {
             .collect()
     }
 
-    // -- Startup recovery -----------------------------------------------------
+    // -- Startup recovery --
 
     /// Acquire all resources required by the currently enabled pipelines in `registry`.
     ///
@@ -97,7 +97,7 @@ impl ResourceManager {
         Ok(())
     }
 
-    // -- Ref-count mutations ---------------------------------------------------
+    // -- Ref-count mutations --
 
     /// Increment the ref count for `id`. Starts the resource if the count goes
     /// from 0 -> 1 (or the resource is in an `Error` state and needs a retry).
@@ -176,7 +176,7 @@ impl ResourceManager {
         Ok(())
     }
 
-    // -- Start / stop dispatch -------------------------------------------------
+    // -- Start / stop dispatch --
 
     async fn start(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
@@ -228,7 +228,7 @@ impl ResourceManager {
     }
 }
 
-// -- Helpers -------------------------------------------------------------------
+// -- Helpers --
 
 /// Inject credentials into an RTSP URL if both username and password are present.
 /// `rtsp://host/path` + (user, pass) -> `rtsp://user:pass@host/path`

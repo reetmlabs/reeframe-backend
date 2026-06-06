@@ -42,7 +42,7 @@ pub enum TriggerType {
     Stat,
 }
 
-// -- Schedule -----------------------------------------------------------------
+// -- Schedule --
 
 /// Defines the cadence for a [`TriggerConfig::Schedule`] trigger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ pub enum ScheduleMode {
     },
 }
 
-// -- System signals ------------------------------------------------------------
+// -- System signals --
 
 /// VMS-internal lifecycle signals that can trigger a pipeline.
 ///
@@ -84,7 +84,7 @@ pub enum SystemSignal {
     RecordingStopped,
 }
 
-// -- Stat-based ----------------------------------------------------------------
+// -- Stat-based --
 
 /// The system metric observed by a [`TriggerConfig::Stat`] trigger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,7 +138,7 @@ impl CompareOperator {
     }
 }
 
-// -- Unified trigger config ----------------------------------------------------
+// -- Unified trigger config --
 
 /// Per-trigger configuration stored in `pipeline_triggers.config` (JSONB/JSON).
 ///
@@ -210,7 +210,7 @@ fn default_timezone() -> String {
     "UTC".into()
 }
 
-// -- Context passed to pipeline execution -------------------------------------
+// -- Context passed to pipeline execution --
 
 /// Snapshot of the conditions under which a trigger fired.
 ///

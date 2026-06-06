@@ -8,7 +8,7 @@ use crate::{
     entities::camera::{self, ActiveModel, RingBufferStorage},
 };
 
-// -- Input types ---------------------------------------------------------------
+// -- Input types --
 
 pub struct CreateCamera {
     pub name: String,
@@ -40,7 +40,7 @@ pub struct UpdateCamera {
     pub enabled: Option<bool>,
 }
 
-// -- Repository ----------------------------------------------------------------
+// -- Repository --
 
 #[derive(Clone)]
 pub struct CameraRepo {
