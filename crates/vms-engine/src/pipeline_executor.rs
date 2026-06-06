@@ -4,7 +4,9 @@ use std::sync::Arc;
 use evalexpr::{ContextWithMutableVariables, HashMapContext, Value as EvalValue};
 use tokio::task::JoinSet;
 use uuid::Uuid;
+use vms_actions::dispatcher::{ActionContext, ActionDispatcher};
 use vms_core::{
+    node::{NodeInput, NodeOutput},
     pipeline::{CompiledPipeline, EdgeType, NodeId, NodeType, PipelineNode},
     TriggerContext, VmsError,
 };
@@ -22,8 +24,8 @@ use vms_db::{
 /// the DAG concurrently using a [`JoinSet`], and finalises every record as
 /// execution proceeds.
 ///
-/// Node handlers are stubs in this step — they log and return `null`.
-/// The real action library is wired in future.
+/// Action and device-control nodes are dispatched through [`ActionDispatcher`].
+/// Transport nodes remain stubbed until step 6-7.
 ///
 /// [`execute`]: PipelineExecutor::execute
 #[derive(Clone)]
@@ -71,8 +73,9 @@ impl PipelineExecutor {
         }
 
         // -- 3. Walk the DAG ---------------------------------------------------
+        let action_ctx = ActionContext::default();
         let outcome = self
-            .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids)
+            .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx)
             .await;
 
         // -- 4. Finalise run ---------------------------------------------------
@@ -123,6 +126,7 @@ impl PipelineExecutor {
         ctx: &TriggerContext,
         _run_id: Uuid,
         result_ids: &HashMap<NodeId, Uuid>,
+        action_ctx: &ActionContext,
     ) -> Result<(), VmsError> {
         let mut remaining: HashMap<NodeId, usize> = dag
             .nodes
@@ -133,11 +137,11 @@ impl PipelineExecutor {
         let mut active_parents: HashMap<NodeId, usize> =
             dag.nodes.keys().map(|&id| (id, 0usize)).collect();
 
-        let mut outputs: HashMap<NodeId, serde_json::Value> = HashMap::new();
+        let mut outputs: HashMap<NodeId, NodeOutput> = HashMap::new();
         let mut ready: VecDeque<NodeId> = VecDeque::new();
         ready.push_back(dag.root_id);
 
-        let mut join_set: JoinSet<(NodeId, Result<serde_json::Value, String>)> = JoinSet::new();
+        let mut join_set: JoinSet<(NodeId, NodeOutput)> = JoinSet::new();
 
         loop {
             // Schedule every currently ready node.
@@ -171,16 +175,19 @@ impl PipelineExecutor {
                 self.repo.start_node_result(result_id).await?;
 
                 let node = dag.nodes[&node_id].clone();
-                let parent_outputs: Vec<serde_json::Value> = dag.parents[&node_id]
+                let parent_outputs: Vec<NodeOutput> = dag.parents[&node_id]
                     .iter()
                     .filter_map(|pid| outputs.get(pid))
                     .cloned()
                     .collect();
                 let trigger_ctx = ctx.clone();
+                let action_ctx_clone = action_ctx.clone();
 
                 join_set.spawn(async move {
-                    let result = execute_node(&node, &parent_outputs, &trigger_ctx).await;
-                    (node_id, result)
+                    let output =
+                        execute_node(&node, &parent_outputs, &trigger_ctx, &action_ctx_clone)
+                            .await;
+                    (node_id, output)
                 });
             }
 
@@ -188,65 +195,69 @@ impl PipelineExecutor {
                 break;
             };
 
-            let (node_id, node_outcome) =
+            let (node_id, node_output) =
                 join_result.map_err(|e| VmsError::Config(format!("node task panicked: {e}")))?;
 
             let result_id = result_ids[&node_id];
             let node = &dag.nodes[&node_id];
+            let output_json =
+                serde_json::to_value(&node_output).unwrap_or(serde_json::Value::Null);
 
-            match node_outcome {
-                Ok(output) => {
-                    // For Condition nodes the output is Bool — derive routing.
-                    let branch_taken = if node.node_type == NodeType::Condition {
-                        output.as_bool()
-                    } else {
-                        None
-                    };
+            if !node_output.success {
+                let error_msg = node_output
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".into());
+                self.repo
+                    .finish_node_result(
+                        result_id,
+                        NodeResultStatus::Failed,
+                        output_json,
+                        Some(error_msg.clone()),
+                    )
+                    .await?;
+                join_set.abort_all();
+                return Err(VmsError::Config(format!(
+                    "node {node_id} failed: {error_msg}"
+                )));
+            }
 
-                    outputs.insert(node_id, output.clone());
+            // For Condition nodes the branch is encoded in metadata.
+            let branch_taken = if node.node_type == NodeType::Condition {
+                node_output
+                    .metadata
+                    .get("condition_result")
+                    .and_then(|v| v.as_bool())
+            } else {
+                None
+            };
 
-                    // Save output -> DB row -> completed
-                    self.repo
-                        .finish_node_result(
-                            result_id,
-                            NodeResultStatus::Completed,
-                            output,
-                            None,
-                        )
-                        .await?;
+            outputs.insert(node_id, node_output);
 
-                    for &child in &dag.adjacency[&node_id] {
-                        // Check if child is active based on result of condition node
-                        if child_is_active(
-                            &node.node_type,
-                            branch_taken,
-                            dag.edge_types.get(&(node_id, child)),
-                        ) {
-                            *active_parents.get_mut(&child).unwrap() += 1;
-                        }
+            // Save output -> DB row -> completed
+            self.repo
+                .finish_node_result(
+                    result_id,
+                    NodeResultStatus::Completed,
+                    output_json,
+                    None,
+                )
+                .await?;
 
-                        let r = remaining.get_mut(&child).unwrap();
-                        *r -= 1;
-                        if *r == 0 {
-                            ready.push_back(child);
-                        }
-                    }
+            for &child in &dag.adjacency[&node_id] {
+                // Check if child is active based on result of condition node
+                if child_is_active(
+                    &node.node_type,
+                    branch_taken,
+                    dag.edge_types.get(&(node_id, child)),
+                ) {
+                    *active_parents.get_mut(&child).unwrap() += 1;
                 }
 
-                Err(error_msg) => {
-                    self.repo
-                        .finish_node_result(
-                            result_id,
-                            NodeResultStatus::Failed,
-                            serde_json::Value::Null,
-                            Some(error_msg.clone()),
-                        )
-                        .await?;
-
-                    join_set.abort_all();
-                    return Err(VmsError::Config(format!(
-                        "node {node_id} failed: {error_msg}"
-                    )));
+                let r = remaining.get_mut(&child).unwrap();
+                *r -= 1;
+                if *r == 0 {
+                    ready.push_back(child);
                 }
             }
         }
@@ -278,64 +289,98 @@ pub(crate) fn child_is_active(
     }
 }
 
-// -- Node execution stubs ------------------------------------------------------
+// -- Node execution ------------------------------------------------------------
 
-/// Execute a single pipeline node and return its output.
+/// Execute a single pipeline node and return its [`NodeOutput`].
 ///
-/// `TriggerRoot` serialises the trigger context as JSON so downstream nodes
-/// can reference it.  `Condition` evaluates its `evalexpr` expression and
-/// returns a `Bool`.  `Fork` passes the first parent output through.
-/// `Action`, `DeviceControl`, and `Transport` are stubs until future.
+/// `TriggerRoot` seeds the output with trigger context metadata.
+/// `Condition` evaluates its `evalexpr` expression and stores the boolean
+/// result in `metadata["condition_result"]`.
+/// `Fork` passes the first parent output through with this node's ID.
+/// `Action` and `DeviceControl` are dispatched through [`ActionDispatcher`].
+/// `Transport` remains a stub until step 6-7.
 pub(crate) async fn execute_node(
     node: &PipelineNode,
-    parent_outputs: &[serde_json::Value],
+    parent_outputs: &[NodeOutput],
     ctx: &TriggerContext,
-) -> Result<serde_json::Value, String> {
+    action_ctx: &ActionContext,
+) -> NodeOutput {
     match node.node_type {
-        NodeType::TriggerRoot => serde_json::to_value(ctx).map_err(|e| e.to_string()),
+        NodeType::TriggerRoot => NodeOutput::success(node.id).with_metadata(serde_json::json!({
+            "trigger_type": format!("{:?}", ctx.trigger_type),
+            "camera_id":    ctx.camera_id,
+            "source_id":    ctx.source_id,
+            "pipeline_id":  ctx.pipeline_id.to_string(),
+            "fired_at":     ctx.fired_at.to_rfc3339(),
+        })),
 
         NodeType::Condition => {
             let expr = node.condition_expr.as_deref().unwrap_or("false");
             let eval_ctx = build_condition_context(parent_outputs);
-            evalexpr::eval_boolean_with_context(expr, &eval_ctx)
-                .map(serde_json::Value::Bool)
-                .map_err(|e| format!("condition eval failed: {e}"))
+            match evalexpr::eval_boolean_with_context(expr, &eval_ctx) {
+                Ok(result) => NodeOutput::success(node.id)
+                    .with_metadata(serde_json::json!({ "condition_result": result })),
+                Err(e) => NodeOutput::failure(node.id, format!("condition eval failed: {e}")),
+            }
         }
 
-        NodeType::Fork => Ok(parent_outputs
-            .first()
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)),
+        NodeType::Fork => {
+            let base = parent_outputs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| NodeOutput::success(node.id));
+            NodeOutput { node_id: node.id, ..base }
+        }
 
-        NodeType::Action | NodeType::DeviceControl | NodeType::Transport => {
+        NodeType::Action | NodeType::DeviceControl => {
+            let Some(config) = &node.action_config else {
+                return NodeOutput::failure(
+                    node.id,
+                    format!("{:?} node has no action_config", node.node_type),
+                );
+            };
+            let input = NodeInput {
+                parent_outputs: parent_outputs.to_vec(),
+                trigger_ctx: ctx.clone(),
+            };
+            ActionDispatcher::dispatch(node.id, config, &input, action_ctx).await
+        }
+
+        NodeType::Transport => {
             tracing::debug!(
-                node_id   = %node.id,
-                node_type = ?node.node_type,
-                label     = ?node.label,
-                "Node executed (stub — handler added in future)",
+                node_id = %node.id,
+                dest_id = ?node.destination_id,
+                "Transport node (stub — wired in step 6-7)",
             );
-            Ok(serde_json::Value::Null)
+            NodeOutput::success(node.id)
         }
     }
 }
 
-/// Build an `evalexpr` context from the first parent's JSON output so that
+/// Build an `evalexpr` context from the first parent's metadata so that
 /// condition expressions can reference its top-level fields by name.
-pub(crate) fn build_condition_context(parent_outputs: &[serde_json::Value]) -> HashMapContext {
+pub(crate) fn build_condition_context(parent_outputs: &[NodeOutput]) -> HashMapContext {
     let mut ctx = HashMapContext::new();
-    if let Some(serde_json::Value::Object(map)) = parent_outputs.first() {
-        for (k, v) in map {
-            let val = match v {
-                serde_json::Value::String(s) => EvalValue::String(s.clone()),
-                serde_json::Value::Number(n) => {
-                    let Some(f) = n.as_f64() else { continue };
-                    EvalValue::Float(f)
+    let Some(parent) = parent_outputs.first() else {
+        return ctx;
+    };
+    let serde_json::Value::Object(map) = &parent.metadata else {
+        return ctx;
+    };
+    for (k, v) in map {
+        let val = match v {
+            serde_json::Value::String(s) => EvalValue::String(s.clone()),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    EvalValue::Int(i)
+                } else {
+                    EvalValue::Float(n.as_f64().unwrap_or(0.0))
                 }
-                serde_json::Value::Bool(b) => EvalValue::Boolean(*b),
-                _ => continue,
-            };
-            ctx.set_value(k.clone(), val).ok();
-        }
+            }
+            serde_json::Value::Bool(b) => EvalValue::Boolean(*b),
+            _ => continue,
+        };
+        ctx.set_value(k.clone(), val).ok();
     }
     ctx
 }
@@ -377,6 +422,10 @@ mod tests {
         TriggerContext::for_schedule(Uuid::new_v4(), pid)
     }
 
+    fn action_ctx() -> ActionContext {
+        ActionContext::default()
+    }
+
     // -- child_is_active -------------------------------------------------------
 
     #[test]
@@ -413,40 +462,43 @@ mod tests {
     // -- build_condition_context -----------------------------------------------
 
     #[test]
-    fn condition_context_exposes_parent_fields() {
-        let ctx =
-            build_condition_context(&[serde_json::json!({"confidence": 0.92, "label": "person"})]);
-        let ok = evalexpr::eval_boolean_with_context(r#"confidence > 0.85"#, &ctx);
+    fn condition_context_exposes_parent_metadata() {
+        let parent = NodeOutput::success(Uuid::new_v4())
+            .with_metadata(serde_json::json!({"confidence": 0.92, "label": "person"}));
+        let ctx = build_condition_context(&[parent]);
+        let ok = evalexpr::eval_boolean_with_context("confidence > 0.85", &ctx);
         assert_eq!(ok, Ok(true));
     }
 
     #[test]
-    fn condition_context_empty_on_no_parent_output() {
+    fn condition_context_empty_on_no_parent() {
         let ctx = build_condition_context(&[]);
-        // Expression that would need a variable — should fail, not panic.
         assert!(evalexpr::eval_boolean_with_context("x > 1", &ctx).is_err());
     }
 
     // -- execute_node ----------------------------------------------------------
 
     #[tokio::test]
-    async fn trigger_root_returns_context_json() {
+    async fn trigger_root_embeds_pipeline_id() {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::TriggerRoot);
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[], &ctx).await.unwrap();
-        assert!(out.is_object());
-        assert_eq!(out["pipeline_id"], serde_json::json!(pid.to_string()));
+        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
+        assert!(out.success);
+        assert_eq!(out.metadata["pipeline_id"], pid.to_string());
     }
 
     #[tokio::test]
-    async fn fork_passes_through_parent_output() {
+    async fn fork_passes_through_parent_metadata() {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::Fork);
-        let parent = serde_json::json!({"key": "value"});
+        let parent = NodeOutput::success(Uuid::new_v4())
+            .with_metadata(serde_json::json!({"key": "value"}));
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[parent.clone()], &ctx).await.unwrap();
-        assert_eq!(out, parent);
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx()).await;
+        assert!(out.success);
+        assert_eq!(out.metadata["key"], "value");
+        assert_eq!(out.node_id, n.id);
     }
 
     #[tokio::test]
@@ -454,10 +506,12 @@ mod tests {
         let pid = Uuid::new_v4();
         let mut n = node(pid, NodeType::Condition);
         n.condition_expr = Some("score > 0.5".into());
-        let parent = serde_json::json!({"score": 0.9});
+        let parent =
+            NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.9}));
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[parent], &ctx).await.unwrap();
-        assert_eq!(out, serde_json::Value::Bool(true));
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx()).await;
+        assert!(out.success);
+        assert_eq!(out.metadata["condition_result"], true);
     }
 
     #[tokio::test]
@@ -465,28 +519,51 @@ mod tests {
         let pid = Uuid::new_v4();
         let mut n = node(pid, NodeType::Condition);
         n.condition_expr = Some("score > 0.5".into());
-        let parent = serde_json::json!({"score": 0.1});
+        let parent =
+            NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.1}));
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[parent], &ctx).await.unwrap();
-        assert_eq!(out, serde_json::Value::Bool(false));
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx()).await;
+        assert!(out.success);
+        assert_eq!(out.metadata["condition_result"], false);
     }
 
     #[tokio::test]
-    async fn condition_bad_expression_is_err() {
+    async fn condition_bad_expression_returns_failure() {
         let pid = Uuid::new_v4();
         let mut n = node(pid, NodeType::Condition);
         n.condition_expr = Some(">>>".into());
         let ctx = schedule_ctx(pid);
-        assert!(execute_node(&n, &[], &ctx).await.is_err());
+        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
+        assert!(!out.success);
+        assert!(out
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("condition eval failed"));
     }
 
     #[tokio::test]
-    async fn action_stub_returns_null() {
+    async fn action_without_config_returns_failure() {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::Action);
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[], &ctx).await.unwrap();
-        assert_eq!(out, serde_json::Value::Null);
+        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
+        assert!(!out.success);
+        assert!(out
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("no action_config"));
+    }
+
+    #[tokio::test]
+    async fn transport_stub_returns_success() {
+        let pid = Uuid::new_v4();
+        let mut n = node(pid, NodeType::Transport);
+        n.destination_id = Some(Uuid::new_v4());
+        let ctx = schedule_ctx(pid);
+        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
+        assert!(out.success);
     }
 
     // -- DAG structural sanity (no DB — compile only) --------------------------
@@ -502,27 +579,5 @@ mod tests {
         let root_id = root.id;
         let dag = PipelineDag::compile(vec![root, transport], vec![e]).unwrap();
         assert_eq!(dag.root_id, root_id);
-        assert_eq!(dag.topological_order.len(), 2);
-    }
-
-    #[test]
-    fn dag_compile_condition_branch() {
-        use vms_core::pipeline::PipelineDag;
-        let pid = Uuid::new_v4();
-        let root = node(pid, NodeType::TriggerRoot);
-        let mut cond = node(pid, NodeType::Condition);
-        cond.condition_expr = Some("x > 0".into());
-        let mut ta = node(pid, NodeType::Transport);
-        ta.destination_id = Some(Uuid::new_v4());
-        let mut fb = node(pid, NodeType::Transport);
-        fb.destination_id = Some(Uuid::new_v4());
-
-        let edges = vec![
-            edge(pid, root.id, cond.id, EdgeType::Default),
-            edge(pid, cond.id, ta.id, EdgeType::TrueBranch),
-            edge(pid, cond.id, fb.id, EdgeType::FalseBranch),
-        ];
-        let dag = PipelineDag::compile(vec![root, cond, ta, fb], edges).unwrap();
-        assert_eq!(dag.topological_order.len(), 4);
     }
 }
