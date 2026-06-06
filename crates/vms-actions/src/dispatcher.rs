@@ -1,17 +1,39 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use vms_core::{
     action::ActionConfig,
     node::{NodeInput, NodeOutput},
     pipeline::NodeId,
 };
+use vms_media::{MediaManager, RingBufferManager};
 
-use crate::handlers::{delay, render_notification};
+use crate::handlers::{delay, extract_clip, render_notification, snapshot};
+
+// -- ActionContext --
 
 /// Resources available to action handlers at runtime.
-///
-/// Starts as a unit struct — fields are added in subsequent sub-steps as
-/// handlers that need shared resources are implemented.
-#[derive(Clone, Default)]
-pub struct ActionContext;
+#[derive(Clone)]
+pub struct ActionContext {
+    /// Live camera pipeline manager — used by `snapshot`, `start_recording`, `stop_recording`.
+    pub media: Option<Arc<MediaManager>>,
+    /// Ring buffer manager — used by `extract_clip`.
+    pub ring_buffer: Option<Arc<RingBufferManager>>,
+    /// Directory where action output files (clips, snapshots) are written.
+    pub recording_dir: PathBuf,
+}
+
+impl Default for ActionContext {
+    fn default() -> Self {
+        Self {
+            media: None,
+            ring_buffer: None,
+            recording_dir: PathBuf::from("/tmp"),
+        }
+    }
+}
+
+// -- ActionDispatcher --
 
 /// Dispatches `Action` and `DeviceControl` pipeline nodes to their handlers.
 ///
@@ -25,13 +47,15 @@ impl ActionDispatcher {
         node_id: NodeId,
         config: &ActionConfig,
         input: &NodeInput,
-        _ctx: &ActionContext,
+        ctx: &ActionContext,
     ) -> NodeOutput {
         match config {
             ActionConfig::Delay(cfg) => delay::execute(node_id, cfg).await,
             ActionConfig::RenderNotification(cfg) => {
                 render_notification::execute(node_id, cfg, input)
             }
+            ActionConfig::ExtractClip(cfg) => extract_clip::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::Snapshot(cfg) => snapshot::execute(node_id, cfg, input, ctx).await,
             other => NodeOutput::failure(
                 node_id,
                 format!("'{}' handler not yet implemented", other.action_type_str()),
