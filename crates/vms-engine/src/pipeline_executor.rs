@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use evalexpr::{ContextWithMutableVariables, HashMapContext, Value as EvalValue};
@@ -14,6 +15,7 @@ use vms_db::{
     entities::{pipeline_run::RunStatus, run_node_result::NodeResultStatus},
     PipelineRunRepo,
 };
+use vms_media::{MediaManager, RingBufferManager};
 
 // -- Executor ------------------------------------------------------------------
 
@@ -31,11 +33,24 @@ use vms_db::{
 #[derive(Clone)]
 pub struct PipelineExecutor {
     repo: PipelineRunRepo,
+    media: Arc<MediaManager>,
+    ring_buffer: Arc<RingBufferManager>,
+    recording_dir: PathBuf,
 }
 
 impl PipelineExecutor {
-    pub fn new(repo: PipelineRunRepo) -> Arc<Self> {
-        Arc::new(Self { repo })
+    pub fn new(
+        repo: PipelineRunRepo,
+        media: Arc<MediaManager>,
+        ring_buffer: Arc<RingBufferManager>,
+        recording_dir: PathBuf,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            repo,
+            media,
+            ring_buffer,
+            recording_dir,
+        })
     }
 
     /// Execute `pipeline` for the given trigger `ctx`.
@@ -73,7 +88,11 @@ impl PipelineExecutor {
         }
 
         // -- 3. Walk the DAG ---------------------------------------------------
-        let action_ctx = ActionContext::default();
+        let action_ctx = ActionContext {
+            media: Some(self.media.clone()),
+            ring_buffer: Some(self.ring_buffer.clone()),
+            recording_dir: self.recording_dir.clone(),
+        };
         let outcome = self
             .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx)
             .await;
@@ -423,7 +442,11 @@ mod tests {
     }
 
     fn action_ctx() -> ActionContext {
-        ActionContext::default()
+        ActionContext {
+            media: None,
+            ring_buffer: None,
+            recording_dir: std::path::PathBuf::from("/tmp"),
+        }
     }
 
     // -- child_is_active -------------------------------------------------------
