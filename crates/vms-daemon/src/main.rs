@@ -135,7 +135,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Resource manager ready");
 
     // -- Pipeline Executor -----------------------------------------------------
-    let pipeline_executor = PipelineExecutor::new(pipeline_run_repo.clone());
+    let pipeline_executor = PipelineExecutor::new(
+        pipeline_run_repo.clone(),
+        media_manager.clone(),
+        ring_buffer_manager.clone(),
+        cfg.media.recording_dir.clone(),
+    );
     tracing::info!("Pipeline executor ready");
 
     // -- Trigger Evaluator -----------------------------------------------------
