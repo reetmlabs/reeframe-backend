@@ -76,6 +76,11 @@ impl RingBuffer {
             .collect()
     }
 
+    /// PTS of the most recently buffered frame, or `None` if the buffer is empty.
+    pub fn latest_pts(&self) -> Option<Duration> {
+        self.frames.back().map(|f| f.pts)
+    }
+
     /// Number of frames currently in the buffer.
     pub fn len(&self) -> usize {
         self.frames.len()
@@ -162,6 +167,17 @@ impl RingBufferManager {
     /// extraction without going through the manager.
     pub fn get(&self, camera_id: Uuid) -> Option<Arc<Mutex<RingBuffer>>> {
         self.buffers.get(&camera_id).map(|e| e.clone())
+    }
+
+    /// PTS of the most recently buffered frame for `camera_id`.
+    ///
+    /// Returns `None` if no buffer is running for this camera or the buffer is empty.
+    /// Used by the `extract_clip` action handler to anchor the extraction window
+    /// to the moment the pipeline fired.
+    pub fn latest_pts(&self, camera_id: Uuid) -> Option<Duration> {
+        self.buffers
+            .get(&camera_id)
+            .and_then(|rb| rb.lock().ok().and_then(|rb| rb.latest_pts()))
     }
 
     /// Extract frames around `event_pts` from the ring buffer and mux them into
