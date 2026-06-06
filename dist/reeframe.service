@@ -1,6 +1,6 @@
 [Unit]
-Description=OneWard VMS Daemon
-Documentation=https://github.com/yourorg/onward-vms
+Description=Reeframe VMS Daemon
+Documentation=https://github.com/yourorg/reeframe-backend
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60
@@ -8,16 +8,16 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=onward
-Group=onward
+User=reeframe
+Group=reeframe
 
 # Drop secrets into this file (mode 0600, owned by root) rather than
 # embedding them in the unit file.  Lines are KEY=VALUE, one per line.
 # Minimum required:
 #   VMS_ENCRYPTION_KEY=<base64-encoded 32 bytes>
 #
-# Generate with: openssl rand -base64 32 | sudo tee -a /etc/onward/env
-EnvironmentFile=-/etc/onward/env
+# Generate with: openssl rand -base64 32 | sudo tee -a /etc/reeframe/env
+EnvironmentFile=-/etc/reeframe/env
 
 ExecStart=/usr/local/bin/vms-daemon
 
@@ -26,10 +26,10 @@ RestartSec=5s
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Structured JSON logs go to stderr; journald captures them automatically.
-# Adjust verbosity with RUST_LOG= in /etc/onward/env.
+# Adjust verbosity with RUST_LOG= in /etc/reeframe/env.
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=onward
+SyslogIdentifier=reeframe
 
 # ── Security hardening ────────────────────────────────────────────────────────
 NoNewPrivileges=true
@@ -37,7 +37,7 @@ PrivateTmp=true
 
 # The filesystem is read-only except for the recording/DB directory.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/onward
+ReadWritePaths=/var/lib/reeframe
 
 # No access to other users' home directories.
 ProtectHome=true

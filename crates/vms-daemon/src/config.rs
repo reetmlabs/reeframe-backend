@@ -12,16 +12,16 @@ use serde::{Deserialize, Serialize};
 pub struct DatabaseConfig {
     /// SeaORM connection URL.
     /// Examples:
-    ///   sqlite://./onward.db
-    ///   mysql://user:pass@localhost/onward
-    ///   postgres://user:pass@localhost/onward
+    ///   sqlite://./reeframe.db
+    ///   mysql://user:pass@localhost/reeframe
+    ///   postgres://user:pass@localhost/reeframe
     pub url: String,
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: "sqlite://./onward.db".into(),
+            url: "sqlite://./reeframe.db".into(),
         }
     }
 }
@@ -37,7 +37,7 @@ pub struct MediaConfig {
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
-            recording_dir: PathBuf::from("/var/lib/onward/recordings"),
+            recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
         }
     }
@@ -90,8 +90,8 @@ impl Default for AppConfig {
 /// Load `AppConfig` from a layered set of sources (lowest -> highest priority):
 ///
 /// 1. Built-in defaults (`AppConfig::default()`)
-/// 2. `/etc/onward/config.toml`  — system-wide config (silently skipped if absent)
-/// 3. `./onward.toml`            — local override for development (silently skipped if absent)
+/// 2. `/etc/reeframe/config.toml`  — system-wide config (silently skipped if absent)
+/// 3. `./reeframe.toml`            — local override for development (silently skipped if absent)
 /// 4. `VMS_*` environment variables — twelve-factor style overrides
 ///
 /// Environment variable mapping uses a `VMS_` prefix and `__` as the nested
@@ -107,8 +107,8 @@ impl Default for AppConfig {
 pub fn load() -> Result<AppConfig, figment::Error> {
     Figment::new()
         .merge(Serialized::defaults(AppConfig::default()))
-        .merge(Toml::file("/etc/onward/config.toml"))
-        .merge(Toml::file("onward.toml"))
+        .merge(Toml::file("/etc/reeframe/config.toml"))
+        .merge(Toml::file("reeframe.toml"))
         .merge(Env::prefixed("VMS_").split("__"))
         .extract()
 }

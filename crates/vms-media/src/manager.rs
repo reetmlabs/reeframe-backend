@@ -26,7 +26,7 @@ pub struct MediaConfig {
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
-            recording_dir: PathBuf::from("/var/lib/onward/recordings"),
+            recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
         }
     }

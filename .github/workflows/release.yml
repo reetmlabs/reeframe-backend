@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ${{ github.repository_owner }}/onward-vms-be
+  IMAGE: ${{ github.repository_owner }}/reeframe-backend
 
 jobs:
   # ── Job 1: compile the release binary ────────────────────────────────────────
@@ -73,34 +73,34 @@ jobs:
       # ── .tar.gz ──────────────────────────────────────────────────────────────
       - name: Assemble tar archive
         run: |
-          STAGING="onward-vms-${VERSION}-linux-amd64"
+          STAGING="reeframe-backend-${VERSION}-linux-amd64"
           mkdir -p "$STAGING/bin" "$STAGING/systemd"
 
           install -m 0755 artifacts/vms-daemon         "$STAGING/bin/vms-daemon"
-          install -m 0644 dist/onward.service           "$STAGING/systemd/onward.service"
+          install -m 0644 dist/reeframe.service           "$STAGING/systemd/reeframe.service"
 
           # Minimal install instructions inside the archive
           cat > "$STAGING/README.txt" <<EOF
-          OneWard VMS v${VERSION}
+          Reeframe VMS v${VERSION}
 
           Install:
             sudo install -m 0755 bin/vms-daemon /usr/local/bin/vms-daemon
-            sudo install -m 0644 systemd/onward.service /etc/systemd/system/onward.service
+            sudo install -m 0644 systemd/reeframe.service /etc/systemd/system/reeframe.service
             sudo systemctl daemon-reload
-            sudo systemctl enable --now onward.service
+            sudo systemctl enable --now reeframe.service
 
           Configuration:
-            sudo mkdir -p /etc/onward
-            echo "VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32)" | sudo tee /etc/onward/env
-            sudo chmod 600 /etc/onward/env
+            sudo mkdir -p /etc/reeframe
+            echo "VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32)" | sudo tee /etc/reeframe/env
+            sudo chmod 600 /etc/reeframe/env
           EOF
 
-          tar -czf "onward-vms-${VERSION}-linux-amd64.tar.gz" "$STAGING"
+          tar -czf "reeframe-backend-${VERSION}-linux-amd64.tar.gz" "$STAGING"
 
       # ── .deb ─────────────────────────────────────────────────────────────────
       - name: Assemble .deb package
         run: |
-          PKG="onward-vms_${VERSION}_amd64"
+          PKG="reeframe-backend_${VERSION}_amd64"
           mkdir -p \
             "$PKG/DEBIAN" \
             "$PKG/usr/local/bin" \
@@ -115,7 +115,7 @@ jobs:
 
           # Payload files
           install -m 0755 artifacts/vms-daemon  "$PKG/usr/local/bin/vms-daemon"
-          install -m 0644 dist/onward.service   "$PKG/etc/systemd/system/onward.service"
+          install -m 0644 dist/reeframe.service   "$PKG/etc/systemd/system/reeframe.service"
 
           dpkg-deb --build --root-owner-group "$PKG"
 
@@ -124,8 +124,8 @@ jobs:
         with:
           name: packages
           path: |
-            onward-vms-*.tar.gz
-            onward-vms_*.deb
+            reeframe-backend-*.tar.gz
+            reeframe-backend_*.deb
           retention-days: 1
 
   # ── Job 3: build and push Docker image ───────────────────────────────────────
@@ -224,9 +224,9 @@ jobs:
             echo ""
             echo "**Debian / Ubuntu (.deb)**"
             echo '```bash'
-            echo "sudo dpkg -i onward-vms_*_amd64.deb"
-            echo "sudo sh -c 'echo VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32) >> /etc/onward/env'"
-            echo "sudo systemctl start onward.service"
+            echo "sudo dpkg -i reeframe-backend_*_amd64.deb"
+            echo "sudo sh -c 'echo VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32) >> /etc/reeframe/env'"
+            echo "sudo systemctl start reeframe.service"
             echo '```'
             echo ""
             echo "**Manual (.tar.gz)**"
@@ -248,7 +248,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: OneWard VMS ${{ github.ref_name }}
+          name: Reeframe VMS ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
           files: release-assets/*
           fail_on_unmatched_files: true

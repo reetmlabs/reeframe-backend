@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="assets/icon.svg" width="96" height="96" alt="OneWard VMS"/>
-  <h1>OneWard VMS</h1>
+  <img src="assets/icon.svg" width="96" height="96" alt="Reeframe VMS"/>
+  <h1>Reeframe VMS</h1>
   <p><strong>A Rust-native, pipeline-driven Video Management System.</strong><br/>
   Maximum automation flexibility. Zero custom code.</p>
 
@@ -12,9 +12,9 @@
 
 ---
 
-## What is OneWard?
+## What is Reeframe?
 
-OneWard is an open-source VMS built around one idea: **everything the system does is a pipeline**.
+Reeframe is an open-source VMS built around one idea: **everything the system does is a pipeline**.
 
 Recording footage, sending a Telegram clip when someone crosses a line, running a nightly S3 backup, moving a PTZ camera when a door sensor fires — these are not separate features with separate configuration dialogs. They are all pipelines: a trigger connected to a sequence of action and transport nodes in a directed acyclic graph (DAG).
 
@@ -26,7 +26,7 @@ That single abstraction gives you the composability, auditability, and extensibi
 
 > *Maximum flexibility with minimum code — wire any trigger to any action to any destination, without writing a single line of code.*
 
-Every automated behavior in OneWard is expressed as a **Pipeline DAG**: a directed graph of typed nodes that the engine evaluates whenever the trigger fires.
+Every automated behavior in Reeframe is expressed as a **Pipeline DAG**: a directed graph of typed nodes that the engine evaluates whenever the trigger fires.
 
 ```
    ┌─────────────┐
@@ -46,7 +46,7 @@ Every automated behavior in OneWard is expressed as a **Pipeline DAG**: a direct
 
 ### Why this matters
 
-| Traditional VMS | OneWard |
+| Traditional VMS | Reeframe |
 |---|---|
 | "Motion alert" is a fixed feature | Any trigger can activate any set of actions |
 | Adding a new workflow requires a plugin or config wizard | Connect nodes via API — no code required |
@@ -93,8 +93,8 @@ export VMS_ENCRYPTION_KEY=$(openssl rand -base64 32)
 docker run -d \
   -e VMS_ENCRYPTION_KEY="$VMS_ENCRYPTION_KEY" \
   -p 8080:8080 \
-  -v onward-data:/var/lib/onward \
-  ghcr.io/yourorg/onward-vms-be:latest
+  -v reeframe-data:/var/lib/reeframe \
+  ghcr.io/yourorg/reeframe-backend:latest
 ```
 
 Or with `docker compose`:
@@ -107,9 +107,9 @@ docker compose up -d
 ### Debian / Ubuntu
 
 ```bash
-sudo dpkg -i onward-vms_0.1.0_amd64.deb
-sudo sh -c 'echo VMS_ENCRYPTION_KEY=$(openssl rand -base64 32) >> /etc/onward/env'
-sudo systemctl start onward.service
+sudo dpkg -i reeframe-backend_0.1.0_amd64.deb
+sudo sh -c 'echo VMS_ENCRYPTION_KEY=$(openssl rand -base64 32) >> /etc/reeframe/env'
+sudo systemctl start reeframe.service
 ```
 
 ### Verify
@@ -138,7 +138,7 @@ CAM_ID=$(jq -r .id /tmp/cam.json)
 curl -X POST "http://localhost:8080/cameras/$CAM_ID/recording/start"
 ```
 
-MP4 chunks appear in `/var/lib/onward/recordings/`.
+MP4 chunks appear in `/var/lib/reeframe/recordings/`.
 
 ---
 
@@ -180,8 +180,8 @@ All settings have sane defaults. Override via environment variable or config fil
 | Env var | Default | Description |
 |---|---|---|
 | `VMS_ENCRYPTION_KEY` | *(required)* | Base64-encoded 32-byte AES-256-GCM key. Generate: `openssl rand -base64 32` |
-| `VMS_DATABASE__URL` | `sqlite:///var/lib/onward/onward.db` | SeaORM connection URL (`sqlite://`, `mysql://`, `postgres://`) |
-| `VMS_MEDIA__RECORDING_DIR` | `/var/lib/onward/recordings` | Directory for MP4 chunk output |
+| `VMS_DATABASE__URL` | `sqlite:///var/lib/reeframe/reeframe.db` | SeaORM connection URL (`sqlite://`, `mysql://`, `postgres://`) |
+| `VMS_MEDIA__RECORDING_DIR` | `/var/lib/reeframe/recordings` | Directory for MP4 chunk output |
 | `VMS_MEDIA__CHUNK_DURATION_SECS` | `300` | Seconds per recording chunk |
 | `VMS_API__BIND` | `0.0.0.0:8080` | HTTP server bind address |
 | `RUST_LOG` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
@@ -189,8 +189,8 @@ All settings have sane defaults. Override via environment variable or config fil
 Config files (lowest → highest priority, all optional):
 
 ```
-/etc/onward/config.toml   — system-wide
-./onward.toml             — local dev override
+/etc/reeframe/config.toml   — system-wide
+./reeframe.toml             — local dev override
 VMS_* env vars            — highest priority
 ```
 
@@ -244,7 +244,7 @@ VMS_ENCRYPTION_KEY=$(openssl rand -base64 32) \
 
 ## Contributing
 
-OneWard is in active development. Contributions are welcome.
+Reeframe is in active development. Contributions are welcome.
 
 1. Fork the repo and create a feature branch.
 2. Follow the existing commit style (`feat(scope): description`).
