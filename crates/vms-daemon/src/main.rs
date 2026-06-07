@@ -19,7 +19,7 @@ use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // -- Observability (minimal — replaced by full OTLP pipeline in step 8c) --
+    // -- Observability (minimal — full OTLP pipeline will be wired in a future release) --
     fmt()
         .json()
         .with_writer(std::io::stderr)

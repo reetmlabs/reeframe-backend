@@ -27,7 +27,7 @@ use vms_media::{MediaManager, RingBufferManager};
 /// execution proceeds.
 ///
 /// Action and device-control nodes are dispatched through [`ActionDispatcher`].
-/// Transport nodes remain stubbed until step 6-7.
+/// Transport nodes are not yet implemented and return a no-op success.
 ///
 /// [`execute`]: PipelineExecutor::execute
 #[derive(Clone)]
@@ -332,7 +332,7 @@ pub(crate) fn child_is_active(
 /// result in `metadata["condition_result"]`.
 /// `Fork` passes the first parent output through with this node's ID.
 /// `Action` and `DeviceControl` are dispatched through [`ActionDispatcher`].
-/// `Transport` remains a stub until step 6-7.
+/// `Transport` is not yet implemented and returns a no-op success.
 pub(crate) async fn execute_node(
     node: &PipelineNode,
     parent_outputs: &[NodeOutput],
@@ -384,7 +384,7 @@ pub(crate) async fn execute_node(
             tracing::debug!(
                 node_id = %node.id,
                 dest_id = ?node.destination_id,
-                "Transport node (stub — wired in step 6-7)",
+                "Transport node (not yet implemented — no-op)",
             );
             NodeOutput::success(node.id)
         }
