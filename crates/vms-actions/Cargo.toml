@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-vms-core   = { path = "../vms-core" }
-vms-media  = { path = "../vms-media" }
+vms-core       = { path = "../vms-core" }
+vms-media      = { path = "../vms-media" }
+gstreamer      = { workspace = true }
+gstreamer-app  = { workspace = true }
 tokio      = { workspace = true }
 serde_json = { workspace = true }
 uuid       = { workspace = true }

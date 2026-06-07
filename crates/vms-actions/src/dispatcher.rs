@@ -8,7 +8,7 @@ use vms_core::{
 };
 use vms_media::{MediaManager, RingBufferManager};
 
-use crate::handlers::{delay, extract_clip, render_notification, snapshot};
+use crate::handlers::{delay, extract_clip, merge_clips, render_notification, snapshot, transcode, watermark};
 
 // -- ActionContext --
 
@@ -56,6 +56,9 @@ impl ActionDispatcher {
             }
             ActionConfig::ExtractClip(cfg) => extract_clip::execute(node_id, cfg, input, ctx).await,
             ActionConfig::Snapshot(cfg) => snapshot::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::Transcode(cfg) => transcode::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::Watermark(cfg) => watermark::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::MergeClips(cfg) => merge_clips::execute(node_id, cfg, input, ctx).await,
             other => NodeOutput::failure(
                 node_id,
                 format!("'{}' handler not yet implemented", other.action_type_str()),
