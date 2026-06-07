@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use uuid::Uuid;
 use vms_core::{
     action::ActionConfig,
     node::{NodeInput, NodeOutput},
@@ -8,7 +10,10 @@ use vms_core::{
 };
 use vms_media::{MediaManager, RingBufferManager};
 
-use crate::handlers::{compress, delay, encrypt, extract_clip, merge_clips, render_notification, snapshot, transcode, watermark};
+use crate::handlers::{
+    compress, delay, encrypt, extract_clip, merge_clips, render_notification, snapshot,
+    start_recording, stop_recording, transcode, watermark,
+};
 
 // -- ActionContext --
 
@@ -27,6 +32,11 @@ pub struct ActionContext {
     /// config specifies `key_ref = "default"`. Other key refs are resolved
     /// from `/etc/reeframe/keys/{name}` at runtime.
     pub encryption_key: Option<[u8; 32]>,
+    /// Map of camera_id -> RTSP URL for all cameras in the DB.
+    ///
+    /// Populated by the executor before each pipeline run from `CameraRepo::list()`.
+    /// Used by `start_recording` to start a camera that is not currently running.
+    pub camera_rtsp_urls: HashMap<Uuid, String>,
 }
 
 impl Default for ActionContext {
@@ -36,6 +46,7 @@ impl Default for ActionContext {
             ring_buffer: None,
             recording_dir: PathBuf::from("/tmp"),
             encryption_key: None,
+            camera_rtsp_urls: HashMap::new(),
         }
     }
 }
@@ -68,6 +79,12 @@ impl ActionDispatcher {
             ActionConfig::MergeClips(cfg) => merge_clips::execute(node_id, cfg, input, ctx).await,
             ActionConfig::Compress(cfg) => compress::execute(node_id, cfg, input, ctx).await,
             ActionConfig::Encrypt(cfg) => encrypt::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::StartRecording(cfg) => {
+                start_recording::execute(node_id, cfg, input, ctx).await
+            }
+            ActionConfig::StopRecording(cfg) => {
+                stop_recording::execute(node_id, cfg, input, ctx).await
+            }
             other => NodeOutput::failure(
                 node_id,
                 format!("'{}' handler not yet implemented", other.action_type_str()),

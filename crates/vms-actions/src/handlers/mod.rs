@@ -6,5 +6,7 @@ pub mod extract_clip;
 pub mod merge_clips;
 pub mod render_notification;
 pub mod snapshot;
+pub mod start_recording;
+pub mod stop_recording;
 pub mod transcode;
 pub mod watermark;
