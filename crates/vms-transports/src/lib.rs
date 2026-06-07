@@ -1,1 +1,4 @@
-// vms-transports — delivery adapters (S3, SFTP, Telegram, Email, Slack, SMS, webhook).
+pub mod adapters;
+pub mod dispatcher;
+
+pub use dispatcher::TransportDispatcher;
