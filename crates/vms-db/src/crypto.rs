@@ -61,6 +61,14 @@ impl Crypto {
         Self { key }
     }
 
+    /// Return the raw 32-byte key material.
+    ///
+    /// Used by `PipelineExecutor` to pass the key into `ActionContext` so the
+    /// `encrypt` action handler can use it without re-parsing the config.
+    pub fn key_bytes(&self) -> [u8; 32] {
+        self.key
+    }
+
     /// Encrypt `plaintext` and return the `enc:v1:…` encoded string.
     pub fn encrypt(&self, plaintext: &str) -> Result<String, VmsError> {
         let cipher = Aes256Gcm::new_from_slice(&self.key)
