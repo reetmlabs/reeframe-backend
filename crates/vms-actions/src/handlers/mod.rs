@@ -1,5 +1,7 @@
 pub(crate) mod gst;
+pub mod compress;
 pub mod delay;
+pub mod encrypt;
 pub mod extract_clip;
 pub mod merge_clips;
 pub mod render_notification;

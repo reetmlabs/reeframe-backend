@@ -8,7 +8,7 @@ use vms_core::{
 };
 use vms_media::{MediaManager, RingBufferManager};
 
-use crate::handlers::{delay, extract_clip, merge_clips, render_notification, snapshot, transcode, watermark};
+use crate::handlers::{compress, delay, encrypt, extract_clip, merge_clips, render_notification, snapshot, transcode, watermark};
 
 // -- ActionContext --
 
@@ -21,6 +21,12 @@ pub struct ActionContext {
     pub ring_buffer: Option<Arc<RingBufferManager>>,
     /// Directory where action output files (clips, snapshots) are written.
     pub recording_dir: PathBuf,
+    /// Raw AES-256 key for the `encrypt` action handler.
+    ///
+    /// Sourced from the daemon's `VMS_ENCRYPTION_KEY`. Used when the action
+    /// config specifies `key_ref = "default"`. Other key refs are resolved
+    /// from `/etc/reeframe/keys/{name}` at runtime.
+    pub encryption_key: Option<[u8; 32]>,
 }
 
 impl Default for ActionContext {
@@ -29,6 +35,7 @@ impl Default for ActionContext {
             media: None,
             ring_buffer: None,
             recording_dir: PathBuf::from("/tmp"),
+            encryption_key: None,
         }
     }
 }
@@ -59,6 +66,8 @@ impl ActionDispatcher {
             ActionConfig::Transcode(cfg) => transcode::execute(node_id, cfg, input, ctx).await,
             ActionConfig::Watermark(cfg) => watermark::execute(node_id, cfg, input, ctx).await,
             ActionConfig::MergeClips(cfg) => merge_clips::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::Compress(cfg) => compress::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::Encrypt(cfg) => encrypt::execute(node_id, cfg, input, ctx).await,
             other => NodeOutput::failure(
                 node_id,
                 format!("'{}' handler not yet implemented", other.action_type_str()),
