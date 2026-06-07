@@ -13,8 +13,9 @@ use vms_core::{
 };
 use vms_db::{
     entities::{pipeline_run::RunStatus, run_node_result::NodeResultStatus},
-    CameraRepo, PipelineRunRepo,
+    CameraRepo, DestinationRepo, PipelineRunRepo,
 };
+use vms_transports::TransportDispatcher;
 use vms_media::{MediaManager, RingBufferManager};
 
 // -- Executor --
@@ -34,6 +35,7 @@ use vms_media::{MediaManager, RingBufferManager};
 pub struct PipelineExecutor {
     repo: PipelineRunRepo,
     camera_repo: CameraRepo,
+    dest_repo: DestinationRepo,
     media: Arc<MediaManager>,
     ring_buffer: Arc<RingBufferManager>,
     recording_dir: PathBuf,
@@ -44,6 +46,7 @@ impl PipelineExecutor {
     pub fn new(
         repo: PipelineRunRepo,
         camera_repo: CameraRepo,
+        dest_repo: DestinationRepo,
         media: Arc<MediaManager>,
         ring_buffer: Arc<RingBufferManager>,
         recording_dir: PathBuf,
@@ -52,6 +55,7 @@ impl PipelineExecutor {
         Arc::new(Self {
             repo,
             camera_repo,
+            dest_repo,
             media,
             ring_buffer,
             recording_dir,
@@ -109,7 +113,7 @@ impl PipelineExecutor {
             camera_rtsp_urls,
         };
         let outcome = self
-            .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx)
+            .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx, &self.dest_repo)
             .await;
 
         // -- 4. Finalise run --
@@ -161,6 +165,7 @@ impl PipelineExecutor {
         _run_id: Uuid,
         result_ids: &HashMap<NodeId, Uuid>,
         action_ctx: &ActionContext,
+        dest_repo: &DestinationRepo,
     ) -> Result<(), VmsError> {
         let mut remaining: HashMap<NodeId, usize> = dag
             .nodes
@@ -216,11 +221,17 @@ impl PipelineExecutor {
                     .collect();
                 let trigger_ctx = ctx.clone();
                 let action_ctx_clone = action_ctx.clone();
+                let dest_repo_clone = dest_repo.clone();
 
                 join_set.spawn(async move {
-                    let output =
-                        execute_node(&node, &parent_outputs, &trigger_ctx, &action_ctx_clone)
-                            .await;
+                    let output = execute_node(
+                        &node,
+                        &parent_outputs,
+                        &trigger_ctx,
+                        &action_ctx_clone,
+                        &dest_repo_clone,
+                    )
+                    .await;
                     (node_id, output)
                 });
             }
@@ -332,12 +343,14 @@ pub(crate) fn child_is_active(
 /// result in `metadata["condition_result"]`.
 /// `Fork` passes the first parent output through with this node's ID.
 /// `Action` and `DeviceControl` are dispatched through [`ActionDispatcher`].
-/// `Transport` is not yet implemented and returns a no-op success.
+/// `Transport` looks up the destination from `dest_repo` and dispatches to
+/// [`TransportDispatcher`].
 pub(crate) async fn execute_node(
     node: &PipelineNode,
     parent_outputs: &[NodeOutput],
     ctx: &TriggerContext,
     action_ctx: &ActionContext,
+    dest_repo: &DestinationRepo,
 ) -> NodeOutput {
     match node.node_type {
         NodeType::TriggerRoot => NodeOutput::success(node.id).with_metadata(serde_json::json!({
@@ -381,12 +394,35 @@ pub(crate) async fn execute_node(
         }
 
         NodeType::Transport => {
-            tracing::debug!(
-                node_id = %node.id,
-                dest_id = ?node.destination_id,
-                "Transport node (not yet implemented — no-op)",
-            );
-            NodeOutput::success(node.id)
+            let Some(dest_id) = node.destination_id else {
+                return NodeOutput::failure(node.id, "transport node has no destination_id");
+            };
+            let dest = match dest_repo.get_decrypted(dest_id).await {
+                Ok(Some(d)) => d,
+                Ok(None) => {
+                    return NodeOutput::failure(
+                        node.id,
+                        format!("transport: destination {dest_id} not found"),
+                    )
+                }
+                Err(e) => {
+                    return NodeOutput::failure(
+                        node.id,
+                        format!("transport: destination lookup failed: {e}"),
+                    )
+                }
+            };
+            let input = NodeInput {
+                parent_outputs: parent_outputs.to_vec(),
+                trigger_ctx: ctx.clone(),
+            };
+            TransportDispatcher::dispatch(
+                node.id,
+                &dest,
+                node.transport_config.as_ref(),
+                &input,
+            )
+            .await
         }
     }
 }
@@ -463,6 +499,11 @@ mod tests {
         }
     }
 
+    async fn dest_repo() -> DestinationRepo {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        DestinationRepo::new(db, vms_db::Crypto::from_key([0u8; 32]))
+    }
+
     // -- child_is_active --
 
     #[test]
@@ -520,7 +561,8 @@ mod tests {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::TriggerRoot);
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
         assert!(out.success);
         assert_eq!(out.metadata["pipeline_id"], pid.to_string());
     }
@@ -532,7 +574,8 @@ mod tests {
         let parent = NodeOutput::success(Uuid::new_v4())
             .with_metadata(serde_json::json!({"key": "value"}));
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[parent], &ctx, &action_ctx()).await;
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr).await;
         assert!(out.success);
         assert_eq!(out.metadata["key"], "value");
         assert_eq!(out.node_id, n.id);
@@ -546,7 +589,8 @@ mod tests {
         let parent =
             NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.9}));
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[parent], &ctx, &action_ctx()).await;
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr).await;
         assert!(out.success);
         assert_eq!(out.metadata["condition_result"], true);
     }
@@ -559,7 +603,8 @@ mod tests {
         let parent =
             NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.1}));
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[parent], &ctx, &action_ctx()).await;
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr).await;
         assert!(out.success);
         assert_eq!(out.metadata["condition_result"], false);
     }
@@ -570,7 +615,8 @@ mod tests {
         let mut n = node(pid, NodeType::Condition);
         n.condition_expr = Some(">>>".into());
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
         assert!(!out.success);
         assert!(out
             .error
@@ -584,7 +630,8 @@ mod tests {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::Action);
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
         assert!(!out.success);
         assert!(out
             .error
@@ -594,13 +641,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_stub_returns_success() {
+    async fn transport_unknown_destination_returns_failure() {
         let pid = Uuid::new_v4();
         let mut n = node(pid, NodeType::Transport);
         n.destination_id = Some(Uuid::new_v4());
         let ctx = schedule_ctx(pid);
-        let out = execute_node(&n, &[], &ctx, &action_ctx()).await;
-        assert!(out.success);
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
+        assert!(!out.success);
     }
 
     // -- DAG structural sanity (no DB — compile only) --
