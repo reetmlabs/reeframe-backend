@@ -11,8 +11,9 @@ use vms_core::{
 use vms_media::{MediaManager, RingBufferManager};
 
 use crate::handlers::{
-    compress, delay, encrypt, extract_clip, merge_clips, render_notification, snapshot,
-    start_recording, stop_recording, transcode, watermark,
+    compress, delay, encrypt, extract_clip, merge_clips, ptz_move, render_notification,
+    set_stream_quality, snapshot, start_recording, stop_recording, transcode,
+    trigger_alarm_output, watermark,
 };
 
 // -- ActionContext --
@@ -85,10 +86,13 @@ impl ActionDispatcher {
             ActionConfig::StopRecording(cfg) => {
                 stop_recording::execute(node_id, cfg, input, ctx).await
             }
-            other => NodeOutput::failure(
-                node_id,
-                format!("'{}' handler not yet implemented", other.action_type_str()),
-            ),
+            ActionConfig::PtzMove(cfg) => ptz_move::execute(node_id, cfg, input, ctx).await,
+            ActionConfig::SetStreamQuality(cfg) => {
+                set_stream_quality::execute(node_id, cfg, input, ctx).await
+            }
+            ActionConfig::TriggerAlarmOutput(cfg) => {
+                trigger_alarm_output::execute(node_id, cfg, input, ctx).await
+            }
         }
     }
 }
