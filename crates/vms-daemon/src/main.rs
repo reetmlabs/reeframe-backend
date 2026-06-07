@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Encryption key loaded");
 
     // -- Repositories --
+    let encryption_key = crypto.key_bytes();
     let camera_repo = CameraRepo::new(db.clone(), crypto.clone());
     let source_repo = SourceRepo::new(db.clone(), crypto.clone());
     let dest_repo = DestinationRepo::new(db.clone(), crypto);
@@ -137,9 +138,11 @@ async fn main() -> anyhow::Result<()> {
     // -- Pipeline Executor --
     let pipeline_executor = PipelineExecutor::new(
         pipeline_run_repo.clone(),
+        camera_repo.clone(),
         media_manager.clone(),
         ring_buffer_manager.clone(),
         cfg.media.recording_dir.clone(),
+        Some(encryption_key),
     );
     tracing::info!("Pipeline executor ready");
 

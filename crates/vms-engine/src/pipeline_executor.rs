@@ -13,7 +13,7 @@ use vms_core::{
 };
 use vms_db::{
     entities::{pipeline_run::RunStatus, run_node_result::NodeResultStatus},
-    PipelineRunRepo,
+    CameraRepo, PipelineRunRepo,
 };
 use vms_media::{MediaManager, RingBufferManager};
 
@@ -33,23 +33,29 @@ use vms_media::{MediaManager, RingBufferManager};
 #[derive(Clone)]
 pub struct PipelineExecutor {
     repo: PipelineRunRepo,
+    camera_repo: CameraRepo,
     media: Arc<MediaManager>,
     ring_buffer: Arc<RingBufferManager>,
     recording_dir: PathBuf,
+    encryption_key: Option<[u8; 32]>,
 }
 
 impl PipelineExecutor {
     pub fn new(
         repo: PipelineRunRepo,
+        camera_repo: CameraRepo,
         media: Arc<MediaManager>,
         ring_buffer: Arc<RingBufferManager>,
         recording_dir: PathBuf,
+        encryption_key: Option<[u8; 32]>,
     ) -> Arc<Self> {
         Arc::new(Self {
             repo,
+            camera_repo,
             media,
             ring_buffer,
             recording_dir,
+            encryption_key,
         })
     }
 
@@ -88,10 +94,19 @@ impl PipelineExecutor {
         }
 
         // -- 3. Walk the DAG --
+        let camera_rtsp_urls = match self.camera_repo.list().await {
+            Ok(cameras) => cameras.into_iter().map(|c| (c.id, c.rtsp_url)).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not load camera RTSP URLs; start_recording nodes will fail for unknown cameras");
+                std::collections::HashMap::new()
+            }
+        };
         let action_ctx = ActionContext {
             media: Some(self.media.clone()),
             ring_buffer: Some(self.ring_buffer.clone()),
             recording_dir: self.recording_dir.clone(),
+            encryption_key: self.encryption_key,
+            camera_rtsp_urls,
         };
         let outcome = self
             .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx)
@@ -443,9 +458,8 @@ mod tests {
 
     fn action_ctx() -> ActionContext {
         ActionContext {
-            media: None,
-            ring_buffer: None,
             recording_dir: std::path::PathBuf::from("/tmp"),
+            ..Default::default()
         }
     }
 
