@@ -6119,6 +6119,7 @@ dependencies = [
  "chrono-tz",
  "dashmap",
  "evalexpr",
+ "sea-orm",
  "serde_json",
  "sysinfo",
  "thiserror 2.0.18",
