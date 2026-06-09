@@ -6,7 +6,7 @@ use vms_core::{
 };
 use vms_db::entities::destination::{self, DestinationType};
 
-use crate::adapters::{local, s3, sftp};
+use crate::adapters::{local, s3, sftp, smb};
 
 // -- TransportDispatcher --
 
@@ -36,6 +36,7 @@ impl TransportDispatcher {
             DestinationType::Local => local::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
             DestinationType::S3    => s3::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
             DestinationType::Sftp  => sftp::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
+            DestinationType::Smb   => smb::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
             ref other => NodeOutput::failure(
                 node_id,
                 format!("{:?} transport is not yet implemented", other),
