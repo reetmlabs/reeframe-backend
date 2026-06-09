@@ -1,3 +1,4 @@
+pub mod email;
 pub mod local;
 pub mod s3;
 pub mod sftp;
