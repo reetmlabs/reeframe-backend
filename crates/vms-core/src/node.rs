@@ -25,9 +25,34 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::pipeline::NodeId;
 use crate::trigger::TriggerContext;
+
+// -- Transfer progress --
+
+/// Mid-transfer progress snapshot published by transport adapters.
+///
+/// Stored in `PipelineExecutor::progress_map` keyed by `(run_id, node_id)`.
+/// The API layer can expose this via SSE or WebSocket for UI progress bars.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferProgress {
+    pub node_id: NodeId,
+    pub run_id: Option<Uuid>,
+    pub bytes_sent: u64,
+    /// `None` when the total size is not known ahead of time (e.g. generated text).
+    pub total_bytes: Option<u64>,
+}
+
+impl TransferProgress {
+    /// Completion percentage, or `None` if total size is unknown.
+    pub fn percent(&self) -> Option<f32> {
+        self.total_bytes
+            .filter(|&t| t > 0)
+            .map(|t| (self.bytes_sent as f32 / t as f32 * 100.0).min(100.0))
+    }
+}
 
 // -- Node output --
 

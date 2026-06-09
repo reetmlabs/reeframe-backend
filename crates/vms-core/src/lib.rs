@@ -53,7 +53,7 @@ pub use pipeline::{
     PipelineNode, PipelineTrigger,
 };
 
-pub use node::{NodeInput, NodeOutput};
+pub use node::{NodeInput, NodeOutput, TransferProgress};
 
 pub use plugin::{
     AnalyticsCapability, AnalyticsProvider, AuditEntry, AuditOutcome, AuditSink, AuthClaims,

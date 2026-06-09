@@ -2,12 +2,14 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use evalexpr::{ContextWithMutableVariables, HashMapContext, Value as EvalValue};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 use vms_actions::dispatcher::{ActionContext, ActionDispatcher};
 use vms_core::{
-    node::{NodeInput, NodeOutput},
+    node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::{CompiledPipeline, EdgeType, NodeId, NodeType, PipelineNode},
     TriggerContext, VmsError,
 };
@@ -31,6 +33,9 @@ use vms_media::{MediaManager, RingBufferManager};
 /// Transport nodes are not yet implemented and return a no-op success.
 ///
 /// [`execute`]: PipelineExecutor::execute
+/// Key type for the progress map: `(run_id, node_id)`.
+pub type ProgressKey = (Uuid, NodeId);
+
 #[derive(Clone)]
 pub struct PipelineExecutor {
     repo: PipelineRunRepo,
@@ -40,6 +45,12 @@ pub struct PipelineExecutor {
     ring_buffer: Arc<RingBufferManager>,
     recording_dir: PathBuf,
     encryption_key: Option<[u8; 32]>,
+    /// Live transfer progress for all active Transport nodes.
+    ///
+    /// Keyed by `(run_id, node_id)`.  Entries are inserted when a Transport
+    /// node starts and updated after every chunk.  The API layer can expose
+    /// this via SSE or WebSocket for UI progress bars.
+    progress_map: Arc<DashMap<ProgressKey, TransferProgress>>,
 }
 
 impl PipelineExecutor {
@@ -60,7 +71,13 @@ impl PipelineExecutor {
             ring_buffer,
             recording_dir,
             encryption_key,
+            progress_map: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Returns the shared progress map for use by the API layer.
+    pub fn progress_map(&self) -> Arc<DashMap<ProgressKey, TransferProgress>> {
+        self.progress_map.clone()
     }
 
     /// Execute `pipeline` for the given trigger `ctx`.
@@ -113,7 +130,7 @@ impl PipelineExecutor {
             camera_rtsp_urls,
         };
         let outcome = self
-            .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx, &self.dest_repo)
+            .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx, &self.dest_repo, &self.progress_map)
             .await;
 
         // -- 4. Finalise run --
@@ -166,6 +183,7 @@ impl PipelineExecutor {
         result_ids: &HashMap<NodeId, Uuid>,
         action_ctx: &ActionContext,
         dest_repo: &DestinationRepo,
+        progress_map: &Arc<DashMap<ProgressKey, TransferProgress>>,
     ) -> Result<(), VmsError> {
         let mut remaining: HashMap<NodeId, usize> = dag
             .nodes
@@ -222,6 +240,7 @@ impl PipelineExecutor {
                 let trigger_ctx = ctx.clone();
                 let action_ctx_clone = action_ctx.clone();
                 let dest_repo_clone = dest_repo.clone();
+                let progress_map_clone = progress_map.clone();
 
                 join_set.spawn(async move {
                     let output = execute_node(
@@ -230,6 +249,7 @@ impl PipelineExecutor {
                         &trigger_ctx,
                         &action_ctx_clone,
                         &dest_repo_clone,
+                        &progress_map_clone,
                     )
                     .await;
                     (node_id, output)
@@ -351,6 +371,7 @@ pub(crate) async fn execute_node(
     ctx: &TriggerContext,
     action_ctx: &ActionContext,
     dest_repo: &DestinationRepo,
+    progress_map: &Arc<DashMap<ProgressKey, TransferProgress>>,
 ) -> NodeOutput {
     match node.node_type {
         NodeType::TriggerRoot => NodeOutput::success(node.id).with_metadata(serde_json::json!({
@@ -416,11 +437,24 @@ pub(crate) async fn execute_node(
                 parent_outputs: parent_outputs.to_vec(),
                 trigger_ctx: ctx.clone(),
             };
+
+            // -- Wire up progress channel --
+            let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TransferProgress>();
+            let run_id = ctx.run_id.unwrap_or_default();
+            let node_id = node.id;
+            let map = progress_map.clone();
+            tokio::spawn(async move {
+                while let Some(p) = progress_rx.recv().await {
+                    map.insert((run_id, node_id), p);
+                }
+            });
+
             TransportDispatcher::dispatch(
                 node.id,
                 &dest,
                 node.transport_config.as_ref(),
                 &input,
+                Some(&progress_tx),
             )
             .await
         }
@@ -504,6 +538,10 @@ mod tests {
         DestinationRepo::new(db, vms_db::Crypto::from_key([0u8; 32]))
     }
 
+    fn progress_map() -> Arc<DashMap<ProgressKey, TransferProgress>> {
+        Arc::new(DashMap::new())
+    }
+
     // -- child_is_active --
 
     #[test]
@@ -562,7 +600,7 @@ mod tests {
         let n = node(pid, NodeType::TriggerRoot);
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
-        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["pipeline_id"], pid.to_string());
     }
@@ -575,7 +613,7 @@ mod tests {
             .with_metadata(serde_json::json!({"key": "value"}));
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
-        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr).await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["key"], "value");
         assert_eq!(out.node_id, n.id);
@@ -590,7 +628,7 @@ mod tests {
             NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.9}));
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
-        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr).await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["condition_result"], true);
     }
@@ -604,7 +642,7 @@ mod tests {
             NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.1}));
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
-        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr).await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["condition_result"], false);
     }
@@ -616,7 +654,7 @@ mod tests {
         n.condition_expr = Some(">>>".into());
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
-        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(!out.success);
         assert!(out
             .error
@@ -631,7 +669,7 @@ mod tests {
         let n = node(pid, NodeType::Action);
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
-        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(!out.success);
         assert!(out
             .error
@@ -647,7 +685,7 @@ mod tests {
         n.destination_id = Some(Uuid::new_v4());
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
-        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr).await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(!out.success);
     }
 
