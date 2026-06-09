@@ -6,7 +6,7 @@ use vms_core::{
 };
 use vms_db::entities::destination::{self, DestinationType};
 
-use crate::adapters::{email, local, s3, sftp, smb, telegram, webhook};
+use crate::adapters::{email, local, s3, sftp, slack, smb, telegram, webhook};
 
 // -- TransportDispatcher --
 
@@ -40,6 +40,7 @@ impl TransportDispatcher {
             DestinationType::Telegram => telegram::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
             DestinationType::Webhook  => webhook::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
             DestinationType::Email    => email::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
+            DestinationType::Slack    => slack::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
             ref other => NodeOutput::failure(
                 node_id,
                 format!("{:?} transport is not yet implemented", other),
