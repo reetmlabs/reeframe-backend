@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 
 use minijinja::Environment;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc::UnboundedSender;
 use vms_core::{
     action::TransportConfig,
-    node::{NodeInput, NodeOutput},
+    node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
 use vms_db::entities::destination;
+
+const CHUNK_SIZE: usize = 256 * 1024;
 
 // -- Adapter --
 
@@ -17,9 +21,8 @@ use vms_db::entities::destination;
 /// { "path": "/var/lib/reeframe/exports" }
 /// ```
 ///
-/// The node-level `transport_config` can override the sub-directory and filename
-/// via minijinja templates.  When the templates are absent the artifact keeps its
-/// original filename and lands directly in the base path.
+/// Files are copied in 256 KB chunks — the source file is never fully loaded
+/// into memory.  Progress is reported via `progress_tx` after each chunk.
 ///
 /// Template variables:
 /// | Variable        | Value |
@@ -37,6 +40,7 @@ pub async fn deliver(
     dest: &destination::Model,
     transport_cfg: Option<&TransportConfig>,
     input: &NodeInput,
+    progress_tx: Option<&UnboundedSender<TransferProgress>>,
 ) -> NodeOutput {
     // -- Resolve base path from dest config --
     let base_path = match dest.config.get("path").and_then(|v| v.as_str()) {
@@ -124,8 +128,8 @@ pub async fn deliver(
 
     // -- Deliver artifact or text --
     if let Some(src) = artifact {
-        match tokio::fs::copy(src, &output_path).await {
-            Ok(_) => {
+        match copy_with_progress(node_id, src, &output_path, ctx.run_id, progress_tx).await {
+            Ok(()) => {
                 tracing::info!(
                     node_id = %node_id,
                     dest_id = %dest.id,
@@ -135,10 +139,7 @@ pub async fn deliver(
                 );
                 NodeOutput::success(node_id).with_artifact(output_path)
             }
-            Err(e) => NodeOutput::failure(
-                node_id,
-                format!("local transport: copy artifact: {e}"),
-            ),
+            Err(e) => NodeOutput::failure(node_id, format!("local transport: copy artifact: {e}")),
         }
     } else if let Some(text) = input.first_text() {
         // -- Render message_template if provided, else use text verbatim --
@@ -176,4 +177,46 @@ pub async fn deliver(
             "local transport: no artifact or text in parent outputs",
         )
     }
+}
+
+// -- Chunked copy with progress reporting --
+
+async fn copy_with_progress(
+    node_id: NodeId,
+    src: &PathBuf,
+    dst: &PathBuf,
+    run_id: Option<uuid::Uuid>,
+    progress_tx: Option<&UnboundedSender<TransferProgress>>,
+) -> Result<(), String> {
+    let mut file = tokio::fs::File::open(src)
+        .await
+        .map_err(|e| format!("open source: {e}"))?;
+    let total_bytes = file
+        .metadata()
+        .await
+        .map(|m| m.len())
+        .ok();
+
+    let mut out = tokio::fs::File::create(dst)
+        .await
+        .map_err(|e| format!("create destination: {e}"))?;
+
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut bytes_sent: u64 = 0;
+
+    loop {
+        let n = file.read(&mut buf).await.map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n]).await.map_err(|e| format!("write: {e}"))?;
+        bytes_sent += n as u64;
+
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(TransferProgress { node_id, run_id, bytes_sent, total_bytes });
+        }
+    }
+
+    out.flush().await.map_err(|e| format!("flush: {e}"))?;
+    Ok(())
 }

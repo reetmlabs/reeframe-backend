@@ -2,14 +2,18 @@ use minijinja::Environment;
 use object_store::{
     aws::AmazonS3Builder,
     path::Path as OsPath,
-    ObjectStore, PutPayload,
+    MultipartUpload, ObjectStore, PutPayload,
 };
+use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc::UnboundedSender;
 use vms_core::{
     action::TransportConfig,
-    node::{NodeInput, NodeOutput},
+    node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
 use vms_db::entities::destination;
+
+const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB read buffer; object_store manages multipart sizing
 
 // -- Adapter --
 
@@ -27,19 +31,16 @@ use vms_db::entities::destination;
 /// }
 /// ```
 ///
-/// `endpoint` and `path_style_access` are optional — omit them for AWS S3.
-/// Set `path_style_access: true` for MinIO and other S3-compatible stores that
-/// require path-style URLs.
-///
-/// The object key is built as `{rendered_path}/{rendered_filename}`.
-/// Both path and filename can be overridden with minijinja templates in
-/// `transport_cfg`; if absent the artifact's original filename is used and
-/// no prefix is added.
+/// Files are streamed via multipart upload in 1 MB chunks — the artifact is
+/// never fully loaded into memory.  Progress is reported via `progress_tx`
+/// after each chunk.  On success, `NodeOutput::metadata` contains `s3_url`,
+/// `bucket`, and `key`.
 pub async fn deliver(
     node_id: NodeId,
     dest: &destination::Model,
     transport_cfg: Option<&TransportConfig>,
     input: &NodeInput,
+    progress_tx: Option<&UnboundedSender<TransferProgress>>,
 ) -> NodeOutput {
     // -- Resolve required config fields --
     let cfg = &dest.config;
@@ -93,7 +94,7 @@ pub async fn deliver(
         Err(e) => return NodeOutput::failure(node_id, format!("s3 transport: build client: {e}")),
     };
 
-    // -- Template context (same variables as local adapter) --
+    // -- Template context --
     let ctx = &input.trigger_ctx;
     let artifact = input.first_artifact();
 
@@ -162,18 +163,8 @@ pub async fn deliver(
 
     // -- Upload artifact or text --
     if let Some(src) = artifact {
-        let bytes = match tokio::fs::read(src).await {
-            Ok(b) => b,
-            Err(e) => {
-                return NodeOutput::failure(
-                    node_id,
-                    format!("s3 transport: read artifact: {e}"),
-                )
-            }
-        };
-
-        match store.put(&object_path, PutPayload::from_bytes(bytes.into())).await {
-            Ok(_) => {
+        match stream_file_to_s3(&store, src, &object_path, node_id, ctx.run_id, progress_tx).await {
+            Ok(()) => {
                 let object_url = format!("s3://{}/{}", bucket, key);
                 tracing::info!(
                     node_id = %node_id,
@@ -185,7 +176,7 @@ pub async fn deliver(
                 NodeOutput::success(node_id)
                     .with_metadata(serde_json::json!({ "s3_url": object_url, "bucket": bucket, "key": key }))
             }
-            Err(e) => NodeOutput::failure(node_id, format!("s3 transport: put object: {e}")),
+            Err(e) => NodeOutput::failure(node_id, format!("s3 transport: {e}")),
         }
     } else if let Some(text) = input.first_text() {
         let content = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
@@ -201,19 +192,21 @@ pub async fn deliver(
             None => text.to_string(),
         };
 
-        match store
-            .put(&object_path, PutPayload::from_bytes(content.into_bytes().into()))
-            .await
-        {
+        let raw = content.into_bytes();
+        let total = raw.len() as u64;
+
+        match store.put(&object_path, PutPayload::from(raw)).await {
             Ok(_) => {
+                if let Some(tx) = progress_tx {
+                    let _ = tx.send(TransferProgress {
+                        node_id,
+                        run_id: ctx.run_id,
+                        bytes_sent: total,
+                        total_bytes: Some(total),
+                    });
+                }
                 let object_url = format!("s3://{}/{}", bucket, key);
-                tracing::info!(
-                    node_id = %node_id,
-                    dest_id = %dest.id,
-                    bucket  = %bucket,
-                    key     = %key,
-                    "S3 transport: text content uploaded"
-                );
+                tracing::info!(node_id = %node_id, dest_id = %dest.id, bucket = %bucket, key = %key, "S3 transport: text content uploaded");
                 NodeOutput::success(node_id)
                     .with_metadata(serde_json::json!({ "s3_url": object_url, "bucket": bucket, "key": key }))
             }
@@ -222,4 +215,48 @@ pub async fn deliver(
     } else {
         NodeOutput::failure(node_id, "s3 transport: no artifact or text in parent outputs")
     }
+}
+
+// -- Streaming multipart upload --
+
+async fn stream_file_to_s3(
+    store: &object_store::aws::AmazonS3,
+    src: &std::path::PathBuf,
+    path: &OsPath,
+    node_id: NodeId,
+    run_id: Option<uuid::Uuid>,
+    progress_tx: Option<&UnboundedSender<TransferProgress>>,
+) -> Result<(), String> {
+    let mut file = tokio::fs::File::open(src)
+        .await
+        .map_err(|e| format!("open artifact: {e}"))?;
+    let total_bytes = file.metadata().await.map(|m| m.len()).ok();
+
+    let mut upload = store
+        .put_multipart(path)
+        .await
+        .map_err(|e| format!("init multipart upload: {e}"))?;
+
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut bytes_sent: u64 = 0;
+
+    loop {
+        let n = file.read(&mut buf).await.map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        let chunk = PutPayload::from(buf[..n].to_vec());
+        upload
+            .put_part(chunk)
+            .await
+            .map_err(|e| format!("upload part: {e}"))?;
+        bytes_sent += n as u64;
+
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(TransferProgress { node_id, run_id, bytes_sent, total_bytes });
+        }
+    }
+
+    upload.complete().await.map_err(|e| format!("finalize multipart: {e}"))?;
+    Ok(())
 }

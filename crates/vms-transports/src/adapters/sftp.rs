@@ -1,17 +1,21 @@
 use std::{
-    io::Write as _,
+    io::{Read as _, Write as _},
     net::TcpStream,
     path::PathBuf,
 };
 
 use minijinja::Environment;
 use ssh2::Session;
+use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 use vms_core::{
     action::TransportConfig,
-    node::{NodeInput, NodeOutput},
+    node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
 use vms_db::entities::destination;
+
+const CHUNK_SIZE: usize = 256 * 1024;
 
 // -- Adapter --
 
@@ -30,17 +34,17 @@ use vms_db::entities::destination;
 /// }
 /// ```
 ///
-/// Either `password` or `private_key` must be present. If both are present,
-/// private-key authentication is attempted first.
-///
-/// The remote file path is built as `{remote_path}/{rendered_subdir}/{rendered_filename}`.
-/// Intermediate directories are created automatically. The blocking ssh2 session
-/// runs inside `tokio::task::spawn_blocking` so it does not stall the async runtime.
+/// Either `password` or `private_key` must be present. Files are uploaded in
+/// 256 KB chunks inside `tokio::task::spawn_blocking` — the artifact is never
+/// fully loaded into memory.  Progress is reported via `progress_tx` after each
+/// chunk using `tokio::sync::mpsc::UnboundedSender::send`, which is safe to
+/// call from a blocking thread.
 pub async fn deliver(
     node_id: NodeId,
     dest: &destination::Model,
     transport_cfg: Option<&TransportConfig>,
     input: &NodeInput,
+    progress_tx: Option<&UnboundedSender<TransferProgress>>,
 ) -> NodeOutput {
     // -- Resolve required config fields --
     let cfg = &dest.config;
@@ -138,16 +142,17 @@ pub async fn deliver(
     }
     let remote_file = remote_dir.join(&filename);
 
-    // -- Read content into memory before entering spawn_blocking --
-    let content: Vec<u8> = if let Some(src) = artifact {
-        match tokio::fs::read(src).await {
-            Ok(b) => b,
-            Err(e) => {
-                return NodeOutput::failure(node_id, format!("sftp transport: read artifact: {e}"))
-            }
-        }
+    // -- Resolve payload before entering spawn_blocking --
+    //
+    // For artifact files we pass the source path and let the blocking thread
+    // open and read it in chunks (no pre-loading into memory).
+    // For text we pass the bytes directly — text payloads are small.
+    let payload = if let Some(src) = artifact {
+        // Get file size for progress reporting without reading the file.
+        let total_bytes = tokio::fs::metadata(src).await.map(|m| m.len()).ok();
+        SftpPayload::File { path: src.clone(), total_bytes }
     } else if let Some(text) = input.first_text() {
-        let body = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
+        let content = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
             Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
                 Ok(s) => s,
                 Err(e) => {
@@ -159,15 +164,30 @@ pub async fn deliver(
             },
             None => text.to_string(),
         };
-        body.into_bytes()
+        SftpPayload::Text(content.into_bytes())
     } else {
         return NodeOutput::failure(node_id, "sftp transport: no artifact or text in parent outputs");
     };
 
-    // -- Upload in spawn_blocking (ssh2 is synchronous) --
+    // -- tokio::sync::mpsc::UnboundedSender is Send — clone it into the blocking thread --
+    let progress_tx_owned = progress_tx.cloned();
     let addr = format!("{host}:{port}");
+    let run_id = ctx.run_id;
+
     let result = tokio::task::spawn_blocking(move || {
-        upload_blocking(&addr, &username, password.as_deref(), private_key.as_deref(), &key_passphrase, &remote_dir, &remote_file, &content)
+        upload_blocking(
+            &addr,
+            &username,
+            password.as_deref(),
+            private_key.as_deref(),
+            &key_passphrase,
+            &remote_dir,
+            &remote_file,
+            payload,
+            node_id,
+            run_id,
+            progress_tx_owned.as_ref(),
+        )
     })
     .await;
 
@@ -189,6 +209,13 @@ pub async fn deliver(
     }
 }
 
+// -- Payload enum --
+
+enum SftpPayload {
+    File { path: PathBuf, total_bytes: Option<u64> },
+    Text(Vec<u8>),
+}
+
 // -- Blocking upload --
 
 fn upload_blocking(
@@ -199,7 +226,10 @@ fn upload_blocking(
     key_passphrase: &str,
     remote_dir: &PathBuf,
     remote_file: &PathBuf,
-    content: &[u8],
+    payload: SftpPayload,
+    node_id: NodeId,
+    run_id: Option<Uuid>,
+    progress_tx: Option<&UnboundedSender<TransferProgress>>,
 ) -> Result<String, String> {
     // -- Connect and handshake --
     let tcp = TcpStream::connect(addr)
@@ -234,24 +264,55 @@ fn upload_blocking(
     // -- Create remote directories --
     mkdir_all(&sftp, remote_dir)?;
 
-    // -- Write file --
+    // -- Write in chunks --
     let mut remote = sftp
         .create(remote_file)
         .map_err(|e| format!("create remote file {}: {e}", remote_file.display()))?;
-    remote
-        .write_all(content)
-        .map_err(|e| format!("write remote file: {e}"))?;
+
+    match payload {
+        SftpPayload::File { path, total_bytes } => {
+            let mut file = std::fs::File::open(&path)
+                .map_err(|e| format!("open local file: {e}"))?;
+            let mut buf = vec![0u8; CHUNK_SIZE];
+            let mut bytes_sent: u64 = 0;
+
+            loop {
+                let n = file.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                remote.write_all(&buf[..n]).map_err(|e| format!("write: {e}"))?;
+                bytes_sent += n as u64;
+
+                if let Some(tx) = progress_tx {
+                    let _ = tx.send(TransferProgress { node_id, run_id, bytes_sent, total_bytes });
+                }
+            }
+        }
+
+        SftpPayload::Text(bytes) => {
+            let total = bytes.len() as u64;
+            remote.write_all(&bytes).map_err(|e| format!("write text: {e}"))?;
+            if let Some(tx) = progress_tx {
+                let _ = tx.send(TransferProgress {
+                    node_id,
+                    run_id,
+                    bytes_sent: total,
+                    total_bytes: Some(total),
+                });
+            }
+        }
+    }
 
     Ok(remote_file.to_string_lossy().into_owned())
 }
 
-/// Create a remote directory path component by component.
-/// Ignores errors on components that already exist.
+// -- mkdir -p over SFTP --
+
 fn mkdir_all(sftp: &ssh2::Sftp, path: &PathBuf) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component);
-        // stat() succeeds if the directory exists — skip mkdir in that case.
         if sftp.stat(&current).is_ok() {
             continue;
         }

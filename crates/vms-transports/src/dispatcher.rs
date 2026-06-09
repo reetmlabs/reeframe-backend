@@ -1,6 +1,7 @@
+use tokio::sync::mpsc::UnboundedSender;
 use vms_core::{
     action::TransportConfig,
-    node::{NodeInput, NodeOutput},
+    node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
 use vms_db::entities::destination::{self, DestinationType};
@@ -13,8 +14,9 @@ use crate::adapters::{local, s3, sftp};
 ///
 /// The executor calls [`dispatch`] after looking up and decrypting the
 /// destination row.  Each adapter receives the destination config (credentials
-/// already decrypted), the node-level template overrides, and the full
-/// [`NodeInput`] (artifacts and rendered text from upstream nodes).
+/// already decrypted), the node-level template overrides, the full [`NodeInput`]
+/// (artifacts and rendered text from upstream nodes), and an optional
+/// `progress_tx` channel for mid-transfer progress reporting.
 ///
 /// Adapters not yet implemented return [`NodeOutput::failure`] with a clear
 /// diagnostic so pipelines degrade gracefully rather than panicking.
@@ -28,11 +30,12 @@ impl TransportDispatcher {
         dest: &destination::Model,
         transport_cfg: Option<&TransportConfig>,
         input: &NodeInput,
+        progress_tx: Option<&UnboundedSender<TransferProgress>>,
     ) -> NodeOutput {
         match dest.dest_type {
-            DestinationType::Local => local::deliver(node_id, dest, transport_cfg, input).await,
-            DestinationType::S3    => s3::deliver(node_id, dest, transport_cfg, input).await,
-            DestinationType::Sftp  => sftp::deliver(node_id, dest, transport_cfg, input).await,
+            DestinationType::Local => local::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
+            DestinationType::S3    => s3::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
+            DestinationType::Sftp  => sftp::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
             ref other => NodeOutput::failure(
                 node_id,
                 format!("{:?} transport is not yet implemented", other),
