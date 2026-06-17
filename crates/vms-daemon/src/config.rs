@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub struct DatabaseConfig {
     /// SeaORM connection URL.
     /// Examples:
-    ///   sqlite://./reeframe.db
+    ///   sqlite://./reeframe.db?mode=rwc  (creates file if absent)
     ///   mysql://user:pass@localhost/reeframe
     ///   postgres://user:pass@localhost/reeframe
     pub url: String,
@@ -21,7 +21,7 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: "sqlite://./reeframe.db".into(),
+            url: "sqlite://./reeframe.db?mode=rwc".into(),
         }
     }
 }

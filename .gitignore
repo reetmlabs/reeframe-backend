@@ -2,3 +2,4 @@
 .idea
 *.db
 design-notes
+.env
