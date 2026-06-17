@@ -23,8 +23,10 @@
 
 pub(crate) mod camera_stream;
 pub mod manager;
+pub mod relay;
 pub mod ring_buffer;
 pub(crate) mod ring_buffer_branch;
 
 pub use manager::{MediaConfig, MediaManager};
+pub use relay::RelayServer;
 pub use ring_buffer::{RingBuffer, RingBufferManager, TimestampedFrame};

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use vms_core::VmsError;
 
 use crate::camera_stream::{build_camera_stream, spawn_monitor};
+use crate::relay::RelayServer;
 use crate::ring_buffer::RingBuffer;
 use crate::ring_buffer_branch;
 
@@ -21,6 +22,8 @@ pub struct MediaConfig {
     pub recording_dir: PathBuf,
     /// Duration of each recording chunk in seconds (default: 300 = 5 minutes).
     pub chunk_duration_secs: u64,
+    /// Address and port for the RTSP relay server (e.g. "0.0.0.0:8554").
+    pub rtsp_bind: String,
 }
 
 impl Default for MediaConfig {
@@ -28,6 +31,7 @@ impl Default for MediaConfig {
         Self {
             recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
+            rtsp_bind: "0.0.0.0:8554".into(),
         }
     }
 }
@@ -42,6 +46,12 @@ struct CameraHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     /// Join handle for the bus-monitor / reconnect task.
     task: tokio::task::JoinHandle<()>,
+    /// Receives the codec name detected by the pad-added callback ("H264", "H265", …).
+    #[allow(dead_code)]
+    codec_rx: tokio::sync::watch::Receiver<Option<String>>,
+    /// Sub-stream URL used as relay source when present.
+    #[allow(dead_code)]
+    sub_rtsp_url: Option<String>,
 }
 
 // -- MediaManager --
@@ -56,6 +66,7 @@ struct CameraHandle {
 pub struct MediaManager {
     config: MediaConfig,
     cameras: Mutex<HashMap<Uuid, CameraHandle>>,
+    relay: Arc<RelayServer>,
 }
 
 impl MediaManager {
@@ -65,16 +76,26 @@ impl MediaManager {
     pub fn new(config: MediaConfig) -> Result<Self, VmsError> {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
+        let relay = Arc::new(RelayServer::new(&config.rtsp_bind)?);
         Ok(Self {
             config,
             cameras: Mutex::new(HashMap::new()),
+            relay,
         })
     }
 
-    /// Start continuous recording for a camera.
+    /// Start continuous recording for a camera and register an RTSP relay.
+    ///
+    /// `sub_rtsp_url` — if set, the relay opens a separate connection to this
+    /// URL (camera's own sub-stream). If absent, the relay connects to `rtsp_url`.
     ///
     /// If the camera is already running this is a no-op.
-    pub async fn start_camera(&self, camera_id: Uuid, rtsp_url: &str) -> Result<(), VmsError> {
+    pub async fn start_camera(
+        &self,
+        camera_id: Uuid,
+        rtsp_url: &str,
+        sub_rtsp_url: Option<&str>,
+    ) -> Result<(), VmsError> {
         {
             let cameras = self.cameras.lock().unwrap();
             if cameras.contains_key(&camera_id) {
@@ -82,11 +103,14 @@ impl MediaManager {
             }
         }
 
+        let (codec_tx, codec_rx) = tokio::sync::watch::channel(None::<String>);
+
         let pipeline = build_camera_stream(
             camera_id,
             rtsp_url,
             &self.config.recording_dir,
             self.config.chunk_duration_secs,
+            codec_tx,
         )?;
 
         pipeline
@@ -101,16 +125,49 @@ impl MediaManager {
             shutdown_rx,
         );
 
+        let sub = sub_rtsp_url.map(str::to_owned);
         self.cameras.lock().unwrap().insert(
             camera_id,
             CameraHandle {
                 pipeline,
                 shutdown_tx,
                 task,
+                codec_rx: codec_rx.clone(),
+                sub_rtsp_url: sub.clone(),
             },
         );
 
         tracing::info!(camera_id = %camera_id, rtsp_url, "Camera pipeline started");
+
+        // Start relay once the recording pipeline reports the codec.
+        let relay = Arc::clone(&self.relay);
+        let source_url = sub.unwrap_or_else(|| rtsp_url.to_owned());
+        tokio::spawn(async move {
+            let mut rx = codec_rx;
+            let codec = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    if let Some(c) = rx.borrow().clone() {
+                        return c;
+                    }
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                String::new()
+            })
+            .await
+            .unwrap_or_default();
+
+            if codec.is_empty() {
+                tracing::warn!(camera_id = %camera_id, "Codec detection timed out — relay not started");
+                return;
+            }
+
+            if let Err(e) = relay.start_relay(camera_id, &source_url, &codec) {
+                tracing::error!(camera_id = %camera_id, error = %e, "Failed to start relay");
+            }
+        });
+
         Ok(())
     }
 
@@ -121,6 +178,7 @@ impl MediaManager {
         if let Some(h) = handle {
             let _ = h.shutdown_tx.send(());
             h.task.await.ok();
+            self.relay.stop_relay(camera_id);
             tracing::info!(camera_id = %camera_id, "Camera pipeline stopped");
         }
 
@@ -129,18 +187,24 @@ impl MediaManager {
 
     /// Stop all camera pipelines and wait for all monitor tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
-        let handles: Vec<CameraHandle> = {
+        let handles: Vec<(Uuid, CameraHandle)> = {
             let mut cameras = self.cameras.lock().unwrap();
-            cameras.drain().map(|(_, h)| h).collect()
+            cameras.drain().collect()
         };
 
-        for h in handles {
+        for (id, h) in handles {
             let _ = h.shutdown_tx.send(());
             h.task.await.ok();
+            self.relay.stop_relay(id);
         }
 
         tracing::info!("MediaManager shutdown complete");
         Ok(())
+    }
+
+    /// Return the relay URL for a camera if recording (and relay) is active.
+    pub fn relay_url(&self, camera_id: Uuid) -> Option<String> {
+        self.relay.relay_url(camera_id)
     }
 
     /// Attach a ring-buffer appsink branch to a running camera pipeline.

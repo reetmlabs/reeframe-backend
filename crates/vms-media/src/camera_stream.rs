@@ -53,11 +53,15 @@ fn codec_for(encoding_name: &str) -> Option<CodecElements> {
 ///
 /// Elements that vary per-camera are named `cam_{id}_{role}` so the reconnect
 /// monitor can look them up by name instead of recreating them.
+/// Build a recording pipeline and return it alongside a watch channel that
+/// fires once with the detected codec name (e.g. "H264") when the camera's
+/// RTP stream is first negotiated.
 pub(crate) fn build_camera_stream(
     camera_id: Uuid,
     rtsp_url: &str,
     recording_dir: &std::path::Path,
     chunk_duration_secs: u64,
+    codec_tx: tokio::sync::watch::Sender<Option<String>>,
 ) -> Result<gstreamer::Pipeline, VmsError> {
     let gst_pipeline = gstreamer::Pipeline::new();
 
@@ -158,6 +162,9 @@ pub(crate) fn build_camera_stream(
             Ok(e) => e.to_owned(),
             Err(_) => return,
         };
+
+        // Notify relay server of the detected codec on first connection.
+        let _ = codec_tx.send(Some(encoding.clone()));
 
         let Some(gst_pipeline) = pipeline_weak.upgrade() else {
             return;
