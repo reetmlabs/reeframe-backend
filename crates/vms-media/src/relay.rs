@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
+use gstreamer::prelude::*;
 use gstreamer_rtsp_server::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
@@ -110,6 +111,71 @@ impl RelayServer {
     pub fn is_relaying(&self, camera_id: Uuid) -> bool {
         self.relays.lock().unwrap().contains_key(&camera_id)
     }
+}
+
+// -- Codec probe --
+
+/// Connect briefly to an RTSP source and return the RTP encoding name
+/// ("H264", "H265", "JPEG", "AV1"). Runs the GStreamer probe on a
+/// `spawn_blocking` thread so it does not block the async runtime.
+pub async fn probe_codec(url: &str) -> Result<String, VmsError> {
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || probe_codec_blocking(&url))
+        .await
+        .map_err(|e| VmsError::Media(format!("codec probe task panicked: {e}")))?
+}
+
+fn probe_codec_blocking(url: &str) -> Result<String, VmsError> {
+    let pipeline = gstreamer::Pipeline::new();
+
+    let src = gstreamer::ElementFactory::make("rtspsrc")
+        .property("location", url)
+        .property("latency", 200u32)
+        .build()
+        .map_err(|e| VmsError::Media(format!("probe rtspsrc: {e}")))?;
+
+    let fakesink = gstreamer::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .map_err(|e| VmsError::Media(format!("probe fakesink: {e}")))?;
+
+    pipeline
+        .add_many([&src, &fakesink])
+        .map_err(|e| VmsError::Media(format!("probe add_many: {e}")))?;
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1);
+
+    src.connect_pad_added(move |_, pad| {
+        let caps = match pad.current_caps() {
+            Some(c) => c,
+            None => return,
+        };
+        let s = match caps.structure(0) {
+            Some(s) => s,
+            None => return,
+        };
+        if s.get::<&str>("media").ok() == Some("audio") {
+            return;
+        }
+        if !s.name().starts_with("application/x-rtp") {
+            return;
+        }
+        if let Ok(enc) = s.get::<&str>("encoding-name") {
+            let _ = tx.send(enc.to_owned());
+        }
+    });
+
+    pipeline
+        .set_state(gstreamer::State::Playing)
+        .map_err(|e| VmsError::Media(format!("probe pipeline start: {e}")))?;
+
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| VmsError::Media("codec probe timed out — camera did not respond in 10 s".into()));
+
+    pipeline.set_state(gstreamer::State::Null).ok();
+
+    result
 }
 
 // -- Helpers --

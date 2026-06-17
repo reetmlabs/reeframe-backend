@@ -46,12 +46,6 @@ struct CameraHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     /// Join handle for the bus-monitor / reconnect task.
     task: tokio::task::JoinHandle<()>,
-    /// Receives the codec name detected by the pad-added callback ("H264", "H265", …).
-    #[allow(dead_code)]
-    codec_rx: tokio::sync::watch::Receiver<Option<String>>,
-    /// Sub-stream URL used as relay source when present.
-    #[allow(dead_code)]
-    sub_rtsp_url: Option<String>,
 }
 
 // -- MediaManager --
@@ -84,18 +78,8 @@ impl MediaManager {
         })
     }
 
-    /// Start continuous recording for a camera and register an RTSP relay.
-    ///
-    /// `sub_rtsp_url` — if set, the relay opens a separate connection to this
-    /// URL (camera's own sub-stream). If absent, the relay connects to `rtsp_url`.
-    ///
-    /// If the camera is already running this is a no-op.
-    pub async fn start_camera(
-        &self,
-        camera_id: Uuid,
-        rtsp_url: &str,
-        sub_rtsp_url: Option<&str>,
-    ) -> Result<(), VmsError> {
+    /// Start continuous recording for a camera. No-op if already running.
+    pub async fn start_camera(&self, camera_id: Uuid, rtsp_url: &str) -> Result<(), VmsError> {
         {
             let cameras = self.cameras.lock().unwrap();
             if cameras.contains_key(&camera_id) {
@@ -103,14 +87,11 @@ impl MediaManager {
             }
         }
 
-        let (codec_tx, codec_rx) = tokio::sync::watch::channel(None::<String>);
-
         let pipeline = build_camera_stream(
             camera_id,
             rtsp_url,
             &self.config.recording_dir,
             self.config.chunk_duration_secs,
-            codec_tx,
         )?;
 
         pipeline
@@ -125,67 +106,51 @@ impl MediaManager {
             shutdown_rx,
         );
 
-        let sub = sub_rtsp_url.map(str::to_owned);
         self.cameras.lock().unwrap().insert(
             camera_id,
-            CameraHandle {
-                pipeline,
-                shutdown_tx,
-                task,
-                codec_rx: codec_rx.clone(),
-                sub_rtsp_url: sub.clone(),
-            },
+            CameraHandle { pipeline, shutdown_tx, task },
         );
 
-        tracing::info!(camera_id = %camera_id, rtsp_url, "Camera pipeline started");
-
-        // Start relay once the recording pipeline reports the codec.
-        let relay = Arc::clone(&self.relay);
-        let source_url = sub.unwrap_or_else(|| rtsp_url.to_owned());
-        tokio::spawn(async move {
-            let mut rx = codec_rx;
-            let codec = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-                loop {
-                    if let Some(c) = rx.borrow().clone() {
-                        return c;
-                    }
-                    if rx.changed().await.is_err() {
-                        break;
-                    }
-                }
-                String::new()
-            })
-            .await
-            .unwrap_or_default();
-
-            if codec.is_empty() {
-                tracing::warn!(camera_id = %camera_id, "Codec detection timed out — relay not started");
-                return;
-            }
-
-            if let Err(e) = relay.start_relay(camera_id, &source_url, &codec) {
-                tracing::error!(camera_id = %camera_id, error = %e, "Failed to start relay");
-            }
-        });
-
+        tracing::info!(camera_id = %camera_id, rtsp_url, "Recording pipeline started");
         Ok(())
     }
 
-    /// Stop recording and tear down the GStreamer pipeline for a camera.
+    /// Start the RTSP relay for a camera.
+    ///
+    /// Probes `source_url` to detect the codec, then registers the relay factory.
+    /// `source_url` should already contain credentials (user:pass@ injected by the
+    /// caller). Recording does not need to be running.
+    pub async fn start_relay(
+        &self,
+        camera_id: Uuid,
+        source_url: &str,
+    ) -> Result<(), VmsError> {
+        if self.relay.is_relaying(camera_id) {
+            return Ok(());
+        }
+        let codec = crate::relay::probe_codec(source_url).await?;
+        self.relay.start_relay(camera_id, source_url, &codec)
+    }
+
+    /// Stop the RTSP relay for a camera. No-op if not relaying.
+    pub fn stop_relay(&self, camera_id: Uuid) {
+        self.relay.stop_relay(camera_id);
+    }
+
+    /// Stop the recording pipeline for a camera. Does not affect the relay.
     pub async fn stop_camera(&self, camera_id: Uuid) -> Result<(), VmsError> {
         let handle = self.cameras.lock().unwrap().remove(&camera_id);
 
         if let Some(h) = handle {
             let _ = h.shutdown_tx.send(());
             h.task.await.ok();
-            self.relay.stop_relay(camera_id);
-            tracing::info!(camera_id = %camera_id, "Camera pipeline stopped");
+            tracing::info!(camera_id = %camera_id, "Recording pipeline stopped");
         }
 
         Ok(())
     }
 
-    /// Stop all camera pipelines and wait for all monitor tasks to exit.
+    /// Stop all recording pipelines and all relays, wait for monitor tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
         let handles: Vec<(Uuid, CameraHandle)> = {
             let mut cameras = self.cameras.lock().unwrap();
