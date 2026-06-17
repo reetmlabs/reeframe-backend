@@ -19,6 +19,11 @@ use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    eprintln!(
+        "Reeframe VMS daemon v{} — starting",
+        env!("CARGO_PKG_VERSION")
+    );
+
     // -- Observability (minimal — full OTLP pipeline will be wired in a future release) --
     fmt()
         .json()
@@ -50,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -- Database --
-    tracing::info!(db = db_kind(&cfg.database.url), "Connecting to database");
+    tracing::info!(db = db_kind(&cfg.database.url), db_url = cfg.database.url, "Connecting to database");
 
     let db = Database::connect(&cfg.database.url).await.map_err(|e| {
         tracing::error!(error = %e, "Database connection failed");
@@ -195,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
     let server_task = tokio::spawn(server.serve(router));
 
     tracing::info!("VMS Daemon started — press Ctrl+C or send SIGTERM to stop");
+    eprintln!("Reeframe VMS daemon v{} — listening on {}", env!("CARGO_PKG_VERSION"), cfg.api.bind);
 
     // -- Wait for shutdown signal --
     shutdown_signal().await;
