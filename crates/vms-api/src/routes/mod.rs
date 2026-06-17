@@ -30,6 +30,11 @@ pub fn build_router(state: AppState) -> Router {
                             Router::with_path("recording")
                                 .push(Router::with_path("start").post(cameras::start_recording))
                                 .push(Router::with_path("stop").post(cameras::stop_recording)),
+                        )
+                        .push(
+                            Router::with_path("relay")
+                                .push(Router::with_path("start").post(cameras::start_relay))
+                                .push(Router::with_path("stop").post(cameras::stop_relay)),
                         ),
                 ),
         )

@@ -20,6 +20,8 @@ pub struct CameraDto {
     pub name: String,
     pub description: Option<String>,
     pub rtsp_url: String,
+    /// Optional camera sub-stream URL used as the relay source (low-res).
+    pub sub_rtsp_url: Option<String>,
     pub manufacturer: Option<String>,
     pub model: Option<String>,
     pub username: Option<String>,
@@ -29,17 +31,20 @@ pub struct CameraDto {
     pub enabled: bool,
     /// `true` if a GStreamer recording pipeline is currently active.
     pub recording: bool,
+    /// RTSP relay URL served by this backend. `null` until relay is started.
+    pub relay_url: Option<String>,
     pub created_at: chrono::DateTime<chrono::FixedOffset>,
     pub updated_at: chrono::DateTime<chrono::FixedOffset>,
 }
 
 impl CameraDto {
-    fn from_model(m: camera::Model, recording: bool) -> Self {
+    fn from_model(m: camera::Model, recording: bool, relay_url: Option<String>) -> Self {
         Self {
             id: m.id,
             name: m.name,
             description: m.description,
             rtsp_url: m.rtsp_url,
+            sub_rtsp_url: m.sub_rtsp_url,
             manufacturer: m.manufacturer,
             model: m.model,
             username: m.username,
@@ -48,6 +53,7 @@ impl CameraDto {
             ring_buffer_storage: m.ring_buffer_storage,
             enabled: m.enabled,
             recording,
+            relay_url,
             created_at: m.created_at,
             updated_at: m.updated_at,
         }
@@ -61,6 +67,7 @@ pub struct CreateCameraBody {
     pub name: String,
     pub description: Option<String>,
     pub rtsp_url: String,
+    pub sub_rtsp_url: Option<String>,
     pub manufacturer: Option<String>,
     pub model: Option<String>,
     pub username: Option<String>,
@@ -78,6 +85,7 @@ pub struct UpdateCameraBody {
     pub name: Option<String>,
     pub description: Option<String>,
     pub rtsp_url: Option<String>,
+    pub sub_rtsp_url: Option<String>,
     pub manufacturer: Option<String>,
     pub model: Option<String>,
     pub username: Option<String>,
@@ -111,7 +119,8 @@ pub async fn list_cameras(depot: &mut Depot) -> Result<Json<Vec<CameraDto>>, Api
         .into_iter()
         .map(|m| {
             let recording = state.media_manager.is_running(m.id);
-            CameraDto::from_model(m, recording)
+            let relay_url = state.media_manager.relay_url(m.id);
+            CameraDto::from_model(m, recording, relay_url)
         })
         .collect();
     Ok(Json(dtos))
@@ -131,6 +140,7 @@ pub async fn create_camera(
         name: body.name,
         description: body.description,
         rtsp_url: body.rtsp_url,
+        sub_rtsp_url: body.sub_rtsp_url,
         manufacturer: body.manufacturer,
         model: body.model,
         username: body.username,
@@ -145,7 +155,7 @@ pub async fn create_camera(
 
     let camera = state.camera_repo.create(input).await?;
     res.status_code(StatusCode::CREATED);
-    Ok(Json(CameraDto::from_model(camera, false)))
+    Ok(Json(CameraDto::from_model(camera, false, None)))
 }
 
 /// GET /cameras/{id}
@@ -159,7 +169,8 @@ pub async fn get_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<Cam
         .await?
         .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
     let recording = state.media_manager.is_running(id);
-    Ok(Json(CameraDto::from_model(camera, recording)))
+    let relay_url = state.media_manager.relay_url(id);
+    Ok(Json(CameraDto::from_model(camera, recording, relay_url)))
 }
 
 /// PATCH /cameras/{id}
@@ -176,6 +187,7 @@ pub async fn update_camera(
         name: body.name,
         description: body.description.map(Some),
         rtsp_url: body.rtsp_url,
+        sub_rtsp_url: body.sub_rtsp_url.map(Some),
         manufacturer: body.manufacturer.map(Some),
         model: body.model.map(Some),
         username: body.username.map(Some),
@@ -188,7 +200,8 @@ pub async fn update_camera(
 
     let camera = state.camera_repo.update(id, input).await?;
     let recording = state.media_manager.is_running(id);
-    Ok(Json(CameraDto::from_model(camera, recording)))
+    let relay_url = state.media_manager.relay_url(id);
+    Ok(Json(CameraDto::from_model(camera, recording, relay_url)))
 }
 
 /// DELETE /cameras/{id}
@@ -249,6 +262,59 @@ pub async fn stop_recording(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     state.media_manager.stop_camera(id).await?;
+    res.status_code(StatusCode::NO_CONTENT);
+    Ok(())
+}
+
+/// POST /cameras/{id}/relay/start
+///
+/// Starts the RTSP relay independently of recording. Probes the source URL for
+/// the codec, then registers a relay factory on the RTSP server.
+///
+/// Source URL priority:
+///   1. `sub_rtsp_url` (camera's own low-res sub-stream) — if set on the camera.
+///   2. `rtsp_url` (main stream) — fallback when no sub-stream is configured.
+///
+/// Credentials (username / password) are injected into whichever URL is used.
+#[handler]
+pub async fn start_relay(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let id = parse_id(req)?;
+
+    let (camera, password) = state
+        .camera_repo
+        .get_decrypted(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
+
+    if !camera.enabled {
+        return Err(ApiError::bad_request("camera is disabled"));
+    }
+
+    let source_url = match &camera.sub_rtsp_url {
+        Some(sub) => build_rtsp_url(sub, camera.username.as_deref(), password.as_deref()),
+        None => build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password.as_deref()),
+    };
+
+    state.media_manager.start_relay(id, &source_url).await?;
+
+    let relay_url = state.media_manager.relay_url(id);
+    Ok(Json(serde_json::json!({ "relay_url": relay_url })))
+}
+
+/// POST /cameras/{id}/relay/stop
+#[handler]
+pub async fn stop_relay(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let id = parse_id(req)?;
+    state.media_manager.stop_relay(id);
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
