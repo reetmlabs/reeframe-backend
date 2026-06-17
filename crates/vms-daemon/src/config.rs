@@ -57,6 +57,22 @@ impl Default for ApiConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RtspConfig {
+    /// Address and port the RTSP relay server binds to.
+    /// Each camera is served at rtsp://{host}:{port}/{camera_id}.
+    /// Set via config file or VMS_RTSP__BIND env var.
+    pub bind: String,
+}
+
+impl Default for RtspConfig {
+    fn default() -> Self {
+        Self {
+            bind: "0.0.0.0:8554".into(),
+        }
+    }
+}
+
 // -- Root config --
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,6 +80,7 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     pub media: MediaConfig,
     pub api: ApiConfig,
+    pub rtsp: RtspConfig,
     /// Base64-encoded 32-byte AES-256-GCM encryption key.
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
@@ -79,6 +96,7 @@ impl Default for AppConfig {
             database: DatabaseConfig::default(),
             media: MediaConfig::default(),
             api: ApiConfig::default(),
+            rtsp: RtspConfig::default(),
             encryption_key: String::new(),
             log_level: "info".into(),
         }
@@ -103,6 +121,7 @@ impl Default for AppConfig {
 /// | `VMS_DATABASE__URL`        | `database.url`              |
 /// | `VMS_MEDIA__RECORDING_DIR` | `media.recording_dir`       |
 /// | `VMS_API__BIND`            | `api.bind`                  |
+/// | `VMS_RTSP__BIND`           | `rtsp.bind`                 |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
 pub fn load() -> Result<AppConfig, figment::Error> {
     Figment::new()

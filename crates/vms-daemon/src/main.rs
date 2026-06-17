@@ -98,17 +98,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Repository layer ready");
 
     // -- Media Manager --
+    tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
     let media_manager = Arc::new(
         MediaManager::new(MediaConfig {
             recording_dir: cfg.media.recording_dir.clone(),
             chunk_duration_secs: cfg.media.chunk_duration_secs,
+            rtsp_bind: cfg.rtsp.bind.clone(),
         })
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to initialise media manager");
             anyhow::anyhow!(e)
         })?,
     );
-    tracing::info!("Media manager ready");
+    tracing::info!("Media manager and RTSP relay server ready");
 
     // -- Ring Buffer Manager --
     let ring_buffer_manager = RingBufferManager::new(media_manager.clone());
