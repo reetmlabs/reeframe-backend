@@ -84,6 +84,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum RunNodeResult {
+    #[iden = "run_node_results"]
     Table,
     Id,
     RunId,

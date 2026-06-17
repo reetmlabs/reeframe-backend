@@ -64,6 +64,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum Camera {
+    #[iden = "cameras"]
     Table,
     Id,
     Name,

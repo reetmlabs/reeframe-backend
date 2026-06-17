@@ -99,6 +99,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum PipelineRun {
+    #[iden = "pipeline_runs"]
     Table,
     Id,
     PipelineId,

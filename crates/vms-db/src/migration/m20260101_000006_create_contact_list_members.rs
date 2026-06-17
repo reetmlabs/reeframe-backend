@@ -57,6 +57,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum ContactListMember {
+    #[iden = "contact_list_members"]
     Table,
     ContactListId,
     ContactId,

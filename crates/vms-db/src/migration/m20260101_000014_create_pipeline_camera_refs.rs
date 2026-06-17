@@ -79,6 +79,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum PipelineCameraRef {
+    #[iden = "pipeline_camera_refs"]
     Table,
     PipelineId,
     CameraId,

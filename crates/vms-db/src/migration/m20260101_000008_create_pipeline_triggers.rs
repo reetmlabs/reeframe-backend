@@ -115,6 +115,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum PipelineTrigger {
+    #[iden = "pipeline_triggers"]
     Table,
     Id,
     PipelineId,

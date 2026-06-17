@@ -67,6 +67,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum PipelineSourceRef {
+    #[iden = "pipeline_source_refs"]
     Table,
     PipelineId,
     SourceId,

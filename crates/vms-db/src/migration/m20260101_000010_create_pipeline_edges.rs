@@ -107,6 +107,7 @@ impl MigrationTrait for Migration {
 
 #[derive(Iden)]
 pub enum PipelineEdge {
+    #[iden = "pipeline_edges"]
     Table,
     Id,
     PipelineId,
