@@ -14,6 +14,7 @@ mod m20260101_000011_create_pipeline_runs;
 mod m20260101_000012_create_run_node_results;
 mod m20260101_000013_create_pipeline_source_refs;
 mod m20260101_000014_create_pipeline_camera_refs;
+mod m20260101_000015_add_sub_rtsp_url;
 
 pub struct Migrator;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000012_create_run_node_results::Migration),
             Box::new(m20260101_000013_create_pipeline_source_refs::Migration),
             Box::new(m20260101_000014_create_pipeline_camera_refs::Migration),
+            Box::new(m20260101_000015_add_sub_rtsp_url::Migration),
         ]
     }
 }

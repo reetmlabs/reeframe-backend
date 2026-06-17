@@ -19,6 +19,7 @@ pub struct Model {
     pub name: String,
     pub description: Option<String>,
     pub rtsp_url: String,
+    pub sub_rtsp_url: Option<String>,
     pub manufacturer: Option<String>,
     /// Device model string, e.g. "DS-2CD2143G2-I".
     pub model: Option<String>,

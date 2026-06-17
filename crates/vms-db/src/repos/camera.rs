@@ -14,6 +14,7 @@ pub struct CreateCamera {
     pub name: String,
     pub description: Option<String>,
     pub rtsp_url: String,
+    pub sub_rtsp_url: Option<String>,
     pub manufacturer: Option<String>,
     pub model: Option<String>,
     pub username: Option<String>,
@@ -29,6 +30,7 @@ pub struct UpdateCamera {
     pub name: Option<String>,
     pub description: Option<Option<String>>,
     pub rtsp_url: Option<String>,
+    pub sub_rtsp_url: Option<Option<String>>,
     pub manufacturer: Option<Option<String>>,
     pub model: Option<Option<String>>,
     pub username: Option<Option<String>>,
@@ -66,6 +68,7 @@ impl CameraRepo {
             name: Set(input.name),
             description: Set(input.description),
             rtsp_url: Set(input.rtsp_url),
+            sub_rtsp_url: Set(input.sub_rtsp_url),
             manufacturer: Set(input.manufacturer),
             model: Set(input.model),
             username: Set(input.username),
@@ -128,6 +131,9 @@ impl CameraRepo {
         }
         if let Some(v) = input.rtsp_url {
             active.rtsp_url = Set(v);
+        }
+        if let Some(v) = input.sub_rtsp_url {
+            active.sub_rtsp_url = Set(v);
         }
         if let Some(v) = input.manufacturer {
             active.manufacturer = Set(v);
