@@ -142,6 +142,37 @@ async fn main() -> anyhow::Result<()> {
         })?;
     tracing::info!("Resource manager ready");
 
+    // -- Auto-start relays for cameras that have a cached codec --
+    // These start instantly (no probe needed), so live view is available immediately.
+    {
+        let all_cameras = camera_repo.list().await.unwrap_or_default();
+        let cached: Vec<_> = all_cameras
+            .into_iter()
+            .filter(|c| c.enabled && c.codec.is_some())
+            .collect();
+
+        if !cached.is_empty() {
+            tracing::info!(count = cached.len(), "Auto-starting relays for cameras with cached codec");
+            for cam in cached {
+                let id = cam.id;
+                let codec = cam.codec.unwrap();
+                match camera_repo.get_decrypted(id).await {
+                    Ok(Some((c, password))) => {
+                        let source_url = match &c.sub_rtsp_url {
+                            Some(sub) => daemon_build_rtsp_url(sub, c.username.as_deref(), password.as_deref()),
+                            None => daemon_build_rtsp_url(&c.rtsp_url, c.username.as_deref(), password.as_deref()),
+                        };
+                        match media_manager.start_relay(id, &source_url, Some(&codec)).await {
+                            Ok(_) => tracing::info!(camera_id = %id, codec, "Relay auto-started"),
+                            Err(e) => tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start relay"),
+                        }
+                    }
+                    _ => tracing::warn!(camera_id = %id, "Could not load camera for relay auto-start"),
+                }
+            }
+        }
+    }
+
     // -- Pipeline Executor --
     let pipeline_executor = PipelineExecutor::new(
         pipeline_run_repo.clone(),
@@ -255,4 +286,13 @@ async fn shutdown_signal() {
 /// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.
 fn db_kind(url: &str) -> &str {
     url.split("://").next().unwrap_or("unknown")
+}
+
+fn daemon_build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>) -> String {
+    if let (Some(u), Some(p)) = (username, password) {
+        if let Some(rest) = base_url.strip_prefix("rtsp://") {
+            return format!("rtsp://{}:{}@{}", u, p, rest);
+        }
+    }
+    base_url.to_string()
 }
