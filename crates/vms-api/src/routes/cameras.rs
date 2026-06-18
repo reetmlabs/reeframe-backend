@@ -299,7 +299,15 @@ pub async fn start_relay(
         None => build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password.as_deref()),
     };
 
-    state.media_manager.start_relay(id, &source_url).await?;
+    let had_cached_codec = camera.codec.is_some();
+    let codec = state.media_manager.start_relay(id, &source_url, camera.codec.as_deref()).await?;
+
+    // Persist the detected codec so future daemon restarts can skip the probe.
+    if !had_cached_codec {
+        if let Err(e) = state.camera_repo.set_codec(id, &codec).await {
+            tracing::warn!(camera_id = %id, error = %e, "Failed to persist detected codec");
+        }
+    }
 
     let relay_url = state.media_manager.relay_url(id);
     Ok(Json(serde_json::json!({ "relay_url": relay_url })))

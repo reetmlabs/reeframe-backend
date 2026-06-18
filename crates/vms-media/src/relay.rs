@@ -18,7 +18,7 @@ use vms_core::VmsError;
 pub struct RelayServer {
     mounts: gstreamer_rtsp_server::RTSPMountPoints,
     bind: String,
-    relays: Mutex<HashMap<Uuid, ()>>,
+    relays: Mutex<HashMap<Uuid, String>>,
     _loop_thread: std::thread::JoinHandle<()>,
 }
 
@@ -77,7 +77,7 @@ impl RelayServer {
 
         let path = relay_path(camera_id);
         self.mounts.add_factory(&path, factory);
-        self.relays.lock().unwrap().insert(camera_id, ());
+        self.relays.lock().unwrap().insert(camera_id, codec.to_owned());
 
         tracing::info!(
             camera_id = %camera_id,
@@ -98,18 +98,28 @@ impl RelayServer {
 
     /// Return the relay URL for a camera if a relay is currently registered.
     ///
-    /// The host is taken from the configured bind address; `0.0.0.0` is kept
-    /// as-is (the client substitutes the actual server address).
+    /// When the bind host is `0.0.0.0` or `::`, the machine's primary outbound IP
+    /// is substituted so that the returned URL is routable by clients on the LAN.
     pub fn relay_url(&self, camera_id: Uuid) -> Option<String> {
         if !self.relays.lock().unwrap().contains_key(&camera_id) {
             return None;
         }
         let (host, port) = split_bind(&self.bind)?;
-        Some(format!("rtsp://{}:{}/{}", host, port, camera_id.as_simple()))
+        let effective_host = if host == "0.0.0.0" || host == "::" {
+            primary_ip().unwrap_or(host)
+        } else {
+            host
+        };
+        Some(format!("rtsp://{}:{}/{}", effective_host, port, camera_id.as_simple()))
     }
 
     pub fn is_relaying(&self, camera_id: Uuid) -> bool {
         self.relays.lock().unwrap().contains_key(&camera_id)
+    }
+
+    /// Return the cached codec for a running relay, if any.
+    pub fn codec(&self, camera_id: Uuid) -> Option<String> {
+        self.relays.lock().unwrap().get(&camera_id).cloned()
     }
 }
 
@@ -222,4 +232,15 @@ fn split_bind(bind: &str) -> Option<(String, String)> {
     let port = parts.next()?.to_owned();
     let host = parts.next()?.to_owned();
     Some((host, port))
+}
+
+/// Detect the machine's primary outbound IP by "connecting" a UDP socket to a
+/// public address (no packets are actually sent). Returns the local address the
+/// OS selected, which is the IP that LAN clients should use to reach this host.
+fn primary_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    let addr = sock.local_addr().ok()?;
+    Some(addr.ip().to_string())
 }

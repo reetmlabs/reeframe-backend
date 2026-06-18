@@ -117,19 +117,25 @@ impl MediaManager {
 
     /// Start the RTSP relay for a camera.
     ///
-    /// Probes `source_url` to detect the codec, then registers the relay factory.
-    /// `source_url` should already contain credentials (user:pass@ injected by the
-    /// caller). Recording does not need to be running.
+    /// When `cached_codec` is `Some`, the probe step is skipped (instant start).
+    /// When `None`, the camera is probed — takes up to 10 s on a first start.
+    /// Returns the codec in use (cached or freshly detected) so the caller can
+    /// persist it to the DB for future daemon restarts.
     pub async fn start_relay(
         &self,
         camera_id: Uuid,
         source_url: &str,
-    ) -> Result<(), VmsError> {
+        cached_codec: Option<&str>,
+    ) -> Result<String, VmsError> {
         if self.relay.is_relaying(camera_id) {
-            return Ok(());
+            return Ok(self.relay.codec(camera_id).unwrap_or_default());
         }
-        let codec = crate::relay::probe_codec(source_url).await?;
-        self.relay.start_relay(camera_id, source_url, &codec)
+        let codec = match cached_codec {
+            Some(c) => c.to_owned(),
+            None => crate::relay::probe_codec(source_url).await?,
+        };
+        self.relay.start_relay(camera_id, source_url, &codec)?;
+        Ok(codec)
     }
 
     /// Stop the RTSP relay for a camera. No-op if not relaying.
