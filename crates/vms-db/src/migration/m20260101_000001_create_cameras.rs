@@ -71,6 +71,7 @@ pub enum Camera {
     Description,
     RtspUrl,
     SubRtspUrl,
+    Codec,
     Manufacturer,
     Model,
     Username,

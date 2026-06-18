@@ -69,6 +69,7 @@ impl CameraRepo {
             description: Set(input.description),
             rtsp_url: Set(input.rtsp_url),
             sub_rtsp_url: Set(input.sub_rtsp_url),
+            codec: Set(None),
             manufacturer: Set(input.manufacturer),
             model: Set(input.model),
             username: Set(input.username),
@@ -166,6 +167,20 @@ impl CameraRepo {
 
         active.updated_at = Set(now());
         active.update(&self.db).await.map_err(db_err)
+    }
+
+    /// Update only the cached codec. Called after a successful codec probe.
+    pub async fn set_codec(&self, id: Uuid, codec: &str) -> Result<(), VmsError> {
+        let cam = camera::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .ok_or(VmsError::CameraNotFound(id))?;
+        let mut active: ActiveModel = cam.into();
+        active.codec = Set(Some(codec.to_owned()));
+        active.updated_at = Set(now());
+        active.update(&self.db).await.map_err(db_err)?;
+        Ok(())
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<(), VmsError> {

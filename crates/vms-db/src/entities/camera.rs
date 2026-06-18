@@ -20,6 +20,9 @@ pub struct Model {
     pub description: Option<String>,
     pub rtsp_url: String,
     pub sub_rtsp_url: Option<String>,
+    /// RTP encoding name detected via codec probe ("H264", "H265", "JPEG", "AV1").
+    /// Cached to skip re-probing on daemon restart. NULL until first relay start.
+    pub codec: Option<String>,
     pub manufacturer: Option<String>,
     /// Device model string, e.g. "DS-2CD2143G2-I".
     pub model: Option<String>,
