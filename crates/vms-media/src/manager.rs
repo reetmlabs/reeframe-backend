@@ -208,6 +208,11 @@ impl MediaManager {
         ring_buffer_branch::detach(&handle.pipeline, camera_id)
     }
 
+    /// Return the codec currently in use for a camera's relay, if the relay is running.
+    pub fn relay_codec(&self, camera_id: Uuid) -> Option<String> {
+        self.relay.codec(camera_id)
+    }
+
     /// Return `true` if a camera pipeline is currently running.
     pub fn is_running(&self, camera_id: Uuid) -> bool {
         self.cameras.lock().unwrap().contains_key(&camera_id)

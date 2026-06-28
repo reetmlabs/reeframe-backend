@@ -230,8 +230,13 @@ impl RingBufferManager {
         let filename = format!("clip_{}_{}.mp4", camera_id.as_simple(), ts);
         let output_path = output_dir.join(&filename);
 
+        let codec = self
+            .media
+            .relay_codec(camera_id)
+            .unwrap_or_else(|| "H264".to_owned());
+
         let out = output_path.clone();
-        tokio::task::spawn_blocking(move || mux_to_mp4(frames, &out))
+        tokio::task::spawn_blocking(move || mux_to_mp4(frames, &out, &codec))
             .await
             .map_err(|e| VmsError::Media(format!("spawn_blocking clip mux: {e}")))??;
 
@@ -254,11 +259,24 @@ fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame>
     frames
 }
 
-/// Mux raw H.264 frames into an MP4 file at `output`.
+/// Mux raw encoded frames into an MP4 file at `output`.
 ///
-/// Pipeline: `appsrc -> h264parse -> mp4mux -> filesink`.
+/// Pipeline: `appsrc -> <parser> -> mp4mux -> filesink`.
 /// PTS values are normalised to start from zero. Blocks until EOS or error.
-fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsError> {
+///
+/// Supported `codec` values (case-insensitive): `"H264"`, `"H265"`, `"HEVC"`, `"JPEG"`.
+fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path, codec: &str) -> Result<(), VmsError> {
+    let (caps_mime, parser_name) = match codec.to_uppercase().as_str() {
+        "H264" => ("video/x-h264", "h264parse"),
+        "H265" | "HEVC" => ("video/x-h265", "h265parse"),
+        "JPEG" => ("image/jpeg", "jpegparse"),
+        other => {
+            return Err(VmsError::Media(format!(
+                "mux_to_mp4: unsupported codec '{other}'"
+            )))
+        }
+    };
+
     gstreamer::init().ok();
 
     let location = output
@@ -271,16 +289,20 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
         .name("clip_src")
         .format(gstreamer::Format::Time)
         .build();
-    appsrc.set_caps(Some(
-        &gstreamer::Caps::builder("video/x-h264")
+
+    let caps = if caps_mime == "image/jpeg" {
+        gstreamer::Caps::builder(caps_mime).build()
+    } else {
+        gstreamer::Caps::builder(caps_mime)
             .field("stream-format", "byte-stream")
             .field("alignment", "au")
-            .build(),
-    ));
+            .build()
+    };
+    appsrc.set_caps(Some(&caps));
 
-    let parse = gstreamer::ElementFactory::make("h264parse")
+    let parse = gstreamer::ElementFactory::make(parser_name)
         .build()
-        .map_err(|e| VmsError::Media(format!("h264parse: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("{parser_name}: {e}")))?;
 
     let mux = gstreamer::ElementFactory::make("mp4mux")
         .build()
@@ -296,7 +318,7 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
         .map_err(|e| VmsError::Media(format!("add appsrc: {e}")))?;
     pipeline
         .add(&parse)
-        .map_err(|e| VmsError::Media(format!("add h264parse: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("add {parser_name}: {e}")))?;
     pipeline
         .add(&mux)
         .map_err(|e| VmsError::Media(format!("add mp4mux: {e}")))?;
@@ -306,10 +328,10 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
 
     appsrc
         .link(&parse)
-        .map_err(|e| VmsError::Media(format!("link appsrc->h264parse: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link appsrc->{parser_name}: {e}")))?;
     parse
         .link(&mux)
-        .map_err(|e| VmsError::Media(format!("link h264parse->mp4mux: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link {parser_name}->mp4mux: {e}")))?;
     mux.link(&sink)
         .map_err(|e| VmsError::Media(format!("link mp4mux->filesink: {e}")))?;
 
