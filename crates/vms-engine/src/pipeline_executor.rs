@@ -447,6 +447,7 @@ pub(crate) async fn execute_node(
                 while let Some(p) = progress_rx.recv().await {
                     map.insert((run_id, node_id), p);
                 }
+                map.remove(&(run_id, node_id));
             });
 
             TransportDispatcher::dispatch(
