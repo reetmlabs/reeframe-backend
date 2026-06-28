@@ -341,14 +341,23 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path) -> Result<(), VmsErr
         .map_err(|e| VmsError::Media(format!("clip EOS: {e}")))?;
 
     let bus = pipeline.bus().expect("pipeline has a bus");
-    for msg in bus.iter_timed(gstreamer::ClockTime::from_seconds(60)) {
-        match msg.view() {
-            gstreamer::MessageView::Eos(_) => break,
-            gstreamer::MessageView::Error(err) => {
+    let per_msg = gstreamer::ClockTime::from_seconds(10);
+    loop {
+        match bus.timed_pop(per_msg) {
+            Some(msg) => match msg.view() {
+                gstreamer::MessageView::Eos(_) => break,
+                gstreamer::MessageView::Error(err) => {
+                    pipeline.set_state(gstreamer::State::Null).ok();
+                    return Err(VmsError::Media(format!("clip mux error: {}", err.error())));
+                }
+                _ => {}
+            },
+            None => {
                 pipeline.set_state(gstreamer::State::Null).ok();
-                return Err(VmsError::Media(format!("clip mux error: {}", err.error())));
+                return Err(VmsError::Media(
+                    "clip mux pipeline produced no EOS — aborting".into(),
+                ));
             }
-            _ => {}
         }
     }
 
