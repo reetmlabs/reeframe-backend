@@ -119,6 +119,26 @@ impl TriggerEvaluator {
 
     // -- Schedule triggers --
 
+    /// Abort all running interval tasks and shut down the cron scheduler.
+    ///
+    /// Safe to call when no schedulers are running — both operations are no-ops
+    /// in that case. Called at the top of [`start_schedulers`] to replace the
+    /// current task set on reload, and by the daemon shutdown sequence.
+    pub async fn stop_schedulers(&self) {
+        let handles: Vec<_> = self.interval_tasks.lock().unwrap().drain(..).collect();
+        for handle in handles {
+            handle.abort();
+        }
+
+        if let Some(mut scheduler) = self.cron_scheduler.lock().await.take() {
+            if let Err(e) = scheduler.shutdown().await {
+                tracing::warn!(error = %e, "cron scheduler shutdown error");
+            }
+        }
+
+        tracing::debug!("Trigger evaluator schedulers stopped");
+    }
+
     /// Register schedule triggers (cron + interval) for all enabled pipelines
     /// and start the underlying cron scheduler.
     ///
@@ -129,9 +149,10 @@ impl TriggerEvaluator {
     ///   are parsed via `chrono-tz`; an unknown timezone falls back to UTC with
     ///   a warning.
     ///
-    /// The cron scheduler is stored on the struct and kept alive for the
-    /// lifetime of the `TriggerEvaluator`. Call once after `recover`.
+    /// Aborts any previously running interval tasks and shuts down the previous
+    /// cron scheduler before registering new ones — safe to call on reload.
     pub async fn start_schedulers(self: Arc<Self>) -> Result<(), VmsError> {
+        self.stop_schedulers().await;
         let snapshot = self.registry.snapshot();
 
         let scheduler = JobScheduler::new()

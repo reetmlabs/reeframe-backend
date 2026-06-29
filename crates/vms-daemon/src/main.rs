@@ -208,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Stat monitor started");
 
     // -- HTTP API --
+    let trigger_evaluator_shutdown = trigger_evaluator.clone();
     let state = AppState {
         camera_repo,
         source_repo,
@@ -242,6 +243,10 @@ async fn main() -> anyhow::Result<()> {
     server_handle.stop_graceful(std::time::Duration::from_secs(10));
     server_task.await.ok();
     tracing::info!("HTTP server stopped");
+
+    // -- Graceful shutdown: trigger schedulers --
+    trigger_evaluator_shutdown.stop_schedulers().await;
+    tracing::info!("Trigger evaluator schedulers stopped");
 
     // -- Graceful shutdown: media pipelines --
     media_manager.shutdown().await.map_err(|e| {
