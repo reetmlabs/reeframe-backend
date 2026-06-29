@@ -32,6 +32,9 @@ pub struct TriggerEvaluator {
     executor: Option<Arc<PipelineExecutor>>,
     /// Holds the cron scheduler after `start_schedulers` is called.
     cron_scheduler: Mutex<Option<JobScheduler>>,
+    /// JoinHandles for all spawned interval trigger tasks.
+    /// Stored so they can be aborted on reload or shutdown.
+    interval_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Tracks the last time each stat trigger fired: (pipeline_id, trigger_id) -> Instant.
     stat_cooldowns: DashMap<(Uuid, Uuid), Instant>,
     /// Tracks when the stat condition was first observed as true: used to enforce sustained_secs.
@@ -49,6 +52,7 @@ impl TriggerEvaluator {
             event_bus,
             executor: Some(executor),
             cron_scheduler: Mutex::new(None),
+            interval_tasks: std::sync::Mutex::new(Vec::new()),
             stat_cooldowns: DashMap::new(),
             stat_sustained: DashMap::new(),
         })
@@ -65,6 +69,7 @@ impl TriggerEvaluator {
             event_bus,
             executor: None,
             cron_scheduler: Mutex::new(None),
+            interval_tasks: std::sync::Mutex::new(Vec::new()),
             stat_cooldowns: DashMap::new(),
             stat_sustained: DashMap::new(),
         })
@@ -155,7 +160,7 @@ impl TriggerEvaluator {
                     ScheduleMode::Interval { interval_secs } => {
                         let secs = *interval_secs;
                         let ev = self.clone();
-                        tokio::spawn(async move {
+                        let handle = tokio::spawn(async move {
                             loop {
                                 tokio::time::sleep(Duration::from_secs(secs)).await;
                                 ev.fire_pipeline(TriggerContext::for_schedule(
@@ -164,6 +169,7 @@ impl TriggerEvaluator {
                                 ));
                             }
                         });
+                        self.interval_tasks.lock().unwrap().push(handle);
                         tracing::debug!(
                             %pipeline_id, %trigger_id, interval_secs,
                             "Interval trigger scheduled"
