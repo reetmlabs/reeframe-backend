@@ -67,6 +67,8 @@ impl RelayServer {
         source_url: &str,
         codec: &str,
     ) -> Result<(), VmsError> {
+        validate_relay_url(source_url)?;
+
         let launch = relay_launch_str(source_url, codec).ok_or_else(|| {
             VmsError::Media(format!("RTSP relay: unsupported codec '{codec}'"))
         })?;
@@ -189,6 +191,31 @@ fn probe_codec_blocking(url: &str) -> Result<String, VmsError> {
 }
 
 // -- Helpers --
+
+/// Reject URLs that could inject elements into the GStreamer launch string.
+///
+/// A valid relay URL must:
+/// - Start with `rtsp://` or `rtsps://`
+/// - Contain no ASCII whitespace (spaces, tabs, newlines)
+/// - Contain neither `!` nor `;` (GStreamer pipeline delimiters)
+fn validate_relay_url(url: &str) -> Result<(), VmsError> {
+    if !url.starts_with("rtsp://") && !url.starts_with("rtsps://") {
+        return Err(VmsError::Media(format!(
+            "invalid relay source URL — must start with rtsp:// or rtsps://: {url}"
+        )));
+    }
+    if url.chars().any(|c| c.is_ascii_whitespace()) {
+        return Err(VmsError::Media(format!(
+            "invalid relay source URL — must not contain whitespace: {url}"
+        )));
+    }
+    if url.contains('!') || url.contains(';') {
+        return Err(VmsError::Media(format!(
+            "invalid relay source URL — must not contain '!' or ';': {url}"
+        )));
+    }
+    Ok(())
+}
 
 fn relay_path(camera_id: Uuid) -> String {
     format!("/{}", camera_id.as_simple())
