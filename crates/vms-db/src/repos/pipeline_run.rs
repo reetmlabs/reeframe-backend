@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
 use vms_core::VmsError;
@@ -93,6 +95,47 @@ impl PipelineRunRepo {
         .insert(&self.db)
         .await
         .map_err(db_err)
+    }
+
+    /// Insert one `run_node_results` row per node in a single multi-row INSERT.
+    ///
+    /// All rows start in `Pending` state. Row IDs are generated client-side so
+    /// the caller receives the mapping without a `RETURNING` clause — compatible
+    /// with SQLite, MySQL, and PostgreSQL.
+    ///
+    /// Returns an empty map when `node_ids` is empty (no INSERT is issued).
+    pub async fn create_node_results_batch(
+        &self,
+        run_id: Uuid,
+        node_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Uuid>, VmsError> {
+        if node_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let id_map: HashMap<Uuid, Uuid> =
+            node_ids.iter().map(|&nid| (nid, Uuid::new_v4())).collect();
+
+        let models: Vec<NodeActiveModel> = id_map
+            .iter()
+            .map(|(&node_id, &result_id)| NodeActiveModel {
+                id: Set(result_id),
+                run_id: Set(run_id),
+                node_id: Set(node_id),
+                status: Set(NodeResultStatus::Pending),
+                started_at: Set(None),
+                completed_at: Set(None),
+                output: Set(serde_json::Value::Null),
+                error: Set(None),
+            })
+            .collect();
+
+        run_node_result::Entity::insert_many(models)
+            .exec(&self.db)
+            .await
+            .map_err(db_err)?;
+
+        Ok(id_map)
     }
 
     /// Transition a node result to `Running` and stamp `started_at`.

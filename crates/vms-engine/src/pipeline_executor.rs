@@ -107,12 +107,11 @@ impl PipelineExecutor {
             "Pipeline run started",
         );
 
-        // -- 2. Pre-create node-result rows (Pending) --
-        let mut result_ids: HashMap<NodeId, Uuid> = HashMap::new();
-        for &node_id in &pipeline.dag.topological_order {
-            let row = self.repo.create_node_result(run_id, node_id).await?;
-            result_ids.insert(node_id, row.id);
-        }
+        // -- 2. Pre-create node-result rows (Pending) — single batched INSERT --
+        let result_ids = self
+            .repo
+            .create_node_results_batch(run_id, &pipeline.dag.topological_order)
+            .await?;
 
         // -- 3. Walk the DAG --
         let camera_rtsp_urls = match self.camera_repo.list().await {
