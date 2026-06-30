@@ -92,14 +92,9 @@ pub fn attach(
                 let data: Arc<[u8]> = Arc::from(map.as_slice());
                 drop(map);
 
-                ring_buffer
-                    .lock()
-                    .expect("ring buffer mutex poisoned")
-                    .push(TimestampedFrame {
-                        pts,
-                        data,
-                        is_keyframe,
-                    });
+                if let Ok(mut rb) = ring_buffer.lock() {
+                    rb.push(TimestampedFrame { pts, data, is_keyframe });
+                }
 
                 Ok(gstreamer::FlowSuccess::Ok)
             })
