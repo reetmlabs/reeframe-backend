@@ -45,11 +45,6 @@ pub async fn execute(
         return NodeOutput::failure(node_id, "encrypt: no upstream artifact");
     };
 
-    let key = match resolve_key(cfg, ctx) {
-        Ok(k) => k,
-        Err(e) => return NodeOutput::failure(node_id, format!("encrypt: {e}")),
-    };
-
     if let Err(e) = tokio::fs::create_dir_all(&ctx.recording_dir).await {
         return NodeOutput::failure(node_id, format!("encrypt: create output dir: {e}"));
     }
@@ -62,11 +57,16 @@ pub async fn execute(
 
     let in_path = input_path.clone();
     let out_path = output_path.clone();
+    let key_ref = cfg.key_ref.clone();
+    let default_key = ctx.encryption_key; // Option<[u8; 32]> — Copy, safe to move
 
-    let result = tokio::task::spawn_blocking(move || encrypt_file_blocking(&in_path, &key, &out_path))
-        .await
-        .map_err(|e| format!("encrypt task panic: {e}"))
-        .and_then(|r| r.map_err(|e| e.to_string()));
+    let result = tokio::task::spawn_blocking(move || {
+        let key = resolve_key_blocking(&key_ref, default_key)?;
+        encrypt_file_blocking(&in_path, &key, &out_path)
+    })
+    .await
+    .map_err(|e| format!("encrypt task panic: {e}"))
+    .and_then(|r| r.map_err(|e| e.to_string()));
 
     match result {
         Ok(()) => {
@@ -84,14 +84,13 @@ pub async fn execute(
 
 // -- Key resolution --
 
-fn resolve_key(cfg: &EncryptConfig, ctx: &ActionContext) -> Result<[u8; 32], VmsError> {
-    if cfg.key_ref == "default" {
-        return ctx
-            .encryption_key
+fn resolve_key_blocking(key_ref: &str, default_key: Option<[u8; 32]>) -> Result<[u8; 32], VmsError> {
+    if key_ref == "default" {
+        return default_key
             .ok_or_else(|| VmsError::Config("no default encryption key configured".into()));
     }
 
-    let path = format!("/etc/reeframe/keys/{}", cfg.key_ref);
+    let path = format!("/etc/reeframe/keys/{key_ref}");
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| VmsError::Config(format!("read key file {path}: {e}")))?;
     let bytes = STANDARD
