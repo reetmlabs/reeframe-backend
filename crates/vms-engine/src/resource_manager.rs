@@ -77,7 +77,7 @@ impl ResourceManager {
     pub async fn recover(&self, registry: &PipelineRegistry) -> Result<(), VmsError> {
         let snapshot = registry.snapshot();
 
-        for pipeline in snapshot.values() {
+        for pipeline in snapshot.pipelines.values() {
             for cam_ref in &pipeline.camera_refs {
                 self.acquire(ResourceId::CameraPipeline(cam_ref.camera_id))
                     .await?;
@@ -96,7 +96,7 @@ impl ResourceManager {
         }
 
         tracing::info!(
-            pipelines = snapshot.len(),
+            pipelines = snapshot.pipelines.len(),
             "Resource manager recovery complete"
         );
         Ok(())

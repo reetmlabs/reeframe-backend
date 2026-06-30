@@ -17,7 +17,7 @@ use vms_core::{
     TriggerType, VmsError,
 };
 
-use crate::{time_helpers, EventBus, PipelineExecutor, PipelineRegistry};
+use crate::{time_helpers, EventBus, PipelineExecutor, PipelineRegistry, pipeline_registry::RegistrySnapshot};
 
 /// Evaluates pipeline triggers and dispatches pipeline runs.
 ///
@@ -175,7 +175,7 @@ impl TriggerEvaluator {
 
         let mut cron_job_count: usize = 0;
 
-        for pipeline in snapshot.values() {
+        for pipeline in snapshot.pipelines.values() {
             if !pipeline.enabled {
                 continue;
             }
@@ -286,7 +286,7 @@ impl TriggerEvaluator {
 
         // What topics do we need? Those scoped to  a camera or source trigger.
         // or no scoped applied and it is applied to all cameras/sources the pipeline touches.
-        for pipeline in snapshot.values() {
+        for pipeline in snapshot.pipelines.values() {
             if !pipeline.enabled {
                 continue;
             }
@@ -324,7 +324,7 @@ impl TriggerEvaluator {
                 loop {
                     tokio::select! {
                         result = rx.recv() => match result {
-                            Ok(event) => ev.evaluate_event(&event),
+                            Ok(event) => ev.evaluate_event(&TopicKey::System, &event),
                             Err(RecvError::Lagged(n)) => {
                                 tracing::warn!(
                                     missed = n,
@@ -350,7 +350,7 @@ impl TriggerEvaluator {
                 loop {
                     tokio::select! {
                         result = rx.recv() => match result {
-                            Ok(event) => ev.evaluate_event(&event),
+                            Ok(event) => ev.evaluate_event(&TopicKey::Camera(cam_id), &event),
                             Err(RecvError::Lagged(n)) => {
                                 tracing::warn!(missed = n, %cam_id, "camera event listener lagged");
                             }
@@ -371,7 +371,7 @@ impl TriggerEvaluator {
                 loop {
                     tokio::select! {
                         result = rx.recv() => match result {
-                            Ok(event) => ev.evaluate_event(&event),
+                            Ok(event) => ev.evaluate_event(&TopicKey::Source(src_id), &event),
                             Err(RecvError::Lagged(n)) => {
                                 tracing::warn!(missed = n, %src_id, "source event listener lagged");
                             }
@@ -388,103 +388,107 @@ impl TriggerEvaluator {
 
     // -- Event evaluation --
 
-    /// Evaluate all enabled pipeline triggers against `event`.
+    /// Evaluate pipeline triggers for `event` arriving on `topic`.
     ///
-    /// Handles [`TriggerConfig::Event`] and [`TriggerConfig::System`].
-    /// Schedule, Manual, and Stat triggers are skipped here.
-    fn evaluate_event(&self, event: &Event) {
+    /// Uses the pre-built trigger index for O(1) dispatch — only pipelines with
+    /// a matching `(topic, trigger_type)` entry are examined.
+    fn evaluate_event(&self, topic: &TopicKey, event: &Event) {
         let snapshot = self.registry.snapshot();
 
-        for pipeline in snapshot.values() {
+        let trigger_type = match topic {
+            TopicKey::System => TriggerType::System,
+            _ => TriggerType::Event,
+        };
+
+        let Some(entries) = snapshot.trigger_index.get(&(topic.clone(), trigger_type)) else {
+            return;
+        };
+
+        for &(pipeline_id, trigger_id) in entries {
+            let Some(pipeline) = snapshot.pipelines.get(&pipeline_id) else {
+                continue;
+            };
             if !pipeline.enabled {
                 continue;
             }
-            for trigger in &pipeline.triggers {
-                if !trigger.enabled {
-                    continue;
-                }
-                match &trigger.config {
-                    TriggerConfig::Event {
-                        filter,
-                        duration_secs,
-                    } => {
-                        // Scope: if trigger is bound to a source or camera, verify the event matches.
-                        if let Some(src_id) = trigger.source_id {
-                            if event.source_id != Some(src_id) {
-                                continue;
-                            }
-                        }
-                        if let Some(cam_id) = trigger.camera_id {
-                            if event.camera_id != Some(cam_id) {
-                                continue;
-                            }
-                        }
+            let Some(trigger) = pipeline.triggers.iter().find(|t| t.id == trigger_id) else {
+                continue;
+            };
+            if !trigger.enabled {
+                continue;
+            }
 
-                        // Apply the evalexpr filter if present.
-                        if let Some(expr) = filter {
-                            let ctx = build_event_context(event);
-                            match eval_boolean_with_context(expr, &ctx) {
-                                Ok(true) => {}
-                                Ok(false) => continue,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        pipeline_id = %pipeline.id,
-                                        trigger_id  = %trigger.id,
-                                        error       = %e,
-                                        "trigger filter expression failed — skipping"
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-
-                        self.fire_pipeline(TriggerContext {
-                            run_id: None,
-                            trigger_id: trigger.id,
-                            pipeline_id: pipeline.id,
-                            fired_at: Utc::now(),
-                            source_id: event.source_id,
-                            camera_id: event.camera_id,
-                            camera_name: None,
-                            event_payload: Some(event.payload.clone()),
-                            manual_params: None,
-                            duration_secs: *duration_secs,
-                            trigger_type: TriggerType::Event,
-                        });
-                    }
-
-                    TriggerConfig::System { signal, camera_id } => {
-                        // The event_type field on system events encodes the signal name.
-                        if event.event_type != signal_to_event_type(signal) {
+            match &trigger.config {
+                TriggerConfig::Event { filter, duration_secs } => {
+                    if let Some(src_id) = trigger.source_id {
+                        if event.source_id != Some(src_id) {
                             continue;
                         }
-                        // Optional camera scope filter.
-                        if let Some(cam_id) = camera_id {
-                            if event.camera_id != Some(*cam_id) {
+                    }
+                    if let Some(cam_id) = trigger.camera_id {
+                        if event.camera_id != Some(cam_id) {
+                            continue;
+                        }
+                    }
+
+                    if let Some(expr) = filter {
+                        let ctx = build_event_context(event);
+                        match eval_boolean_with_context(expr, &ctx) {
+                            Ok(true) => {}
+                            Ok(false) => continue,
+                            Err(e) => {
+                                tracing::warn!(
+                                    pipeline_id = %pipeline_id,
+                                    trigger_id  = %trigger_id,
+                                    error       = %e,
+                                    "trigger filter expression failed — skipping"
+                                );
                                 continue;
                             }
                         }
-
-                        self.fire_pipeline(TriggerContext {
-                            run_id: None,
-                            trigger_id: trigger.id,
-                            pipeline_id: pipeline.id,
-                            fired_at: Utc::now(),
-                            source_id: None,
-                            camera_id: event.camera_id,
-                            camera_name: None,
-                            event_payload: Some(event.payload.clone()),
-                            manual_params: None,
-                            duration_secs: None,
-                            trigger_type: TriggerType::System,
-                        });
                     }
 
-                    // Not handled by the event loop.
-                    TriggerConfig::Schedule { .. }
-                    | TriggerConfig::Manual { .. }
-                    | TriggerConfig::Stat { .. } => {}
+                    self.fire_pipeline(TriggerContext {
+                        run_id: None,
+                        trigger_id,
+                        pipeline_id,
+                        fired_at: Utc::now(),
+                        source_id: event.source_id,
+                        camera_id: event.camera_id,
+                        camera_name: None,
+                        event_payload: Some(event.payload.clone()),
+                        manual_params: None,
+                        duration_secs: *duration_secs,
+                        trigger_type: TriggerType::Event,
+                    });
                 }
+
+                TriggerConfig::System { signal, camera_id } => {
+                    if event.event_type != signal_to_event_type(signal) {
+                        continue;
+                    }
+                    if let Some(cam_id) = camera_id {
+                        if event.camera_id != Some(*cam_id) {
+                            continue;
+                        }
+                    }
+
+                    self.fire_pipeline(TriggerContext {
+                        run_id: None,
+                        trigger_id,
+                        pipeline_id,
+                        fired_at: Utc::now(),
+                        source_id: None,
+                        camera_id: event.camera_id,
+                        camera_name: None,
+                        event_payload: Some(event.payload.clone()),
+                        manual_params: None,
+                        duration_secs: None,
+                        trigger_type: TriggerType::System,
+                    });
+                }
+
+                _ => {}
             }
         }
     }
@@ -515,7 +519,7 @@ impl TriggerEvaluator {
         actual: f64,
     ) {
         let snapshot = self.registry.snapshot();
-        self.evaluate_stat_impl(&snapshot, metric, path, camera_id, actual);
+        self.evaluate_stat_impl(&snapshot.pipelines, metric, path, camera_id, actual);
     }
 
     /// Same as [`evaluate_stat`] but uses a caller-provided snapshot.

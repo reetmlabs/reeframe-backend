@@ -27,7 +27,7 @@ use uuid::Uuid;
 ///
 /// Stored on [`TriggerContext::trigger_type`] so downstream nodes can branch
 /// on how the pipeline was invoked.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerType {
     /// Fired by a cron or interval scheduler.

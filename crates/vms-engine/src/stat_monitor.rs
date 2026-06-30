@@ -6,7 +6,7 @@ use sysinfo::{Disks, System};
 use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, StatMetric, TriggerConfig};
 
-use crate::{PipelineRegistry, TriggerEvaluator};
+use crate::{pipeline_registry::RegistrySnapshot, PipelineRegistry, TriggerEvaluator};
 
 /// Seconds between samples during normal operation (first sleep and default).
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -80,34 +80,34 @@ impl StatMonitor {
     /// Returns `true` if any sampled value is within [`NEAR_MARGIN`] of a
     /// configured threshold — the caller uses this to tighten the poll interval.
     fn poll(&self) -> bool {
-        let snapshot = self.registry.snapshot();
+        let snapshot = self.registry.snapshot(); // Arc<RegistrySnapshot>
         let mut near = false;
 
         // -- CPU --
         let cpu = self.cpu_percent();
         tracing::trace!(cpu, "cpu_usage_percent");
-        self.evaluator.evaluate_stat_impl(&snapshot, &StatMetric::CpuUsagePercent, None, None, cpu);
-        near |= self.is_near_threshold(&snapshot, &StatMetric::CpuUsagePercent, None, cpu);
+        self.evaluator.evaluate_stat_impl(&snapshot.pipelines, &StatMetric::CpuUsagePercent, None, None, cpu);
+        near |= self.is_near_threshold(&snapshot.pipelines, &StatMetric::CpuUsagePercent, None, cpu);
 
         // -- RAM --
         let ram = self.ram_percent();
         tracing::trace!(ram, "ram_usage_percent");
-        self.evaluator.evaluate_stat_impl(&snapshot, &StatMetric::RamUsagePercent, None, None, ram);
-        near |= self.is_near_threshold(&snapshot, &StatMetric::RamUsagePercent, None, ram);
+        self.evaluator.evaluate_stat_impl(&snapshot.pipelines, &StatMetric::RamUsagePercent, None, None, ram);
+        near |= self.is_near_threshold(&snapshot.pipelines, &StatMetric::RamUsagePercent, None, ram);
 
         // -- Disk — only paths referenced by active triggers --
-        for path in self.active_disk_paths(&snapshot) {
+        for path in self.active_disk_paths(&snapshot.pipelines) {
             match self.disk_percent(&path) {
                 Some(pct) => {
                     tracing::trace!(path, pct, "disk_usage_percent");
                     self.evaluator.evaluate_stat_impl(
-                        &snapshot,
+                        &snapshot.pipelines,
                         &StatMetric::DiskUsagePercent,
                         Some(&path),
                         None,
                         pct,
                     );
-                    near |= self.is_near_threshold(&snapshot, &StatMetric::DiskUsagePercent, Some(&path), pct);
+                    near |= self.is_near_threshold(&snapshot.pipelines, &StatMetric::DiskUsagePercent, Some(&path), pct);
                 }
                 None => {
                     tracing::warn!(
@@ -204,9 +204,7 @@ impl StatMonitor {
         paths
     }
 
-    pub(crate) fn registry_snapshot(
-        &self,
-    ) -> Arc<HashMap<Uuid, Arc<CompiledPipeline>>> {
+    pub(crate) fn registry_snapshot(&self) -> Arc<RegistrySnapshot> {
         self.registry.snapshot()
     }
 
@@ -375,7 +373,7 @@ mod tests {
         let mon = StatMonitor::new(evaluator, registry.clone());
 
         let snapshot = registry.snapshot();
-        let paths = mon.active_disk_paths(&snapshot);
+        let paths = mon.active_disk_paths(&snapshot.pipelines);
         assert_eq!(paths.len(), 1);
         assert!(paths.contains("/var/lib/vms"));
     }
@@ -441,7 +439,7 @@ mod tests {
         // threshold = 80, actual = 75 -> distance = |75-80|/80 = 0.0625 < 0.20
         let mon = make_cpu_monitor(80.0);
         let snap = mon.registry_snapshot();
-        assert!(mon.is_near_threshold(&snap, &StatMetric::CpuUsagePercent, None, 75.0));
+        assert!(mon.is_near_threshold(&snap.pipelines, &StatMetric::CpuUsagePercent, None, 75.0));
     }
 
     // A value far from the threshold is not near.
@@ -450,7 +448,7 @@ mod tests {
         // threshold = 80, actual = 40 -> distance = |40-80|/80 = 0.50 > 0.20
         let mon = make_cpu_monitor(80.0);
         let snap = mon.registry_snapshot();
-        assert!(!mon.is_near_threshold(&snap, &StatMetric::CpuUsagePercent, None, 40.0));
+        assert!(!mon.is_near_threshold(&snap.pipelines, &StatMetric::CpuUsagePercent, None, 40.0));
     }
 
     // A different metric never triggers nearness for a non-matching trigger.
@@ -459,7 +457,7 @@ mod tests {
         let mon = make_cpu_monitor(80.0);
         let snap = mon.registry_snapshot();
         // RAM trigger doesn't exist — no match possible.
-        assert!(!mon.is_near_threshold(&snap, &StatMetric::RamUsagePercent, None, 75.0));
+        assert!(!mon.is_near_threshold(&snap.pipelines, &StatMetric::RamUsagePercent, None, 75.0));
     }
 
     // poll() returns true when a real metric happens to be near a threshold.
