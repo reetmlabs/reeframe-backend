@@ -187,13 +187,19 @@ impl MediaManager {
         camera_id: Uuid,
         ring_buffer: Arc<Mutex<RingBuffer>>,
     ) -> Result<(), VmsError> {
-        let cameras = self.cameras.lock().unwrap();
-        let handle = cameras.get(&camera_id).ok_or_else(|| {
-            VmsError::Media(format!(
-                "camera {camera_id} is not running — cannot attach ring buffer"
-            ))
-        })?;
-        ring_buffer_branch::attach(&handle.pipeline, camera_id, ring_buffer)
+        let pipeline = {
+            let cameras = self.cameras.lock().unwrap();
+            cameras
+                .get(&camera_id)
+                .ok_or_else(|| {
+                    VmsError::Media(format!(
+                        "camera {camera_id} is not running — cannot attach ring buffer"
+                    ))
+                })?
+                .pipeline
+                .clone()
+        }; // lock dropped here — GStreamer call runs without holding the mutex
+        ring_buffer_branch::attach(&pipeline, camera_id, ring_buffer)
     }
 
     /// Detach the ring-buffer branch from a running camera pipeline.
@@ -201,11 +207,14 @@ impl MediaManager {
     /// No-op if the camera is not running or has no ring-buffer branch.
     /// Cleanup is asynchronous — see [`ring_buffer_branch::detach`].
     pub fn detach_ring_buffer(&self, camera_id: Uuid) -> Result<(), VmsError> {
-        let cameras = self.cameras.lock().unwrap();
-        let Some(handle) = cameras.get(&camera_id) else {
-            return Ok(());
-        };
-        ring_buffer_branch::detach(&handle.pipeline, camera_id)
+        let pipeline = {
+            let cameras = self.cameras.lock().unwrap();
+            match cameras.get(&camera_id) {
+                Some(h) => h.pipeline.clone(),
+                None => return Ok(()),
+            }
+        }; // lock dropped here
+        ring_buffer_branch::detach(&pipeline, camera_id)
     }
 
     /// Return the codec currently in use for a camera's relay, if the relay is running.
