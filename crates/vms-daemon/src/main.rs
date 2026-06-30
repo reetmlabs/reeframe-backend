@@ -176,7 +176,6 @@ async fn main() -> anyhow::Result<()> {
     // -- Pipeline Executor --
     let pipeline_executor = PipelineExecutor::new(
         pipeline_run_repo.clone(),
-        camera_repo.clone(),
         dest_repo.clone(),
         media_manager.clone(),
         ring_buffer_manager.clone(),

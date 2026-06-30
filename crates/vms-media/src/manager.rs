@@ -42,6 +42,8 @@ struct CameraHandle {
     /// Keeps the pipeline alive alongside the monitor task.
     #[allow(dead_code)]
     pipeline: gstreamer::Pipeline,
+    /// The RTSP source URL this camera was started with.
+    rtsp_url: String,
     /// Send `()` to ask the monitor task to shut down cleanly.
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     /// Join handle for the bus-monitor / reconnect task.
@@ -108,7 +110,7 @@ impl MediaManager {
 
         self.cameras.lock().unwrap().insert(
             camera_id,
-            CameraHandle { pipeline, shutdown_tx, task },
+            CameraHandle { pipeline, rtsp_url: rtsp_url.to_owned(), shutdown_tx, task },
         );
 
         tracing::info!(camera_id = %camera_id, rtsp_url, "Recording pipeline started");
@@ -230,6 +232,16 @@ impl MediaManager {
     /// Return the list of currently running camera IDs.
     pub fn running_cameras(&self) -> Vec<Uuid> {
         self.cameras.lock().unwrap().keys().copied().collect()
+    }
+
+    /// Return a snapshot of RTSP URLs for all currently running cameras.
+    pub fn rtsp_urls(&self) -> std::collections::HashMap<Uuid, String> {
+        self.cameras
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, h)| (id, h.rtsp_url.clone()))
+            .collect()
     }
 
     /// Capture a single still frame from a running camera and write it to `output_dir`.

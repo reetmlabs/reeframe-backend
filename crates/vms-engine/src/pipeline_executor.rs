@@ -15,7 +15,7 @@ use vms_core::{
 };
 use vms_db::{
     entities::{pipeline_run::RunStatus, run_node_result::NodeResultStatus},
-    CameraRepo, DestinationRepo, PipelineRunRepo,
+    DestinationRepo, PipelineRunRepo,
 };
 use vms_transports::TransportDispatcher;
 use vms_media::{MediaManager, RingBufferManager};
@@ -39,7 +39,6 @@ pub type ProgressKey = (Uuid, NodeId);
 #[derive(Clone)]
 pub struct PipelineExecutor {
     repo: PipelineRunRepo,
-    camera_repo: CameraRepo,
     dest_repo: DestinationRepo,
     media: Arc<MediaManager>,
     ring_buffer: Arc<RingBufferManager>,
@@ -56,7 +55,6 @@ pub struct PipelineExecutor {
 impl PipelineExecutor {
     pub fn new(
         repo: PipelineRunRepo,
-        camera_repo: CameraRepo,
         dest_repo: DestinationRepo,
         media: Arc<MediaManager>,
         ring_buffer: Arc<RingBufferManager>,
@@ -65,7 +63,6 @@ impl PipelineExecutor {
     ) -> Arc<Self> {
         Arc::new(Self {
             repo,
-            camera_repo,
             dest_repo,
             media,
             ring_buffer,
@@ -114,13 +111,7 @@ impl PipelineExecutor {
             .await?;
 
         // -- 3. Walk the DAG --
-        let camera_rtsp_urls = match self.camera_repo.list().await {
-            Ok(cameras) => cameras.into_iter().map(|c| (c.id, c.rtsp_url)).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "Could not load camera RTSP URLs; start_recording nodes will fail for unknown cameras");
-                std::collections::HashMap::new()
-            }
-        };
+        let camera_rtsp_urls = self.media.rtsp_urls();
         let action_ctx = ActionContext {
             media: Some(self.media.clone()),
             ring_buffer: Some(self.ring_buffer.clone()),
