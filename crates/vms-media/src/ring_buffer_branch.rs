@@ -195,14 +195,15 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
     // it can deadlock because release_request_pad acquires the element lock
     // that the streaming thread already holds.
     let tee_src_clone = tee_src.clone();
-    std::thread::spawn(move || match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(()) => {
-            tee.release_request_pad(&tee_src_clone);
-            tracing::info!(camera_id = %camera_id, "Ring buffer branch detached");
+    std::thread::spawn(move || {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) => tracing::info!(camera_id = %camera_id, "Ring buffer branch detached"),
+            Err(_) => tracing::warn!(
+                camera_id = %camera_id,
+                "detach probe timed out — releasing tee pad anyway",
+            ),
         }
-        Err(_) => {
-            tracing::warn!(camera_id = %camera_id, "Ring buffer detach timed out waiting for probe");
-        }
+        tee.release_request_pad(&tee_src_clone);
     });
 
     Ok(())

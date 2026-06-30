@@ -482,11 +482,12 @@ fn detach_snapshot_branch(
 
     std::thread::spawn(move || {
         match done_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(()) => tee_clone.release_request_pad(&tee_src_clone),
+            Ok(()) => tracing::info!(camera_id = %camera_id, "Snapshot branch detached"),
             Err(_) => tracing::warn!(
                 camera_id = %camera_id,
-                "snapshot branch detach timed out"
+                "snapshot detach probe timed out — releasing tee pad anyway",
             ),
         }
+        tee_clone.release_request_pad(&tee_src_clone);
     });
 }
