@@ -86,19 +86,24 @@ pub async fn deliver(
 
     // -- Send document or message --
     if let Some(src) = artifact {
-        // -- Read file and send as document --
-        let file_bytes = match tokio::fs::read(src).await {
-            Ok(b) => b,
-            Err(e) => return NodeOutput::failure(node_id, format!("telegram: read artifact: {e}")),
-        };
-
+        // -- Stream file as document — no full buffer in memory --
         let filename = src
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("artifact")
             .to_string();
 
-        let file_part = reqwest::multipart::Part::bytes(file_bytes)
+        let file_len = match tokio::fs::metadata(src).await {
+            Ok(m) => m.len(),
+            Err(e) => return NodeOutput::failure(node_id, format!("telegram: stat artifact: {e}")),
+        };
+
+        let file = match tokio::fs::File::open(src).await {
+            Ok(f) => f,
+            Err(e) => return NodeOutput::failure(node_id, format!("telegram: open artifact: {e}")),
+        };
+
+        let file_part = reqwest::multipart::Part::stream_with_length(file, file_len)
             .file_name(filename)
             .mime_str("application/octet-stream")
             .unwrap();

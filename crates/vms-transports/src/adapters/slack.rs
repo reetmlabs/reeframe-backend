@@ -187,11 +187,10 @@ async fn upload_file(
     dest: &destination::Model,
 ) -> NodeOutput {
     // -- Step 1: get upload URL --
-    let file_bytes = match tokio::fs::read(src).await {
-        Ok(b) => b,
-        Err(e) => return NodeOutput::failure(node_id, format!("slack: read artifact: {e}")),
+    let file_len = match tokio::fs::metadata(src).await {
+        Ok(m) => m.len(),
+        Err(e) => return NodeOutput::failure(node_id, format!("slack: stat artifact: {e}")),
     };
-    let file_len = file_bytes.len();
 
     let url_resp = client
         .get("https://slack.com/api/files.getUploadURLExternal")
@@ -222,11 +221,16 @@ async fn upload_file(
         None => return NodeOutput::failure(node_id, "slack: getUploadURLExternal missing file_id"),
     };
 
-    // -- Step 2: upload file bytes --
+    // -- Step 2: stream file bytes --
+    let file = match tokio::fs::File::open(src).await {
+        Ok(f) => f,
+        Err(e) => return NodeOutput::failure(node_id, format!("slack: open artifact: {e}")),
+    };
+
     let upload_resp = client
         .post(&upload_url)
         .bearer_auth(token)
-        .body(file_bytes)
+        .body(reqwest::Body::from(file))
         .send()
         .await;
 
