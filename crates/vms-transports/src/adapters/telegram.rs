@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use minijinja::Environment;
 use tokio::sync::mpsc::UnboundedSender;
 use vms_core::{
@@ -6,6 +8,12 @@ use vms_core::{
     pipeline::NodeId,
 };
 use vms_db::entities::destination;
+
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn client() -> &'static reqwest::Client {
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 // -- Adapter --
 
@@ -81,7 +89,6 @@ pub async fn deliver(
         None => input.first_text().map(str::to_string),
     };
 
-    let client = reqwest::Client::new();
     let base_url = format!("https://api.telegram.org/bot{bot_token}");
 
     // -- Send document or message --
@@ -116,7 +123,7 @@ pub async fn deliver(
             form = form.text("caption", caption.clone());
         }
 
-        let resp = client
+        let resp = client()
             .post(format!("{base_url}/sendDocument"))
             .multipart(form)
             .send()
@@ -147,7 +154,7 @@ pub async fn deliver(
             "text":    text,
         });
 
-        let resp = client
+        let resp = client()
             .post(format!("{base_url}/sendMessage"))
             .json(&body)
             .send()

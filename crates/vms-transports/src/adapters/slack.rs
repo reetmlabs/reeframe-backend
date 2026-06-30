@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use minijinja::Environment;
 use tokio::sync::mpsc::UnboundedSender;
 use vms_core::{
@@ -6,6 +8,12 @@ use vms_core::{
     pipeline::NodeId,
 };
 use vms_db::entities::destination;
+
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn client() -> &'static reqwest::Client {
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 // -- Adapter --
 
@@ -84,8 +92,6 @@ pub async fn deliver(
         None => input.first_text().map(str::to_string),
     };
 
-    let client = reqwest::Client::new();
-
     // -- Incoming Webhook mode --
     if let Some(url) = webhook_url {
         let text = match &message_text {
@@ -102,7 +108,7 @@ pub async fn deliver(
 
         let body = serde_json::json!({ "text": text });
 
-        return match client.post(&url).json(&body).send().await {
+        return match client().post(&url).json(&body).send().await {
             Ok(r) if r.status().is_success() => {
                 tracing::info!(node_id = %node_id, dest_id = %dest.id, "Slack webhook: message sent");
                 NodeOutput::success(node_id)
@@ -125,13 +131,13 @@ pub async fn deliver(
     };
 
     if let Some(src) = artifact {
-        upload_file(&client, &token, &channel, src, artifact_name, message_text.as_deref(), node_id, dest).await
+        upload_file(client(), &token, &channel, src, artifact_name, message_text.as_deref(), node_id, dest).await
     } else {
         let text = match message_text {
             Some(t) => t,
             None => return NodeOutput::failure(node_id, "slack: no text or artifact in parent outputs"),
         };
-        post_message(&client, &token, &channel, &text, node_id, dest).await
+        post_message(client(), &token, &channel, &text, node_id, dest).await
     }
 }
 
