@@ -39,6 +39,8 @@ pub struct TriggerEvaluator {
     stat_cooldowns: DashMap<(Uuid, Uuid), Instant>,
     /// Tracks when the stat condition was first observed as true: used to enforce sustained_secs.
     stat_sustained: DashMap<(Uuid, Uuid), Instant>,
+    /// Cancelled by `stop_event_listener` to signal all event-loop tasks to exit.
+    event_listener_token: tokio_util::sync::CancellationToken,
 }
 
 impl TriggerEvaluator {
@@ -55,6 +57,7 @@ impl TriggerEvaluator {
             interval_tasks: std::sync::Mutex::new(Vec::new()),
             stat_cooldowns: DashMap::new(),
             stat_sustained: DashMap::new(),
+            event_listener_token: tokio_util::sync::CancellationToken::new(),
         })
     }
 
@@ -72,6 +75,7 @@ impl TriggerEvaluator {
             interval_tasks: std::sync::Mutex::new(Vec::new()),
             stat_cooldowns: DashMap::new(),
             stat_sustained: DashMap::new(),
+            event_listener_token: tokio_util::sync::CancellationToken::new(),
         })
     }
 
@@ -137,6 +141,15 @@ impl TriggerEvaluator {
         }
 
         tracing::debug!("Trigger evaluator schedulers stopped");
+    }
+
+    /// Cancel the event listener tasks spawned by [`start_event_listener`].
+    ///
+    /// Each event loop task selects on the cancellation token and exits cleanly
+    /// on the next iteration after this is called.
+    pub fn stop_event_listener(&self) {
+        self.event_listener_token.cancel();
+        tracing::debug!("Trigger evaluator event listeners stopped");
     }
 
     /// Register schedule triggers (cron + interval) for all enabled pipelines
@@ -305,18 +318,22 @@ impl TriggerEvaluator {
         {
             let mut rx = self.event_bus.subscribe(&TopicKey::System);
             let ev = self.clone();
+            let token = self.event_listener_token.clone();
             tokio::spawn(async move {
                 loop {
-                    match rx.recv().await {
-                        Ok(event) => ev.evaluate_event(&event),
-                        Err(RecvError::Lagged(n)) => {
-                            tracing::warn!(
-                                missed = n,
-                                topic = "system/vms",
-                                "event listener lagged"
-                            );
-                        }
-                        Err(RecvError::Closed) => break,
+                    tokio::select! {
+                        result = rx.recv() => match result {
+                            Ok(event) => ev.evaluate_event(&event),
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::warn!(
+                                    missed = n,
+                                    topic = "system/vms",
+                                    "event listener lagged"
+                                );
+                            }
+                            Err(RecvError::Closed) => break,
+                        },
+                        _ = token.cancelled() => break,
                     }
                 }
                 tracing::debug!(topic = "system/vms", "event listener task exited");
@@ -327,14 +344,18 @@ impl TriggerEvaluator {
         for cam_id in camera_ids {
             let mut rx = self.event_bus.subscribe(&TopicKey::Camera(cam_id));
             let ev = self.clone();
+            let token = self.event_listener_token.clone();
             tokio::spawn(async move {
                 loop {
-                    match rx.recv().await {
-                        Ok(event) => ev.evaluate_event(&event),
-                        Err(RecvError::Lagged(n)) => {
-                            tracing::warn!(missed = n, %cam_id, "camera event listener lagged");
-                        }
-                        Err(RecvError::Closed) => break,
+                    tokio::select! {
+                        result = rx.recv() => match result {
+                            Ok(event) => ev.evaluate_event(&event),
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::warn!(missed = n, %cam_id, "camera event listener lagged");
+                            }
+                            Err(RecvError::Closed) => break,
+                        },
+                        _ = token.cancelled() => break,
                     }
                 }
             });
@@ -344,14 +365,18 @@ impl TriggerEvaluator {
         for src_id in source_ids {
             let mut rx = self.event_bus.subscribe(&TopicKey::Source(src_id));
             let ev = self.clone();
+            let token = self.event_listener_token.clone();
             tokio::spawn(async move {
                 loop {
-                    match rx.recv().await {
-                        Ok(event) => ev.evaluate_event(&event),
-                        Err(RecvError::Lagged(n)) => {
-                            tracing::warn!(missed = n, %src_id, "source event listener lagged");
-                        }
-                        Err(RecvError::Closed) => break,
+                    tokio::select! {
+                        result = rx.recv() => match result {
+                            Ok(event) => ev.evaluate_event(&event),
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::warn!(missed = n, %src_id, "source event listener lagged");
+                            }
+                            Err(RecvError::Closed) => break,
+                        },
+                        _ = token.cancelled() => break,
                     }
                 }
             });

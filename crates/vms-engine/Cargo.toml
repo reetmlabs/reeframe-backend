@@ -11,6 +11,7 @@ vms-sources    = { path = "../vms-sources" }
 vms-actions    = { path = "../vms-actions" }
 vms-transports = { path = "../vms-transports" }
 tokio          = { workspace = true }
+tokio-util     = { workspace = true }
 dashmap        = { workspace = true }
 arc-swap       = { workspace = true }
 evalexpr       = { workspace = true }

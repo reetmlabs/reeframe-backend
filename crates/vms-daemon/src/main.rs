@@ -243,9 +243,10 @@ async fn main() -> anyhow::Result<()> {
     server_task.await.ok();
     tracing::info!("HTTP server stopped");
 
-    // -- Graceful shutdown: trigger schedulers --
+    // -- Graceful shutdown: trigger schedulers and event listeners --
     trigger_evaluator_shutdown.stop_schedulers().await;
-    tracing::info!("Trigger evaluator schedulers stopped");
+    trigger_evaluator_shutdown.stop_event_listener();
+    tracing::info!("Trigger evaluator schedulers and event listeners stopped");
 
     // -- Graceful shutdown: media pipelines --
     media_manager.shutdown().await.map_err(|e| {

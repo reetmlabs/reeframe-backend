@@ -19,8 +19,9 @@ resolver = "2"
 [workspace.dependencies]
 
 # Async runtime
-tokio   = { version = "1",      features = ["full"] }
-futures = "0.3"
+tokio      = { version = "1",   features = ["full"] }
+tokio-util = "0.7"
+futures    = "0.3"
 
 # Web framework (Salvo replaces axum)
 salvo = { version = "0.91", features = ["anyhow", "affix-state", "jwt-auth", "cors"] }

@@ -6221,6 +6221,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-cron-scheduler",
+ "tokio-util",
  "tracing",
  "uuid",
  "vms-actions",
