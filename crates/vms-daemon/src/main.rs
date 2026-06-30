@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -- Database --
-    tracing::info!(db = db_kind(&cfg.database.url), db_url = cfg.database.url, "Connecting to database");
+    tracing::info!(db = db_kind(&cfg.database.url), "Connecting to database");
 
     let db = Database::connect(&cfg.database.url).await.map_err(|e| {
         tracing::error!(error = %e, "Database connection failed");
