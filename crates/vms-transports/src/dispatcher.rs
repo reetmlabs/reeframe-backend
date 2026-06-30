@@ -1,4 +1,5 @@
 use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 use vms_core::{
     action::TransportConfig,
     node::{NodeInput, NodeOutput, TransferProgress},
@@ -25,6 +26,15 @@ use crate::adapters::{email, local, s3, sftp, slack, smb, telegram, webhook};
 pub struct TransportDispatcher;
 
 impl TransportDispatcher {
+    /// Evict cached S3 and SMTP clients for `dest_id`.
+    ///
+    /// Call from `PATCH /destinations/{id}` after updating a destination's config
+    /// so the next delivery uses a fresh client built from the new credentials.
+    pub fn invalidate(dest_id: Uuid) {
+        s3::invalidate(dest_id);
+        email::invalidate(dest_id);
+    }
+
     pub async fn dispatch(
         node_id: NodeId,
         dest: &destination::Model,

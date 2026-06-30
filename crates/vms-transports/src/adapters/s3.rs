@@ -1,17 +1,34 @@
+use std::sync::{Arc, OnceLock};
+
+use dashmap::DashMap;
 use minijinja::Environment;
 use object_store::{
-    aws::AmazonS3Builder,
+    aws::{AmazonS3, AmazonS3Builder},
     path::Path as OsPath,
     MultipartUpload, ObjectStore, PutPayload,
 };
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 use vms_core::{
     action::TransportConfig,
     node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
 use vms_db::entities::destination;
+
+static S3_CLIENTS: OnceLock<DashMap<Uuid, Arc<AmazonS3>>> = OnceLock::new();
+
+fn s3_clients() -> &'static DashMap<Uuid, Arc<AmazonS3>> {
+    S3_CLIENTS.get_or_init(DashMap::new)
+}
+
+/// Evict the cached S3 client for `dest_id`. Call after a destination config update.
+pub fn invalidate(dest_id: Uuid) {
+    if let Some(m) = S3_CLIENTS.get() {
+        m.remove(&dest_id);
+    }
+}
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB read buffer; object_store manages multipart sizing
 
@@ -75,23 +92,30 @@ pub async fn deliver(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // -- Build object store --
-    let mut builder = AmazonS3Builder::new()
-        .with_bucket_name(&bucket)
-        .with_region(&region)
-        .with_access_key_id(&access_key)
-        .with_secret_access_key(&secret_key);
+    // -- Build object store (cached by destination ID) --
+    let store: Arc<AmazonS3> = match s3_clients().get(&dest.id) {
+        Some(cached) => cached.clone(),
+        None => {
+            let mut builder = AmazonS3Builder::new()
+                .with_bucket_name(&bucket)
+                .with_region(&region)
+                .with_access_key_id(&access_key)
+                .with_secret_access_key(&secret_key);
 
-    if let Some(ep) = &endpoint {
-        builder = builder.with_endpoint(ep);
-    }
-    if path_style {
-        builder = builder.with_virtual_hosted_style_request(false);
-    }
+            if let Some(ep) = &endpoint {
+                builder = builder.with_endpoint(ep);
+            }
+            if path_style {
+                builder = builder.with_virtual_hosted_style_request(false);
+            }
 
-    let store = match builder.build() {
-        Ok(s) => s,
-        Err(e) => return NodeOutput::failure(node_id, format!("s3 transport: build client: {e}")),
+            let built = match builder.build() {
+                Ok(s) => Arc::new(s),
+                Err(e) => return NodeOutput::failure(node_id, format!("s3 transport: build client: {e}")),
+            };
+            s3_clients().insert(dest.id, built.clone());
+            built
+        }
     };
 
     // -- Template context --
@@ -163,7 +187,7 @@ pub async fn deliver(
 
     // -- Upload artifact or text --
     if let Some(src) = artifact {
-        match stream_file_to_s3(&store, src, &object_path, node_id, ctx.run_id, progress_tx).await {
+        match stream_file_to_s3(&*store, src, &object_path, node_id, ctx.run_id, progress_tx).await {
             Ok(()) => {
                 let object_url = format!("s3://{}/{}", bucket, key);
                 tracing::info!(

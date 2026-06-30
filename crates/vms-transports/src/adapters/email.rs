@@ -1,3 +1,6 @@
+use std::sync::{Arc, OnceLock};
+
+use dashmap::DashMap;
 use lettre::{
     message::{header::ContentType, Attachment, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
@@ -5,12 +8,27 @@ use lettre::{
 };
 use minijinja::Environment;
 use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 use vms_core::{
     action::TransportConfig,
     node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
 use vms_db::entities::destination;
+
+static SMTP_CLIENTS: OnceLock<DashMap<Uuid, Arc<AsyncSmtpTransport<Tokio1Executor>>>> =
+    OnceLock::new();
+
+fn smtp_clients() -> &'static DashMap<Uuid, Arc<AsyncSmtpTransport<Tokio1Executor>>> {
+    SMTP_CLIENTS.get_or_init(DashMap::new)
+}
+
+/// Evict the cached SMTP transport for `dest_id`. Call after a destination config update.
+pub fn invalidate(dest_id: Uuid) {
+    if let Some(m) = SMTP_CLIENTS.get() {
+        m.remove(&dest_id);
+    }
+}
 
 // -- Adapter --
 
@@ -146,11 +164,19 @@ pub async fn deliver(
         }
     };
 
-    // -- Build SMTP transport --
-    let transport = match build_transport(&smtp_host, smtp_port, &tls_mode, username, password) {
-        Ok(t) => t,
-        Err(e) => return NodeOutput::failure(node_id, format!("email: build smtp transport: {e}")),
-    };
+    // -- Build SMTP transport (cached by destination ID) --
+    let transport: Arc<AsyncSmtpTransport<Tokio1Executor>> =
+        match smtp_clients().get(&dest.id) {
+            Some(cached) => cached.clone(),
+            None => {
+                let built = match build_transport(&smtp_host, smtp_port, &tls_mode, username, password) {
+                    Ok(t) => Arc::new(t),
+                    Err(e) => return NodeOutput::failure(node_id, format!("email: build smtp transport: {e}")),
+                };
+                smtp_clients().insert(dest.id, built.clone());
+                built
+            }
+        };
 
     // -- Send --
     match transport.send(message).await {
