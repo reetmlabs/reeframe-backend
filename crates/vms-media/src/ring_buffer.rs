@@ -117,23 +117,20 @@ impl RingBufferManager {
     /// attaches an appsink branch to the camera's live GStreamer tee. If the
     /// camera is already being buffered this is a no-op.
     ///
-    /// `mode = Disk` is not yet implemented — it is accepted without error and
-    /// silently falls back to in-memory storage.
     pub fn start(
         &self,
         camera_id: Uuid,
         duration_secs: u32,
         mode: RingBufferMode,
     ) -> Result<(), VmsError> {
-        if self.buffers.contains_key(&camera_id) {
-            return Ok(());
+        if mode == RingBufferMode::Disk {
+            return Err(VmsError::Config(
+                "RingBufferMode::Disk is not yet implemented".into(),
+            ));
         }
 
-        if mode == RingBufferMode::Disk {
-            tracing::warn!(
-                camera_id = %camera_id,
-                "Disk ring buffer mode is not yet implemented — using memory"
-            );
+        if self.buffers.contains_key(&camera_id) {
+            return Ok(());
         }
 
         let ring_buffer = Arc::new(Mutex::new(RingBuffer::new(Duration::from_secs(u64::from(
