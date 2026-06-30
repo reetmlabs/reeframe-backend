@@ -25,6 +25,10 @@ const DEFAULT_RING_BUFFER_SECS: u32 = 30;
 
 pub struct ResourceManager {
     entries: DashMap<ResourceId, ResourceEntry>,
+    /// Per-resource watch channel used to park concurrent `acquire` callers while
+    /// a first caller is executing `start()`. The sender broadcasts the new
+    /// `ResourceState` once startup completes (or fails).
+    state_watches: DashMap<ResourceId, tokio::sync::watch::Sender<ResourceState>>,
     media: Arc<MediaManager>,
     cameras: CameraRepo,
     ring_buffers: Arc<RingBufferManager>,
@@ -38,6 +42,7 @@ impl ResourceManager {
     ) -> Arc<Self> {
         Arc::new(Self {
             entries: DashMap::new(),
+            state_watches: DashMap::new(),
             media,
             cameras,
             ring_buffers,
@@ -101,39 +106,89 @@ impl ResourceManager {
 
     /// Increment the ref count for `id`. Starts the resource if the count goes
     /// from 0 -> 1 (or the resource is in an `Error` state and needs a retry).
+    ///
+    /// If a concurrent caller is already starting the same resource, this call
+    /// parks on a `watch` channel and returns only once the resource reaches
+    /// `Running` (or fails). This prevents a second caller from proceeding with
+    /// a half-started resource.
     pub async fn acquire(&self, id: ResourceId) -> Result<(), VmsError> {
-        let should_start = {
-            let mut entry = self.entries.entry(id.clone()).or_default();
-            entry.ref_count += 1;
-            // Start on first acquire or after a previous failure.
-            entry.ref_count == 1 || matches!(entry.state, ResourceState::Error(_))
-        }; // shard lock released here — safe to .await below
+        enum Action {
+            Start,
+            Wait(tokio::sync::watch::Receiver<ResourceState>),
+            Ready,
+        }
 
-        if should_start {
-            if let Some(mut e) = self.entries.get_mut(&id) {
-                e.state = ResourceState::Starting;
+        let action = {
+            let mut entry = self.entries.entry(id.clone()).or_default();
+            match entry.state.clone() {
+                ResourceState::Starting => {
+                    // Another task is starting this resource — subscribe to its watch
+                    // and wait. Both DashMaps use independent shards; no deadlock.
+                    entry.ref_count += 1;
+                    let rx = self
+                        .state_watches
+                        .get(&id)
+                        .expect("BUG: Starting state without a watch sender")
+                        .subscribe();
+                    Action::Wait(rx)
+                }
+                ResourceState::Running => {
+                    entry.ref_count += 1;
+                    Action::Ready
+                }
+                _ => {
+                    // Stopped, Stopping, or Error — we are responsible for starting.
+                    entry.ref_count += 1;
+                    entry.state = ResourceState::Starting;
+                    let (tx, _) = tokio::sync::watch::channel(ResourceState::Starting);
+                    self.state_watches.insert(id.clone(), tx);
+                    Action::Start
+                }
             }
-            match self.start(&id).await {
+        }; // entries shard lock released
+
+        match action {
+            Action::Ready => Ok(()),
+
+            Action::Start => match self.start(&id).await {
                 Ok(()) => {
                     if let Some(mut e) = self.entries.get_mut(&id) {
                         e.state = ResourceState::Running;
                         e.started_at = Some(Utc::now());
                         e.last_error = None;
                     }
+                    if let Some(tx) = self.state_watches.get(&id) {
+                        let _ = tx.send(ResourceState::Running);
+                    }
                     tracing::info!(resource = ?id, "Resource started");
+                    Ok(())
                 }
                 Err(err) => {
                     if let Some(mut e) = self.entries.get_mut(&id) {
                         e.state = ResourceState::Error(err.to_string());
                         e.last_error = Some(err.to_string());
                     }
+                    if let Some(tx) = self.state_watches.get(&id) {
+                        let _ = tx.send(ResourceState::Error(err.to_string()));
+                    }
                     tracing::error!(resource = ?id, error = %err, "Resource failed to start");
-                    return Err(err);
+                    Err(err)
                 }
-            }
-        }
+            },
 
-        Ok(())
+            Action::Wait(mut rx) => loop {
+                rx.changed()
+                    .await
+                    .map_err(|_| VmsError::Media("resource watch closed before ready".into()))?;
+                match rx.borrow().clone() {
+                    ResourceState::Running => return Ok(()),
+                    ResourceState::Error(e) => {
+                        return Err(VmsError::Media(format!("resource failed to start: {e}")))
+                    }
+                    _ => continue,
+                }
+            },
+        }
     }
 
     /// Decrement the ref count for `id`. Stops the resource if the count reaches 0.
