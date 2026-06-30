@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use uuid::Uuid;
 use vms_core::{
+    pipeline::CompiledPipeline,
     Event, ScheduleMode, StatMetric, SystemSignal, TopicKey, TriggerConfig, TriggerContext,
     TriggerType, VmsError,
 };
@@ -514,6 +515,21 @@ impl TriggerEvaluator {
         actual: f64,
     ) {
         let snapshot = self.registry.snapshot();
+        self.evaluate_stat_impl(&snapshot, metric, path, camera_id, actual);
+    }
+
+    /// Same as [`evaluate_stat`] but uses a caller-provided snapshot.
+    ///
+    /// Call from `stat_monitor::poll` after taking a single snapshot for the
+    /// whole poll cycle so all metrics in one pass see a consistent registry.
+    pub(crate) fn evaluate_stat_impl(
+        &self,
+        snapshot: &HashMap<Uuid, Arc<CompiledPipeline>>,
+        metric: &StatMetric,
+        path: Option<&str>,
+        camera_id: Option<Uuid>,
+        actual: f64,
+    ) {
         let now = Instant::now();
 
         for pipeline in snapshot.values() {
