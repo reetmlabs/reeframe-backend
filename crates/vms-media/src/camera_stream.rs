@@ -261,82 +261,80 @@ pub(crate) fn spawn_monitor(
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        use futures::StreamExt as _;
+        use gstreamer::MessageView;
+
         let bus = gst_pipeline.bus().expect("pipeline bus missing");
+        let mut bus_stream = bus.stream();
         let mut backoff = Duration::from_secs(2);
         const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-        loop {
-            // -- Shutdown check --
-            match shutdown_rx.try_recv() {
-                Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-            }
-
-            // -- Drain bus --
-            let mut needs_reconnect = false;
-
-            while let Some(msg) = bus.pop() {
-                use gstreamer::MessageView;
-                match msg.view() {
-                    MessageView::Error(err) => {
-                        tracing::error!(
-                            camera_id = %camera_id,
-                            error = %err.error(),
-                            debug = ?err.debug(),
-                            "GStreamer error — will reconnect",
-                        );
-                        needs_reconnect = true;
-                        break;
-                    }
-                    MessageView::Eos(_) => {
-                        tracing::warn!(camera_id = %camera_id, "RTSP stream EOS — will reconnect");
-                        needs_reconnect = true;
-                        break;
-                    }
-                    MessageView::Warning(w) => {
-                        tracing::warn!(
-                            camera_id = %camera_id,
-                            warning = %w.error(),
-                            "GStreamer warning",
-                        );
-                    }
-                    _ => {}
-                }
-            }
-
-            if needs_reconnect {
-                gst_pipeline.set_state(gstreamer::State::Null).ok();
-
-                // Fresh timestamp prefix -> no chunk filename collisions
-                let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
-                if let Some(splitmux) = gst_pipeline.by_name(&splitmux_name) {
-                    splitmux
-                        .set_property("location", recording_location(&recording_dir, camera_id));
-                }
-
-                tracing::info!(
-                    camera_id = %camera_id,
-                    backoff_secs = backoff.as_secs(),
-                    "Reconnecting",
-                );
-
+        'outer: loop {
+            // -- Watch bus until Error/EOS or shutdown --
+            let needs_reconnect = 'watch: loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = &mut shutdown_rx => break,
+                    maybe_msg = bus_stream.next() => {
+                        let Some(msg) = maybe_msg else { break 'watch false };
+                        match msg.view() {
+                            MessageView::Error(err) => {
+                                tracing::error!(
+                                    camera_id = %camera_id,
+                                    error = %err.error(),
+                                    debug = ?err.debug(),
+                                    "GStreamer error — will reconnect",
+                                );
+                                break 'watch true;
+                            }
+                            MessageView::Eos(_) => {
+                                tracing::warn!(camera_id = %camera_id, "RTSP stream EOS — will reconnect");
+                                break 'watch true;
+                            }
+                            MessageView::Warning(w) => {
+                                tracing::warn!(
+                                    camera_id = %camera_id,
+                                    warning = %w.error(),
+                                    "GStreamer warning",
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = &mut shutdown_rx => break 'outer,
                 }
+            };
 
-                match gst_pipeline.set_state(gstreamer::State::Playing) {
-                    Ok(_) => {
-                        tracing::info!(camera_id = %camera_id, "Camera stream restarted");
-                        backoff = Duration::from_secs(2);
-                    }
-                    Err(e) => {
-                        tracing::error!(camera_id = %camera_id, "Restart failed: {e}");
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
-                    }
+            if !needs_reconnect {
+                break;
+            }
+
+            gst_pipeline.set_state(gstreamer::State::Null).ok();
+
+            // Fresh timestamp prefix -> no chunk filename collisions
+            let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
+            if let Some(splitmux) = gst_pipeline.by_name(&splitmux_name) {
+                splitmux.set_property("location", recording_location(&recording_dir, camera_id));
+            }
+
+            tracing::info!(
+                camera_id = %camera_id,
+                backoff_secs = backoff.as_secs(),
+                "Reconnecting",
+            );
+
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = &mut shutdown_rx => break,
+            }
+
+            match gst_pipeline.set_state(gstreamer::State::Playing) {
+                Ok(_) => {
+                    tracing::info!(camera_id = %camera_id, "Camera stream restarted");
+                    backoff = Duration::from_secs(2);
                 }
-            } else {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                Err(e) => {
+                    tracing::error!(camera_id = %camera_id, "Restart failed: {e}");
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                }
             }
         }
 
