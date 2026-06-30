@@ -67,10 +67,13 @@ impl EventBus {
         let Some(sender) = self.channels.get(key) else {
             return;
         };
-        match sender.send(event) {
+        let result = sender.send(event);
+        drop(sender); // release shard read lock before potential write below
+        match result {
             Ok(n) => tracing::trace!(topic = %key.topic_string(), receivers = n, "event published"),
             Err(_) => {
-                tracing::trace!(topic = %key.topic_string(), "event dropped — no active receivers")
+                self.channels.remove(key);
+                tracing::trace!(topic = %key.topic_string(), "event dropped — no active receivers, channel pruned");
             }
         }
     }
@@ -164,6 +167,26 @@ mod tests {
 
         // After the lag the receiver is still usable and gets the next event
         assert!(rx.recv().await.is_ok());
+    }
+
+    // When the last receiver for a topic is dropped, the next publish removes
+    // the dead channel entry so the map does not grow without bound.
+    #[tokio::test]
+    async fn dead_channel_is_pruned_on_publish() {
+        let bus = EventBus::new(16);
+        let key = TopicKey::Camera(Uuid::new_v4());
+
+        let rx = bus.subscribe(&key);
+        assert!(bus.channels.contains_key(&key));
+
+        drop(rx); // all receivers gone
+
+        bus.publish(&key, make_event(&key));
+
+        assert!(
+            !bus.channels.contains_key(&key),
+            "dead channel must be pruned after failed publish"
+        );
     }
 
     // Publishing to a topic that has no subscribers is a silent noop.
