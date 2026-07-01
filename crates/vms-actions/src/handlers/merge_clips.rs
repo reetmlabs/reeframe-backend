@@ -108,6 +108,12 @@ fn merge_blocking(
         return Err(VmsError::Media("merge_clips: non-UTF-8 output path".into()));
     };
 
+    let encoder_name = clips
+        .first()
+        .and_then(|p| gst_util::probe_video_codec(p))
+        .map(|c| gst_util::codec_to_encoder(&c))
+        .unwrap_or("x264enc");
+
     let pipeline = gstreamer::Pipeline::new();
 
     // -- Output chain: concat → videoconvert → encoder → muxer → filesink --
@@ -119,9 +125,9 @@ fn merge_blocking(
         .build()
         .map_err(|e| VmsError::Media(format!("videoconvert (output): {e}")))?;
 
-    let encoder = gstreamer::ElementFactory::make("x264enc")
+    let encoder = gstreamer::ElementFactory::make(encoder_name)
         .build()
-        .map_err(|e| VmsError::Media(format!("x264enc: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("{encoder_name}: {e}")))?;
 
     let muxer = make_muxer(output_format)?;
 

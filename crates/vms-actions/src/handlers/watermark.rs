@@ -84,6 +84,10 @@ fn watermark_blocking(
         return Err(VmsError::Media("watermark: non-UTF-8 output path".into()));
     };
 
+    let encoder_name = gst_util::probe_video_codec(input)
+        .map(|c| gst_util::codec_to_encoder(&c))
+        .unwrap_or("x264enc");
+
     let pipeline = gstreamer::Pipeline::new();
 
     let src = gstreamer::ElementFactory::make("filesrc")
@@ -117,9 +121,9 @@ fn watermark_blocking(
         .build()
         .map_err(|e| VmsError::Media(format!("videoconvert (post-overlay): {e}")))?;
 
-    let encoder = gstreamer::ElementFactory::make("x264enc")
+    let encoder = gstreamer::ElementFactory::make(encoder_name)
         .build()
-        .map_err(|e| VmsError::Media(format!("x264enc: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("{encoder_name}: {e}")))?;
 
     let muxer = gstreamer::ElementFactory::make("mp4mux")
         .build()

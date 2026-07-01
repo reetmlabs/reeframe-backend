@@ -6,8 +6,9 @@ edition = "2021"
 [dependencies]
 vms-core      = { path = "../vms-core" }
 vms-media     = { path = "../vms-media" }
-gstreamer     = { workspace = true }
-gstreamer-app = { workspace = true }
+gstreamer         = { workspace = true }
+gstreamer-app     = { workspace = true }
+gstreamer-pbutils = { workspace = true }
 aes-gcm       = { workspace = true }
 rand          = { workspace = true }
 base64        = { workspace = true }

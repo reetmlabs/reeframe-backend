@@ -1,5 +1,43 @@
+use std::path::Path;
+
 use gstreamer::prelude::*;
+use gstreamer_pbutils::prelude::*;
 use vms_core::VmsError;
+
+// -- Codec detection --
+
+/// Probe the first video stream in `path` and return its GStreamer caps structure
+/// name (e.g. `"video/x-h264"`, `"video/x-h265"`).
+///
+/// Returns `None` if the file cannot be discovered or contains no video stream.
+/// Called from a blocking context only (`spawn_blocking`).
+pub fn probe_video_codec(path: &Path) -> Option<String> {
+    let uri = format!("file://{}", path.to_str()?);
+    let timeout = gstreamer::ClockTime::from_seconds(5);
+    let discoverer = gstreamer_pbutils::Discoverer::new(timeout).ok()?;
+    let info = discoverer.discover_uri(&uri).ok()?;
+
+    for stream in info.stream_list() {
+        if let Ok(video) = stream.downcast::<gstreamer_pbutils::DiscovererVideoInfo>() {
+            if let Some(caps) = video.caps() {
+                if let Some(s) = caps.structure(0) {
+                    return Some(s.name().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Map a GStreamer caps structure name to an encoder element name.
+///
+/// `"video/x-h265"` → `x265enc`; everything else → `x264enc`.
+pub fn codec_to_encoder(caps_name: &str) -> &'static str {
+    match caps_name {
+        "video/x-h265" => "x265enc",
+        _ => "x264enc",
+    }
+}
 
 // -- Pipeline helpers --
 
