@@ -8,9 +8,10 @@ use salvo::Listener;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
-use vms_api::{routes::build_router, state::AppState};
+use vms_api::{auth::LocalJwtAuthProvider, routes::build_router, state::AppState};
 use vms_db::{
     CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, PipelineRunRepo, SourceRepo,
+    UserRepo,
 };
 use vms_engine::{
     EventBus, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
@@ -55,6 +56,29 @@ async fn main() -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("missing encryption key"));
     }
 
+    // -- Auth config --
+    if cfg.auth.mode != "local" {
+        tracing::error!(
+            mode = %cfg.auth.mode,
+            "Unsupported [auth] mode — only 'local' is available in the community build \
+             ('oidc' requires vms-ent-auth, Phase 3)"
+        );
+        return Err(anyhow::anyhow!("unsupported auth mode: {}", cfg.auth.mode));
+    }
+    if cfg.auth.jwt_secret.is_empty() {
+        tracing::error!(
+            "VMS_AUTH__JWT_SECRET is not set. \
+             Generate one with: openssl rand -base64 32"
+        );
+        return Err(anyhow::anyhow!("missing JWT secret"));
+    }
+    let auth_provider = LocalJwtAuthProvider::new(
+        cfg.auth.jwt_secret.clone(),
+        cfg.auth.access_token_ttl_secs,
+        cfg.auth.refresh_token_ttl_secs,
+    );
+    tracing::info!("Auth provider ready (local JWT)");
+
     // -- Database --
     tracing::info!(db = db_kind(&cfg.database.url), "Connecting to database");
 
@@ -96,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
     let dest_repo = DestinationRepo::new(db.clone(), crypto);
     let pipeline_repo = PipelineRepo::new(db.clone());
     let pipeline_run_repo = PipelineRunRepo::new(db.clone());
+    let user_repo = UserRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
     // -- Media Manager --
@@ -171,22 +196,40 @@ async fn main() -> anyhow::Result<()> {
             .collect();
 
         if !cached.is_empty() {
-            tracing::info!(count = cached.len(), "Auto-starting relays for cameras with cached codec");
+            tracing::info!(
+                count = cached.len(),
+                "Auto-starting relays for cameras with cached codec"
+            );
             for cam in cached {
                 let id = cam.id;
                 let codec = cam.codec.unwrap();
                 match camera_repo.get_decrypted(id).await {
                     Ok(Some((c, password))) => {
                         let source_url = match &c.sub_rtsp_url {
-                            Some(sub) => daemon_build_rtsp_url(sub, c.username.as_deref(), password.as_deref()),
-                            None => daemon_build_rtsp_url(&c.rtsp_url, c.username.as_deref(), password.as_deref()),
+                            Some(sub) => daemon_build_rtsp_url(
+                                sub,
+                                c.username.as_deref(),
+                                password.as_deref(),
+                            ),
+                            None => daemon_build_rtsp_url(
+                                &c.rtsp_url,
+                                c.username.as_deref(),
+                                password.as_deref(),
+                            ),
                         };
-                        match media_manager.start_relay(id, &source_url, Some(&codec)).await {
+                        match media_manager
+                            .start_relay(id, &source_url, Some(&codec))
+                            .await
+                        {
                             Ok(_) => tracing::info!(camera_id = %id, codec, "Relay auto-started"),
-                            Err(e) => tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start relay"),
+                            Err(e) => {
+                                tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start relay")
+                            }
                         }
                     }
-                    _ => tracing::warn!(camera_id = %id, "Could not load camera for relay auto-start"),
+                    _ => {
+                        tracing::warn!(camera_id = %id, "Could not load camera for relay auto-start")
+                    }
                 }
             }
         }
@@ -204,8 +247,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Pipeline executor ready");
 
     // -- Trigger Evaluator --
-    let trigger_evaluator =
-        TriggerEvaluator::new(pipeline_registry.clone(), event_bus.clone(), pipeline_executor);
+    let trigger_evaluator = TriggerEvaluator::new(
+        pipeline_registry.clone(),
+        event_bus.clone(),
+        pipeline_executor,
+    );
 
     trigger_evaluator.clone().start_event_listener();
     tracing::info!("Trigger evaluator event listeners started");
@@ -233,6 +279,8 @@ async fn main() -> anyhow::Result<()> {
         dest_repo,
         pipeline_repo,
         pipeline_run_repo,
+        user_repo,
+        auth_provider,
         media_manager: media_manager.clone(),
         ring_buffer_manager,
         event_bus,
@@ -252,7 +300,11 @@ async fn main() -> anyhow::Result<()> {
     let server_task = tokio::spawn(server.serve(router));
 
     tracing::info!("VMS Daemon started — press Ctrl+C or send SIGTERM to stop");
-    eprintln!("Reeframe VMS daemon v{} — listening on {}", env!("CARGO_PKG_VERSION"), cfg.api.bind);
+    eprintln!(
+        "Reeframe VMS daemon v{} — listening on {}",
+        env!("CARGO_PKG_VERSION"),
+        cfg.api.bind
+    );
 
     // -- Wait for shutdown signal --
     shutdown_signal().await;

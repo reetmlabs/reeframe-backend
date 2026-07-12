@@ -1,3 +1,4 @@
+mod auth;
 mod cameras;
 mod destinations;
 mod health;
@@ -5,6 +6,7 @@ mod pipelines;
 mod sources;
 mod webhooks;
 
+pub use auth::{AuthResponse, LoginBody, SetupBody, UserDto};
 pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
@@ -18,6 +20,11 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .hoop(salvo::affix_state::inject(state))
         .push(Router::with_path("health").get(health::health))
+        .push(
+            Router::with_path("auth")
+                .push(Router::with_path("setup").post(auth::setup))
+                .push(Router::with_path("login").post(auth::login)),
+        )
         .push(
             Router::with_path("cameras")
                 .get(cameras::list_cameras)

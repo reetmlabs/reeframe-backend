@@ -32,6 +32,13 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: msg.into(),
+        }
+    }
 }
 
 #[async_trait]

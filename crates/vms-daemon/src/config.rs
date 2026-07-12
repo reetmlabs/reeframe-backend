@@ -73,6 +73,33 @@ impl Default for RtspConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// `"local"` — the BE issues and validates its own JWTs with `jwt_secret`.
+    /// `"oidc"` — validate IDP-issued tokens via a JWKS endpoint; requires
+    /// `vms-ent-auth` (Phase 3) and is not available in the community build.
+    pub mode: String,
+    /// HMAC-SHA256 signing secret for locally issued JWTs. Required when
+    /// `mode = "local"`. Set via config file or VMS_AUTH__JWT_SECRET env var.
+    /// Generate with: openssl rand -base64 32
+    pub jwt_secret: String,
+    /// Access token lifetime, in seconds.
+    pub access_token_ttl_secs: i64,
+    /// Refresh token lifetime, in seconds.
+    pub refresh_token_ttl_secs: i64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: "local".into(),
+            jwt_secret: String::new(),
+            access_token_ttl_secs: 900,        // 15 minutes
+            refresh_token_ttl_secs: 2_592_000, // 30 days
+        }
+    }
+}
+
 // -- Root config --
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,6 +108,7 @@ pub struct AppConfig {
     pub media: MediaConfig,
     pub api: ApiConfig,
     pub rtsp: RtspConfig,
+    pub auth: AuthConfig,
     /// Base64-encoded 32-byte AES-256-GCM encryption key.
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
@@ -97,6 +125,7 @@ impl Default for AppConfig {
             media: MediaConfig::default(),
             api: ApiConfig::default(),
             rtsp: RtspConfig::default(),
+            auth: AuthConfig::default(),
             encryption_key: String::new(),
             log_level: "info".into(),
         }
@@ -122,6 +151,8 @@ impl Default for AppConfig {
 /// | `VMS_MEDIA__RECORDING_DIR` | `media.recording_dir`       |
 /// | `VMS_API__BIND`            | `api.bind`                  |
 /// | `VMS_RTSP__BIND`           | `rtsp.bind`                 |
+/// | `VMS_AUTH__MODE`           | `auth.mode`                 |
+/// | `VMS_AUTH__JWT_SECRET`     | `auth.jwt_secret`           |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
 pub fn load() -> Result<AppConfig, figment::Error> {
     Figment::new()

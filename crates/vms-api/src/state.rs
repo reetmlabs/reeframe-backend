@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use vms_db::{CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo};
+use vms_db::{CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo, UserRepo};
 use vms_engine::{EventBus, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator};
 use vms_media::{MediaManager, RingBufferManager};
+
+use crate::auth::LocalJwtAuthProvider;
 
 /// Shared application state injected into every Salvo handler via `affix-state`.
 ///
@@ -16,6 +18,8 @@ pub struct AppState {
     pub dest_repo: DestinationRepo,
     pub pipeline_repo: PipelineRepo,
     pub pipeline_run_repo: PipelineRunRepo,
+    pub user_repo: UserRepo,
+    pub auth_provider: LocalJwtAuthProvider,
     pub media_manager: Arc<MediaManager>,
     pub ring_buffer_manager: Arc<RingBufferManager>,
     pub event_bus: Arc<EventBus>,

@@ -11,6 +11,16 @@ pub enum UserRole {
     Viewer,
 }
 
+impl UserRole {
+    /// Canonical lowercase string form — used in JWT claims and permission checks.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UserRole::Admin => "admin",
+            UserRole::Viewer => "viewer",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "users")]
 pub struct Model {
