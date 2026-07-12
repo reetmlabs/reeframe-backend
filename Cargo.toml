@@ -93,6 +93,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 # Security
 aes-gcm      = "0.10"
 jsonwebtoken = "9"
+bcrypt       = "0.15"
 rand         = "0.8"
 base64       = "0.22"
 

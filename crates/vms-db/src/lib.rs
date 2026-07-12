@@ -25,6 +25,7 @@
 //! | [`entities::run_node_result`] | `run_node_results` | Per-node execution results within a run |
 //! | [`entities::pipeline_source_ref`] | `pipeline_source_refs` | Resource Manager: pipeline -> source refs |
 //! | [`entities::pipeline_camera_ref`] | `pipeline_camera_refs` | Resource Manager: pipeline -> camera refs |
+//! | [`entities::user`] | `users` | Local accounts; bcrypt-hashed passwords |
 
 pub mod crypto;
 pub mod entities;
@@ -33,4 +34,7 @@ pub mod repos;
 
 pub use crypto::Crypto;
 pub use migration::Migrator;
-pub use repos::{CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo};
+pub use repos::{
+    user::verify_password, CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo,
+    UserRepo,
+};

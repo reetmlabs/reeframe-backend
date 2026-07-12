@@ -49,6 +49,7 @@ impl From<VmsError> for ApiError {
             | VmsError::SourceNotFound(_)
             | VmsError::DestinationNotFound(_)
             | VmsError::PipelineNotFound(_)
+            | VmsError::UserNotFound(_)
             | VmsError::NotFound(_) => StatusCode::NOT_FOUND,
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,

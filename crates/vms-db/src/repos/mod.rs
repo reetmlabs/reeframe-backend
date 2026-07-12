@@ -3,12 +3,14 @@ pub mod destination;
 pub mod pipeline;
 pub mod pipeline_run;
 pub mod source;
+pub mod user;
 
 pub use camera::CameraRepo;
 pub use destination::DestinationRepo;
 pub use pipeline::PipelineRepo;
 pub use pipeline_run::PipelineRunRepo;
 pub use source::SourceRepo;
+pub use user::UserRepo;
 
 use crate::crypto::Crypto;
 use vms_core::VmsError;

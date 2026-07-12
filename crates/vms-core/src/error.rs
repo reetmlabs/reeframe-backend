@@ -37,6 +37,10 @@ pub enum VmsError {
     #[error("source {0} not found")]
     SourceNotFound(Uuid),
 
+    /// A user with the given ID is not registered in the system.
+    #[error("user {0} not found")]
+    UserNotFound(Uuid),
+
     /// A transport destination (S3 bucket, SMTP relay, webhook, …) was not found.
     #[error("destination {0} not found")]
     DestinationNotFound(Uuid),

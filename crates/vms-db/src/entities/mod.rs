@@ -12,3 +12,4 @@ pub mod pipeline_source_ref;
 pub mod pipeline_trigger;
 pub mod run_node_result;
 pub mod source;
+pub mod user;
