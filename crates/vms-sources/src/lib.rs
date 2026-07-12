@@ -5,6 +5,7 @@
 //! drives camera pipelines.
 
 mod file_watcher;
+mod ha_websocket;
 mod manager;
 mod mqtt;
 

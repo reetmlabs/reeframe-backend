@@ -6328,6 +6328,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
+ "futures",
  "notify",
  "reqwest 0.12.28",
  "rumqttc",

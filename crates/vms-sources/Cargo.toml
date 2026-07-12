@@ -10,6 +10,7 @@ tokio-util        = { workspace = true }
 dashmap           = { workspace = true }
 rumqttc           = { workspace = true }
 tokio-tungstenite = { workspace = true }
+futures           = { workspace = true }
 notify            = { workspace = true }
 reqwest           = { workspace = true }
 uuid              = { workspace = true }

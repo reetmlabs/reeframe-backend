@@ -21,6 +21,7 @@ const CREDENTIAL_FIELDS: &[&str] = &[
     "secret_access_key",
     "private_key",
     "auth_token",
+    "access_token",
     "bot_token",
     "webhook_url",
     "client_key",

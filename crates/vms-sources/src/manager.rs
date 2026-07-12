@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use vms_core::{event::Event, source::SourceType, VmsError};
 
-use crate::{file_watcher, mqtt};
+use crate::{file_watcher, ha_websocket, mqtt};
 
 /// Handle to a running source adapter task, held so [`SourceManager::stop`]
 /// can cancel and join it.
@@ -54,6 +54,9 @@ impl SourceManager {
             }
             SourceType::Mqtt => {
                 mqtt::spawn(source_id, config, self.event_tx.clone(), cancel.clone())?
+            }
+            SourceType::HaWebsocket => {
+                ha_websocket::spawn(source_id, config, self.event_tx.clone(), cancel.clone())?
             }
             other => {
                 return Err(VmsError::Source(format!(
@@ -153,6 +156,31 @@ mod tests {
                 source_id,
                 SourceType::Mqtt,
                 serde_json::json!({ "host": "127.0.0.1", "port": 1, "topic": "test/topic" }),
+            )
+            .await
+            .unwrap();
+        assert!(manager.running.contains_key(&source_id));
+
+        manager.stop(source_id).await.unwrap();
+        assert!(!manager.running.contains_key(&source_id));
+    }
+
+    // Same lifecycle round trip through the HA WebSocket adapter — no server
+    // needs to be reachable for start/stop bookkeeping to work correctly.
+    #[tokio::test]
+    async fn ha_websocket_start_and_stop_round_trip() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let manager = SourceManager::new(tx);
+        let source_id = Uuid::new_v4();
+
+        manager
+            .start(
+                source_id,
+                SourceType::HaWebsocket,
+                serde_json::json!({
+                    "url": "ws://127.0.0.1:1/api/websocket",
+                    "access_token": "test-token",
+                }),
             )
             .await
             .unwrap();
