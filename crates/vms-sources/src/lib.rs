@@ -4,6 +4,7 @@
 //! adapter; the Resource Manager (`vms-engine`) drives it the same way it
 //! drives camera pipelines.
 
+mod api_poll;
 mod file_watcher;
 mod ha_websocket;
 mod manager;

@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use vms_core::{event::Event, source::SourceType, VmsError};
 
-use crate::{file_watcher, ha_websocket, mqtt};
+use crate::{api_poll, file_watcher, ha_websocket, mqtt};
 
 /// Handle to a running source adapter task, held so [`SourceManager::stop`]
 /// can cancel and join it.
@@ -68,10 +68,8 @@ impl SourceManager {
                 let cancel_child = cancel.clone();
                 tokio::spawn(async move { cancel_child.cancelled().await })
             }
-            other => {
-                return Err(VmsError::Source(format!(
-                    "source adapter not implemented: {other:?}"
-                )))
+            SourceType::ApiPoll => {
+                api_poll::spawn(source_id, config, self.event_tx.clone(), cancel.clone())?
             }
         };
 
@@ -140,16 +138,39 @@ mod tests {
         manager.stop(Uuid::new_v4()).await.unwrap();
     }
 
-    // Source types without an adapter yet fail fast with a clear error
-    // instead of silently doing nothing.
+    // A source with a config that fails to deserialize surfaces the error
+    // immediately rather than starting a broken adapter.
     #[tokio::test]
-    async fn unimplemented_adapter_type_returns_error() {
+    async fn invalid_config_returns_error() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let manager = SourceManager::new(tx);
         let result = manager
             .start(Uuid::new_v4(), SourceType::ApiPoll, serde_json::json!({}))
             .await;
         assert!(result.is_err());
+    }
+
+    // Same lifecycle round trip as the other adapters, through the API
+    // poller — no server needs to be reachable for start/stop bookkeeping
+    // to work correctly.
+    #[tokio::test]
+    async fn api_poll_start_and_stop_round_trip() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let manager = SourceManager::new(tx);
+        let source_id = Uuid::new_v4();
+
+        manager
+            .start(
+                source_id,
+                SourceType::ApiPoll,
+                serde_json::json!({ "url": "http://127.0.0.1:1/", "interval_secs": 3600 }),
+            )
+            .await
+            .unwrap();
+        assert!(manager.running.contains_key(&source_id));
+
+        manager.stop(source_id).await.unwrap();
+        assert!(!manager.running.contains_key(&source_id));
     }
 
     // Webhook has no connection of its own, but start/stop still round-trips
