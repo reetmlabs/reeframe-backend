@@ -58,6 +58,7 @@ impl From<VmsError> for ApiError {
 
             VmsError::Database(_)
             | VmsError::Media(_)
+            | VmsError::Source(_)
             | VmsError::Encryption(_)
             | VmsError::Config(_)
             | VmsError::Io(_)

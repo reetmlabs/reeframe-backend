@@ -17,6 +17,7 @@
 //! | [`pipeline`] | [`PipelineDag`] — compile, validate, and walk the pipeline graph |
 //! | [`node`] | [`NodeInput`] / [`NodeOutput`] — data passed between nodes at execution time |
 //! | [`plugin`] | Async plugin traits (`AuthProvider`, `AnalyticsProvider`, `AuditSink`, `ClusterCoordinator`) |
+//! | [`source`] | [`SourceType`] — discriminator for external source adapters |
 
 pub mod action;
 pub mod error;
@@ -25,6 +26,7 @@ pub mod node;
 pub mod pipeline;
 pub mod plugin;
 pub mod resource;
+pub mod source;
 pub mod trigger;
 
 // -- Flat re-exports for ergonomic use in other crates --
@@ -59,3 +61,5 @@ pub use plugin::{
     AnalyticsCapability, AnalyticsProvider, AuditEntry, AuditOutcome, AuditSink, AuthClaims,
     AuthProvider, BoundingBox, ClusterCoordinator, Detection,
 };
+
+pub use source::SourceType;

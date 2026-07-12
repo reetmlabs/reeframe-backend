@@ -6327,13 +6327,16 @@ name = "vms-sources"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dashmap",
  "notify",
  "reqwest 0.12.28",
  "rumqttc",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tokio-util",
  "tracing",
  "uuid",
  "vms-core",

@@ -16,6 +16,7 @@ use vms_engine::{
     EventBus, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
 };
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
+use vms_sources::SourceManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -120,6 +121,22 @@ async fn main() -> anyhow::Result<()> {
     let event_bus = EventBus::new(vms_engine::DEFAULT_CAPACITY);
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
 
+    // -- Source Manager --
+    // Adapters publish onto `source_event_tx`; this task forwards each event
+    // onto the Event Bus, keeping vms-sources free of a vms-engine dependency.
+    let (source_event_tx, mut source_event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let source_manager = SourceManager::new(source_event_tx);
+    let source_event_bus = event_bus.clone();
+    tokio::spawn(async move {
+        while let Some(event) = source_event_rx.recv().await {
+            let Some(source_id) = event.source_id else {
+                continue;
+            };
+            source_event_bus.publish(&vms_core::TopicKey::Source(source_id), event);
+        }
+    });
+    tracing::info!("Source manager ready");
+
     // -- Pipeline Registry --
     let pipeline_registry = PipelineRegistry::new(pipeline_repo.clone());
     pipeline_registry.load().await.map_err(|e| {
@@ -132,6 +149,8 @@ async fn main() -> anyhow::Result<()> {
         media_manager.clone(),
         camera_repo.clone(),
         ring_buffer_manager.clone(),
+        source_repo.clone(),
+        source_manager,
     );
     resource_manager
         .recover(&pipeline_registry)

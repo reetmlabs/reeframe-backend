@@ -8,8 +8,9 @@ use vms_core::{
     resource::{ResourceEntry, ResourceId, ResourceState},
     VmsError,
 };
-use vms_db::CameraRepo;
+use vms_db::{CameraRepo, SourceRepo};
 use vms_media::{MediaManager, RingBufferManager};
+use vms_sources::SourceManager;
 
 use crate::PipelineRegistry;
 
@@ -32,6 +33,8 @@ pub struct ResourceManager {
     media: Arc<MediaManager>,
     cameras: CameraRepo,
     ring_buffers: Arc<RingBufferManager>,
+    sources: SourceRepo,
+    source_manager: Arc<SourceManager>,
 }
 
 impl ResourceManager {
@@ -39,6 +42,8 @@ impl ResourceManager {
         media: Arc<MediaManager>,
         cameras: CameraRepo,
         ring_buffers: Arc<RingBufferManager>,
+        sources: SourceRepo,
+        source_manager: Arc<SourceManager>,
     ) -> Arc<Self> {
         Arc::new(Self {
             entries: DashMap::new(),
@@ -46,6 +51,8 @@ impl ResourceManager {
             media,
             cameras,
             ring_buffers,
+            sources,
+            source_manager,
         })
     }
 
@@ -240,10 +247,7 @@ impl ResourceManager {
                 self.ring_buffers
                     .start(*cam_id, DEFAULT_RING_BUFFER_SECS, RingBufferMode::Memory)
             }
-            ResourceId::Source(id) => {
-                tracing::debug!(%id, "Source start — not yet implemented");
-                Ok(())
-            }
+            ResourceId::Source(id) => self.start_source(*id).await,
             ResourceId::DestinationPool(id) => {
                 tracing::debug!(%id, "DestinationPool start — not yet implemented");
                 Ok(())
@@ -259,10 +263,7 @@ impl ResourceManager {
         match id {
             ResourceId::CameraPipeline(cam_id) => self.media.stop_camera(*cam_id).await,
             ResourceId::RingBuffer(cam_id) => self.ring_buffers.stop(*cam_id),
-            ResourceId::Source(id) => {
-                tracing::debug!(%id, "Source stop — not yet implemented");
-                Ok(())
-            }
+            ResourceId::Source(id) => self.source_manager.stop(*id).await,
             ResourceId::DestinationPool(id) => {
                 tracing::debug!(%id, "DestinationPool stop — not yet implemented");
                 Ok(())
@@ -281,9 +282,31 @@ impl ResourceManager {
         let rtsp_url = build_rtsp_url(&cam.rtsp_url, cam.username.as_deref(), password.as_deref());
         self.media.start_camera(cam_id, &rtsp_url).await
     }
+
+    async fn start_source(&self, source_id: Uuid) -> Result<(), VmsError> {
+        let Some(src) = self.sources.get_decrypted(source_id).await? else {
+            return Err(VmsError::SourceNotFound(source_id));
+        };
+        self.source_manager
+            .start(source_id, source_type_from_db(src.source_type), src.config)
+            .await
+    }
 }
 
 // -- Helpers --
+
+/// Map the DB-level source-type enum to the domain-level one, the same way
+/// `PipelineRepo::trigger_from_db` maps `pipeline_trigger::TriggerType`.
+fn source_type_from_db(db_type: vms_db::entities::source::SourceType) -> vms_core::SourceType {
+    use vms_db::entities::source::SourceType as Db;
+    match db_type {
+        Db::Mqtt => vms_core::SourceType::Mqtt,
+        Db::Webhook => vms_core::SourceType::Webhook,
+        Db::ApiPoll => vms_core::SourceType::ApiPoll,
+        Db::HaWebsocket => vms_core::SourceType::HaWebsocket,
+        Db::FileWatcher => vms_core::SourceType::FileWatcher,
+    }
+}
 
 /// Inject credentials into an RTSP URL if both username and password are present.
 /// `rtsp://host/path` + (user, pass) -> `rtsp://user:pass@host/path`

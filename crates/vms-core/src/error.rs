@@ -52,6 +52,11 @@ pub enum VmsError {
     #[error("media error: {0}")]
     Media(String),
 
+    /// An external source adapter (MQTT, HTTP webhook, file watcher, etc.)
+    /// failed to start, stop, or process an event.
+    #[error("source error: {0}")]
+    Source(String),
+
     /// A SeaORM / SQLx database operation failed.
     #[error("database error: {0}")]
     Database(String),
