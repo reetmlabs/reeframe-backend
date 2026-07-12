@@ -58,6 +58,16 @@ impl SourceManager {
             SourceType::HaWebsocket => {
                 ha_websocket::spawn(source_id, config, self.event_tx.clone(), cancel.clone())?
             }
+            SourceType::Webhook => {
+                // A webhook has no persistent connection to hold open — the
+                // inbound `POST /webhooks/{id}` route (vms-api) publishes
+                // events directly onto the Event Bus and never touches this
+                // manager. This task exists only so `ResourceState::Running`
+                // becomes true for this source, which is what that route
+                // checks to decide whether it's currently accepting requests.
+                let cancel_child = cancel.clone();
+                tokio::spawn(async move { cancel_child.cancelled().await })
+            }
             other => {
                 return Err(VmsError::Source(format!(
                     "source adapter not implemented: {other:?}"
@@ -137,9 +147,28 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let manager = SourceManager::new(tx);
         let result = manager
-            .start(Uuid::new_v4(), SourceType::Webhook, serde_json::json!({}))
+            .start(Uuid::new_v4(), SourceType::ApiPoll, serde_json::json!({}))
             .await;
         assert!(result.is_err());
+    }
+
+    // Webhook has no connection of its own, but start/stop still round-trips
+    // cleanly — this is what makes `ResourceState::Running` become true for
+    // the inbound webhook route's "is this source currently acquired" check.
+    #[tokio::test]
+    async fn webhook_start_and_stop_round_trip() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let manager = SourceManager::new(tx);
+        let source_id = Uuid::new_v4();
+
+        manager
+            .start(source_id, SourceType::Webhook, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(manager.running.contains_key(&source_id));
+
+        manager.stop(source_id).await.unwrap();
+        assert!(!manager.running.contains_key(&source_id));
     }
 
     // Same lifecycle round trip as the file watcher, through the MQTT

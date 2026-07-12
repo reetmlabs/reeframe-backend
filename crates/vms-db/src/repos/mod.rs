@@ -26,6 +26,7 @@ pub(super) const CREDENTIAL_FIELDS: &[&str] = &[
     "access_token",
     "bot_token",
     "webhook_url",
+    "shared_secret",
     "client_key",
     "client_cert",
 ];

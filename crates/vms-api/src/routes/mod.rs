@@ -3,6 +3,7 @@ mod destinations;
 mod health;
 mod pipelines;
 mod sources;
+mod webhooks;
 
 pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
@@ -48,6 +49,10 @@ pub fn build_router(state: AppState) -> Router {
                         .patch(sources::update_source)
                         .delete(sources::delete_source),
                 ),
+        )
+        .push(
+            Router::with_path("webhooks")
+                .push(Router::with_path("{id}").post(webhooks::receive_webhook)),
         )
         .push(
             Router::with_path("destinations")
