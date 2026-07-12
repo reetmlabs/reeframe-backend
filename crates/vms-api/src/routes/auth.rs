@@ -7,6 +7,7 @@
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use vms_core::AuthClaims;
 use vms_db::{
     entities::user::{self, UserRole},
     repos::user::{verify_password, CreateUser},
@@ -70,6 +71,16 @@ pub struct LoginBody {
     pub password: String,
 }
 
+#[derive(Deserialize)]
+pub struct RefreshBody {
+    pub refresh_token: String,
+}
+
+#[derive(Serialize)]
+pub struct AccessTokenResponse {
+    pub access_token: String,
+}
+
 // -- Handlers --
 
 /// POST /auth/setup — create the first admin user. `409` once any user exists.
@@ -114,6 +125,53 @@ pub async fn login(req: &mut Request, depot: &mut Depot) -> Result<Json<AuthResp
         .ok_or_else(|| ApiError::unauthorized(INVALID_CREDENTIALS))?;
 
     issue_tokens(state, user)
+}
+
+/// POST /auth/refresh — exchange a refresh token for a new access token.
+/// Does **not** rotate the refresh token itself.
+#[handler]
+pub async fn refresh(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<AccessTokenResponse>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let body: RefreshBody = parse_body(req).await?;
+
+    let claims = state
+        .auth_provider
+        .verify_refresh_token(&body.refresh_token)?;
+
+    // Re-fetch the user rather than trusting the claims' role/enabled state —
+    // both can have changed in the (potentially 30-day) window since the
+    // refresh token was issued.
+    let user = state
+        .user_repo
+        .get(claims.user_id)
+        .await?
+        .filter(|u| u.enabled)
+        .ok_or_else(|| ApiError::unauthorized("account no longer exists or is disabled"))?;
+
+    let access_token = state.auth_provider.issue_access_token(&user)?;
+    Ok(Json(AccessTokenResponse { access_token }))
+}
+
+/// GET /auth/me — the caller's own identity, from the validated access token.
+/// Requires the auth middleware to have already run (it injects the
+/// [`AuthClaims`] this handler reads).
+#[handler]
+pub async fn me(depot: &mut Depot) -> Result<Json<UserDto>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let claims = depot
+        .obtain::<AuthClaims>()
+        .expect("AuthClaims not in depot — auth middleware did not run");
+
+    let user = state
+        .user_repo
+        .get(claims.user_id)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("account no longer exists"))?;
+
+    Ok(Json(UserDto::from(user)))
 }
 
 fn issue_tokens(state: &AppState, user: user::Model) -> Result<Json<AuthResponse>, ApiError> {

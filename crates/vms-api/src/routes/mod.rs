@@ -6,7 +6,7 @@ mod pipelines;
 mod sources;
 mod webhooks;
 
-pub use auth::{AuthResponse, LoginBody, SetupBody, UserDto};
+pub use auth::{AccessTokenResponse, AuthResponse, LoginBody, RefreshBody, SetupBody, UserDto};
 pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
@@ -14,17 +14,31 @@ pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
 
 use salvo::prelude::*;
 
-use crate::state::AppState;
+use crate::{middleware::AuthMiddleware, state::AppState};
 
-pub fn build_router(state: AppState) -> Router {
+/// Routes reachable without a valid access token: health, inbound webhooks
+/// (step 8-4 has its own accept/reject logic instead), and the three auth
+/// endpoints whose entire purpose is obtaining or refreshing a token.
+fn public_routes() -> Router {
     Router::new()
-        .hoop(salvo::affix_state::inject(state))
         .push(Router::with_path("health").get(health::health))
+        .push(
+            Router::with_path("webhooks")
+                .push(Router::with_path("{id}").post(webhooks::receive_webhook)),
+        )
         .push(
             Router::with_path("auth")
                 .push(Router::with_path("setup").post(auth::setup))
-                .push(Router::with_path("login").post(auth::login)),
+                .push(Router::with_path("login").post(auth::login))
+                .push(Router::with_path("refresh").post(auth::refresh)),
         )
+}
+
+/// Everything else — gated behind [`AuthMiddleware`].
+fn protected_routes() -> Router {
+    Router::new()
+        .hoop(AuthMiddleware)
+        .push(Router::with_path("auth").push(Router::with_path("me").get(auth::me)))
         .push(
             Router::with_path("cameras")
                 .get(cameras::list_cameras)
@@ -58,10 +72,6 @@ pub fn build_router(state: AppState) -> Router {
                 ),
         )
         .push(
-            Router::with_path("webhooks")
-                .push(Router::with_path("{id}").post(webhooks::receive_webhook)),
-        )
-        .push(
             Router::with_path("destinations")
                 .get(destinations::list_destinations)
                 .post(destinations::create_destination)
@@ -91,4 +101,11 @@ pub fn build_router(state: AppState) -> Router {
                         ),
                 ),
         )
+}
+
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        .hoop(salvo::affix_state::inject(state))
+        .push(public_routes())
+        .push(protected_routes())
 }
