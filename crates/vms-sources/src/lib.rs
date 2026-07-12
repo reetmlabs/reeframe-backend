@@ -6,5 +6,6 @@
 
 mod file_watcher;
 mod manager;
+mod mqtt;
 
 pub use manager::SourceManager;

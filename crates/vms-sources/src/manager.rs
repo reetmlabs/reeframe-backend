@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use vms_core::{event::Event, source::SourceType, VmsError};
 
-use crate::file_watcher;
+use crate::{file_watcher, mqtt};
 
 /// Handle to a running source adapter task, held so [`SourceManager::stop`]
 /// can cancel and join it.
@@ -51,6 +51,9 @@ impl SourceManager {
         let task = match source_type {
             SourceType::FileWatcher => {
                 file_watcher::spawn(source_id, config, self.event_tx.clone(), cancel.clone())?
+            }
+            SourceType::Mqtt => {
+                mqtt::spawn(source_id, config, self.event_tx.clone(), cancel.clone())?
             }
             other => {
                 return Err(VmsError::Source(format!(
@@ -131,8 +134,31 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let manager = SourceManager::new(tx);
         let result = manager
-            .start(Uuid::new_v4(), SourceType::Mqtt, serde_json::json!({}))
+            .start(Uuid::new_v4(), SourceType::Webhook, serde_json::json!({}))
             .await;
         assert!(result.is_err());
+    }
+
+    // Same lifecycle round trip as the file watcher, through the MQTT
+    // adapter — no broker needs to be reachable for start/stop bookkeeping
+    // to work correctly.
+    #[tokio::test]
+    async fn mqtt_start_and_stop_round_trip() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let manager = SourceManager::new(tx);
+        let source_id = Uuid::new_v4();
+
+        manager
+            .start(
+                source_id,
+                SourceType::Mqtt,
+                serde_json::json!({ "host": "127.0.0.1", "port": 1, "topic": "test/topic" }),
+            )
+            .await
+            .unwrap();
+        assert!(manager.running.contains_key(&source_id));
+
+        manager.stop(source_id).await.unwrap();
+        assert!(!manager.running.contains_key(&source_id));
     }
 }
