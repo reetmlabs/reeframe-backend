@@ -4,6 +4,7 @@ mod destinations;
 mod health;
 mod pipelines;
 mod sources;
+mod users;
 mod webhooks;
 
 pub use auth::{AccessTokenResponse, AuthResponse, LoginBody, RefreshBody, SetupBody, UserDto};
@@ -11,6 +12,7 @@ pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
+pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
 
 use salvo::prelude::*;
 
@@ -39,6 +41,16 @@ fn protected_routes() -> Router {
     Router::new()
         .hoop(AuthMiddleware)
         .push(Router::with_path("auth").push(Router::with_path("me").get(auth::me)))
+        .push(
+            Router::with_path("users").push(
+                Router::with_path("{id}").push(
+                    Router::with_path("api-keys")
+                        .get(users::list_api_keys)
+                        .post(users::create_api_key)
+                        .push(Router::with_path("{key_id}").delete(users::delete_api_key)),
+                ),
+            ),
+        )
         .push(
             Router::with_path("cameras")
                 .get(cameras::list_cameras)

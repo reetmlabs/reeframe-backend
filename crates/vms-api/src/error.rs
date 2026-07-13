@@ -39,6 +39,13 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: msg.into(),
+        }
+    }
 }
 
 #[async_trait]
@@ -57,6 +64,7 @@ impl From<VmsError> for ApiError {
             | VmsError::DestinationNotFound(_)
             | VmsError::PipelineNotFound(_)
             | VmsError::UserNotFound(_)
+            | VmsError::ApiKeyNotFound(_)
             | VmsError::NotFound(_) => StatusCode::NOT_FOUND,
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,

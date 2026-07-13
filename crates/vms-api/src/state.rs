@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use vms_db::{CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo, UserRepo};
+use vms_db::{
+    ApiKeyRepo, CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo, UserRepo,
+};
 use vms_engine::{EventBus, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator};
 use vms_media::{MediaManager, RingBufferManager};
 
@@ -19,6 +21,7 @@ pub struct AppState {
     pub pipeline_repo: PipelineRepo,
     pub pipeline_run_repo: PipelineRunRepo,
     pub user_repo: UserRepo,
+    pub api_key_repo: ApiKeyRepo,
     pub auth_provider: LocalJwtAuthProvider,
     pub media_manager: Arc<MediaManager>,
     pub ring_buffer_manager: Arc<RingBufferManager>,

@@ -10,8 +10,8 @@ use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{auth::LocalJwtAuthProvider, routes::build_router, state::AppState};
 use vms_db::{
-    CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, PipelineRunRepo, SourceRepo,
-    UserRepo,
+    ApiKeyRepo, CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, PipelineRunRepo,
+    SourceRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
     let pipeline_repo = PipelineRepo::new(db.clone());
     let pipeline_run_repo = PipelineRunRepo::new(db.clone());
     let user_repo = UserRepo::new(db.clone());
+    let api_key_repo = ApiKeyRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
     // -- Media Manager --
@@ -280,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
         pipeline_repo,
         pipeline_run_repo,
         user_repo,
+        api_key_repo,
         auth_provider,
         media_manager: media_manager.clone(),
         ring_buffer_manager,

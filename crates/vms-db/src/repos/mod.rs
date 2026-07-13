@@ -1,3 +1,4 @@
+pub mod api_key;
 pub mod camera;
 pub mod destination;
 pub mod pipeline;
@@ -5,6 +6,7 @@ pub mod pipeline_run;
 pub mod source;
 pub mod user;
 
+pub use api_key::ApiKeyRepo;
 pub use camera::CameraRepo;
 pub use destination::DestinationRepo;
 pub use pipeline::PipelineRepo;

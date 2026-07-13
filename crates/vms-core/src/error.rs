@@ -41,6 +41,11 @@ pub enum VmsError {
     #[error("user {0} not found")]
     UserNotFound(Uuid),
 
+    /// An API key with the given ID does not exist, or does not belong to
+    /// the user it was requested under.
+    #[error("api key {0} not found")]
+    ApiKeyNotFound(Uuid),
+
     /// A transport destination (S3 bucket, SMTP relay, webhook, …) was not found.
     #[error("destination {0} not found")]
     DestinationNotFound(Uuid),

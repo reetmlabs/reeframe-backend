@@ -26,6 +26,7 @@
 //! | [`entities::pipeline_source_ref`] | `pipeline_source_refs` | Resource Manager: pipeline -> source refs |
 //! | [`entities::pipeline_camera_ref`] | `pipeline_camera_refs` | Resource Manager: pipeline -> camera refs |
 //! | [`entities::user`] | `users` | Local accounts; bcrypt-hashed passwords |
+//! | [`entities::api_key`] | `api_keys` | Long-lived tokens; SHA-256-hashed, shown once on creation |
 
 pub mod crypto;
 pub mod entities;
@@ -35,6 +36,6 @@ pub mod repos;
 pub use crypto::Crypto;
 pub use migration::Migrator;
 pub use repos::{
-    user::verify_password, CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, SourceRepo,
-    UserRepo,
+    user::verify_password, ApiKeyRepo, CameraRepo, DestinationRepo, PipelineRepo, PipelineRunRepo,
+    SourceRepo, UserRepo,
 };
