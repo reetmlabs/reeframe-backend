@@ -51,6 +51,11 @@ pub enum VmsError {
     #[error("node {0} not found")]
     NodeNotFound(Uuid),
 
+    /// A pipeline edge with the given ID does not exist, or does not belong
+    /// to the pipeline it was requested under.
+    #[error("edge {0} not found")]
+    EdgeNotFound(Uuid),
+
     /// A transport destination (S3 bucket, SMTP relay, webhook, …) was not found.
     #[error("destination {0} not found")]
     DestinationNotFound(Uuid),

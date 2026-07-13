@@ -62,6 +62,22 @@ pub enum NodeType {
     Condition,
 }
 
+impl NodeType {
+    /// Canonical snake_case string form — matches the `#[serde(rename_all =
+    /// "snake_case")]` wire representation, for use in error messages so
+    /// they read the same as the JSON a client actually sent.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeType::TriggerRoot => "trigger_root",
+            NodeType::Action => "action",
+            NodeType::DeviceControl => "device_control",
+            NodeType::Transport => "transport",
+            NodeType::Fork => "fork",
+            NodeType::Condition => "condition",
+        }
+    }
+}
+
 /// The label attached to an edge that determines routing for [`NodeType::Condition`] nodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +88,19 @@ pub enum EdgeType {
     TrueBranch,
     /// Followed when a condition node's expression evaluates to `false`.
     FalseBranch,
+}
+
+impl EdgeType {
+    /// Canonical snake_case string form — matches the `#[serde(rename_all =
+    /// "snake_case")]` wire representation, for use in error messages so
+    /// they read the same as the JSON a client actually sent.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeType::Default => "default",
+            EdgeType::TrueBranch => "true_branch",
+            EdgeType::FalseBranch => "false_branch",
+        }
+    }
 }
 
 // -- Core graph types --
@@ -383,6 +412,51 @@ impl PipelineDag {
     }
 }
 
+/// Check `edges` for a cycle, without requiring the rest of `PipelineDag
+/// ::compile`'s rules (exactly one root, leaf constraints, branch counts) to
+/// already hold.
+///
+/// Used to validate a single new edge incrementally while a pipeline's
+/// graph is still under construction — mid-edit, a pipeline is *expected* to
+/// have nodes with no parents yet, or a `Condition` node with only one of
+/// its two branches wired so far. Those states aren't cycles, so
+/// `PipelineDag::compile`'s full rule set (which does treat "not exactly one
+/// root" as an error) isn't the right check to run here. Cycle-freedom, on
+/// the other hand, is meaningful at any point during construction: no
+/// sequence of individually-valid edge additions can ever produce a cycle
+/// except the one edge that actually closes the loop, so checking it on
+/// every add is both correct and precise about which edge caused the problem.
+///
+/// References to node IDs not present in `nodes` are ignored — that's a
+/// referential-integrity concern for the caller (typically already
+/// guaranteed by the database's foreign keys), not a cycle concern.
+pub fn check_no_cycle(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Result<(), VmsError> {
+    let node_map: HashMap<NodeId, PipelineNode> =
+        nodes.iter().cloned().map(|n| (n.id, n)).collect();
+
+    let mut adjacency: HashMap<NodeId, Vec<NodeId>> =
+        node_map.keys().map(|&id| (id, vec![])).collect();
+    let mut parents: HashMap<NodeId, Vec<NodeId>> =
+        node_map.keys().map(|&id| (id, vec![])).collect();
+
+    for edge in edges {
+        if !node_map.contains_key(&edge.from_node_id) || !node_map.contains_key(&edge.to_node_id) {
+            continue;
+        }
+        adjacency
+            .entry(edge.from_node_id)
+            .or_default()
+            .push(edge.to_node_id);
+        parents
+            .entry(edge.to_node_id)
+            .or_default()
+            .push(edge.from_node_id);
+    }
+
+    kahn_topological_sort(&node_map, &adjacency, &parents)?;
+    Ok(())
+}
+
 // -- Kahn's topological sort --
 
 /// Topologically sort `node_map` using Kahn's algorithm.
@@ -538,5 +612,73 @@ mod tests {
         let e = edge(pid, root.id, bad_transport.id);
         let result = PipelineDag::compile(vec![root, bad_transport], vec![e]);
         assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    // -- check_no_cycle --
+
+    #[test]
+    fn check_no_cycle_allows_a_graph_with_unwired_nodes() {
+        // Two nodes with no edge between them at all isn't a cycle — it's
+        // just an incomplete graph, which `check_no_cycle` must tolerate
+        // (unlike `PipelineDag::compile`'s "exactly one root" rule).
+        let pid = Uuid::new_v4();
+        let root = root_node(pid);
+        let transport = transport_node(pid, Uuid::new_v4());
+        assert!(check_no_cycle(&[root, transport], &[]).is_ok());
+    }
+
+    #[test]
+    fn check_no_cycle_allows_a_condition_node_with_only_one_branch_wired() {
+        // Mid-construction: a condition node with just its true_branch
+        // wired isn't valid per `PipelineDag::compile`'s rule 5, but it's
+        // not a cycle either — `check_no_cycle` must accept it.
+        let pid = Uuid::new_v4();
+        let root = root_node(pid);
+        let cond = PipelineNode {
+            id: Uuid::new_v4(),
+            pipeline_id: pid,
+            node_type: NodeType::Condition,
+            action_config: None,
+            destination_id: None,
+            contact_list_id: None,
+            transport_config: None,
+            condition_expr: Some("x > 1".into()),
+            label: None,
+            pos_x: None,
+            pos_y: None,
+        };
+        let leaf = transport_node(pid, Uuid::new_v4());
+        let e1 = edge(pid, root.id, cond.id);
+        let mut e2 = edge(pid, cond.id, leaf.id);
+        e2.edge_type = EdgeType::TrueBranch;
+
+        assert!(check_no_cycle(&[root, cond, leaf], &[e1, e2]).is_ok());
+    }
+
+    #[test]
+    fn check_no_cycle_detects_a_direct_cycle() {
+        let pid = Uuid::new_v4();
+        let a = root_node(pid);
+        let mut b = a.clone();
+        b.id = Uuid::new_v4();
+
+        let e1 = edge(pid, a.id, b.id);
+        let e2 = edge(pid, b.id, a.id);
+
+        assert!(matches!(
+            check_no_cycle(&[a, b], &[e1, e2]),
+            Err(VmsError::DagValidation(_))
+        ));
+    }
+
+    #[test]
+    fn check_no_cycle_ignores_edges_to_unknown_nodes() {
+        // A referential-integrity problem, not a cycle — `check_no_cycle`
+        // leaves that concern to the caller (the database's foreign keys).
+        let pid = Uuid::new_v4();
+        let root = root_node(pid);
+        let root_id = root.id;
+        let e = edge(pid, root_id, Uuid::new_v4());
+        assert!(check_no_cycle(&[root], &[e]).is_ok());
     }
 }

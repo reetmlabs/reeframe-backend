@@ -6,8 +6,8 @@ use uuid::Uuid;
 use vms_core::{
     action::{ActionConfig, TransportConfig},
     pipeline::{
-        CompiledPipeline, PipelineCameraRef, PipelineDag, PipelineEdge, PipelineNode,
-        PipelineTrigger,
+        check_no_cycle, CompiledPipeline, PipelineCameraRef, PipelineDag, PipelineEdge,
+        PipelineNode, PipelineTrigger,
     },
     pipeline::{EdgeType as CoreEdgeType, NodeType as CoreNodeType},
     trigger::{TriggerConfig, TriggerType as CoreTriggerType},
@@ -59,6 +59,19 @@ pub struct UpdateNode {
     pub label: Option<Option<String>>,
     pub pos_x: Option<Option<f64>>,
     pub pos_y: Option<Option<f64>>,
+}
+
+pub struct CreateEdge {
+    pub from_node_id: Uuid,
+    pub to_node_id: Uuid,
+    pub edge_type: CoreEdgeType,
+}
+
+/// `from_node_id`/`to_node_id` are intentionally absent — moving an edge's
+/// endpoints is structurally a different edge. Callers who need that delete
+/// and recreate it, same rationale as `UpdateNode` for `node_type`.
+pub struct UpdateEdge {
+    pub edge_type: CoreEdgeType,
 }
 
 // -- Repository --
@@ -382,6 +395,134 @@ impl PipelineRepo {
         node.delete(&self.db).await.map_err(db_err)?;
         Ok(())
     }
+
+    // -- Edge CRUD --
+
+    /// Create an edge. Validates everything from the `PipelineDag` doc
+    /// comment that's checkable without requiring the rest of the graph to
+    /// already be complete: rule 3 (no cycle — via `check_no_cycle`,
+    /// evaluated against the graph *with* this edge added), rule 4
+    /// (`Transport`/`DeviceControl` source nodes can never have an outgoing
+    /// edge, checked immediately rather than waiting for "must be a leaf" to
+    /// matter at compile time), and the shape of rule 5 that's assessable
+    /// per-edge (a `Condition` source can only take `true_branch`/
+    /// `false_branch`, never both from the same source twice, and never
+    /// more than two outgoing edges total). Whether a `Condition` node
+    /// *eventually* gets both branches, and whether every node ends up
+    /// reachable from the root, are still only checked at full compile time
+    /// — those require the graph to be finished, which it isn't yet if
+    /// someone's still wiring it up.
+    pub async fn create_edge(
+        &self,
+        pipeline_id: Uuid,
+        input: CreateEdge,
+    ) -> Result<PipelineEdge, VmsError> {
+        if input.from_node_id == input.to_node_id {
+            return Err(VmsError::DagValidation(
+                "an edge cannot connect a node to itself".into(),
+            ));
+        }
+
+        let from_node = self
+            .require_node_in_pipeline(pipeline_id, input.from_node_id)
+            .await?;
+        self.require_node_in_pipeline(pipeline_id, input.to_node_id)
+            .await?;
+
+        let nodes = self.load_nodes(pipeline_id).await?;
+        let mut edges = self.load_edges(pipeline_id).await?;
+
+        validate_new_edge(&from_node, &input.edge_type, input.to_node_id, &edges)?;
+
+        edges.push(PipelineEdge {
+            id: Uuid::new_v4(), // placeholder id, only used for the cycle check below
+            pipeline_id,
+            from_node_id: input.from_node_id,
+            to_node_id: input.to_node_id,
+            edge_type: input.edge_type.clone(),
+        });
+        check_no_cycle(&nodes, &edges)?;
+
+        let model = pipeline_edge::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            pipeline_id: Set(pipeline_id),
+            from_node_id: Set(input.from_node_id),
+            to_node_id: Set(input.to_node_id),
+            edge_type: Set(edge_type_to_db(&input.edge_type)),
+        }
+        .insert(&self.db)
+        .await
+        .map_err(db_err)?;
+
+        Ok(edge_from_db(model))
+    }
+
+    pub async fn get_edge(&self, edge_id: Uuid) -> Result<Option<PipelineEdge>, VmsError> {
+        let m = pipeline_edge::Entity::find_by_id(edge_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?;
+        Ok(m.map(edge_from_db))
+    }
+
+    /// Update an edge's `edge_type`. Endpoints are immutable (see
+    /// [`UpdateEdge`]); since they can't change, neither the cycle check nor
+    /// the duplicate-pair check from `create_edge` applies here — only the
+    /// source-node/edge-type compatibility and branch-uniqueness checks do.
+    pub async fn update_edge(
+        &self,
+        edge_id: Uuid,
+        input: UpdateEdge,
+    ) -> Result<PipelineEdge, VmsError> {
+        let existing = pipeline_edge::Entity::find_by_id(edge_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .ok_or(VmsError::EdgeNotFound(edge_id))?;
+
+        let from_node = self
+            .require_node_in_pipeline(existing.pipeline_id, existing.from_node_id)
+            .await?;
+        let other_edges: Vec<PipelineEdge> = self
+            .load_edges(existing.pipeline_id)
+            .await?
+            .into_iter()
+            .filter(|e| e.id != edge_id)
+            .collect();
+
+        validate_new_edge(
+            &from_node,
+            &input.edge_type,
+            existing.to_node_id,
+            &other_edges,
+        )?;
+
+        let mut active: pipeline_edge::ActiveModel = existing.into();
+        active.edge_type = Set(edge_type_to_db(&input.edge_type));
+        let updated = active.update(&self.db).await.map_err(db_err)?;
+        Ok(edge_from_db(updated))
+    }
+
+    pub async fn delete_edge(&self, edge_id: Uuid) -> Result<(), VmsError> {
+        let edge = pipeline_edge::Entity::find_by_id(edge_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .ok_or(VmsError::EdgeNotFound(edge_id))?;
+        edge.delete(&self.db).await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn require_node_in_pipeline(
+        &self,
+        pipeline_id: Uuid,
+        node_id: Uuid,
+    ) -> Result<PipelineNode, VmsError> {
+        self.get_node(node_id)
+            .await?
+            .filter(|n| n.pipeline_id == pipeline_id)
+            .ok_or(VmsError::NodeNotFound(node_id))
+    }
 }
 
 // -- DB-to-domain translation --
@@ -472,12 +613,14 @@ fn validate_create_shape(
         CoreNodeType::Action | CoreNodeType::DeviceControl => {
             if action_config.is_none() {
                 return Err(VmsError::DagValidation(format!(
-                    "{node_type:?} node requires action_config"
+                    "{} node requires action_config",
+                    node_type.as_str()
                 )));
             }
             if transport_config.is_some() || condition_expr.is_some() {
                 return Err(VmsError::DagValidation(format!(
-                    "{node_type:?} node must not set transport_config or condition_expr"
+                    "{} node must not set transport_config or condition_expr",
+                    node_type.as_str()
                 )));
             }
         }
@@ -511,7 +654,8 @@ fn validate_create_shape(
         CoreNodeType::TriggerRoot | CoreNodeType::Fork => {
             if action_config.is_some() || transport_config.is_some() || condition_expr.is_some() {
                 return Err(VmsError::DagValidation(format!(
-                    "{node_type:?} node must not set any config"
+                    "{} node must not set any config",
+                    node_type.as_str()
                 )));
             }
         }
@@ -535,18 +679,21 @@ fn validate_update_shape(
         )
     {
         return Err(VmsError::DagValidation(format!(
-            "{node_type:?} node does not accept action_config"
+            "{} node does not accept action_config",
+            node_type.as_str()
         )));
     }
     if transport_config.is_some() && !matches!(node_type, CoreNodeType::Transport) {
         return Err(VmsError::DagValidation(format!(
-            "{node_type:?} node does not accept transport_config"
+            "{} node does not accept transport_config",
+            node_type.as_str()
         )));
     }
     if let Some(expr) = condition_expr {
         if !matches!(node_type, CoreNodeType::Condition) {
             return Err(VmsError::DagValidation(format!(
-                "{node_type:?} node does not accept condition_expr"
+                "{} node does not accept condition_expr",
+                node_type.as_str()
             )));
         }
         if expr.trim().is_empty() {
@@ -601,22 +748,113 @@ fn node_from_db(m: pipeline_node::Model) -> Result<PipelineNode, VmsError> {
     })
 }
 
-fn edge_from_db(m: pipeline_edge::Model) -> PipelineEdge {
+fn edge_type_from_db(db_type: &pipeline_edge::EdgeType) -> CoreEdgeType {
     use pipeline_edge::EdgeType as Db;
-
-    let edge_type = match m.edge_type {
+    match db_type {
         Db::Default => CoreEdgeType::Default,
         Db::TrueBranch => CoreEdgeType::TrueBranch,
         Db::FalseBranch => CoreEdgeType::FalseBranch,
-    };
+    }
+}
 
+fn edge_type_to_db(core_type: &CoreEdgeType) -> pipeline_edge::EdgeType {
+    use pipeline_edge::EdgeType as Db;
+    match core_type {
+        CoreEdgeType::Default => Db::Default,
+        CoreEdgeType::TrueBranch => Db::TrueBranch,
+        CoreEdgeType::FalseBranch => Db::FalseBranch,
+    }
+}
+
+fn edge_from_db(m: pipeline_edge::Model) -> PipelineEdge {
     PipelineEdge {
+        edge_type: edge_type_from_db(&m.edge_type),
         id: m.id,
         pipeline_id: m.pipeline_id,
         from_node_id: m.from_node_id,
         to_node_id: m.to_node_id,
-        edge_type,
     }
+}
+
+/// Per-edge checks from `create_edge`/`update_edge` that don't depend on
+/// whether the edge is new or replacing an existing one's `edge_type`:
+/// - `Transport`/`DeviceControl` sources can never have an outgoing edge
+///   (rule 4 — always true, not just once the graph is "done").
+/// - A `Condition` source's edges must be `true_branch`/`false_branch`,
+///   never `default`; a non-`Condition` source's edges must be `default`,
+///   never a branch tag (rule 5's per-edge half).
+/// - A `Condition` source may not end up with two edges of the same branch,
+///   or more than two outgoing edges at all.
+///
+/// `sibling_edges` should be every *other* outgoing edge already recorded
+/// for `from_node` (i.e. excluding the one being replaced, for an update).
+fn validate_new_edge(
+    from_node: &PipelineNode,
+    edge_type: &CoreEdgeType,
+    to_node_id: Uuid,
+    sibling_edges: &[PipelineEdge],
+) -> Result<(), VmsError> {
+    if matches!(
+        from_node.node_type,
+        CoreNodeType::Transport | CoreNodeType::DeviceControl
+    ) {
+        return Err(VmsError::DagValidation(format!(
+            "{} node {} must be a leaf and cannot have outgoing edges",
+            from_node.node_type.as_str(),
+            from_node.id
+        )));
+    }
+
+    let is_condition = from_node.node_type == CoreNodeType::Condition;
+    let is_branch = matches!(
+        edge_type,
+        CoreEdgeType::TrueBranch | CoreEdgeType::FalseBranch
+    );
+    if is_condition && !is_branch {
+        return Err(VmsError::DagValidation(
+            "edges from a condition node must be true_branch or false_branch".into(),
+        ));
+    }
+    if !is_condition && is_branch {
+        return Err(VmsError::DagValidation(
+            "true_branch/false_branch edges are only valid from a condition node".into(),
+        ));
+    }
+
+    let siblings_from_this_node: Vec<&PipelineEdge> = sibling_edges
+        .iter()
+        .filter(|e| e.from_node_id == from_node.id)
+        .collect();
+
+    if is_condition {
+        if siblings_from_this_node.len() >= 2 {
+            return Err(VmsError::DagValidation(format!(
+                "condition node {} already has 2 outgoing edges",
+                from_node.id
+            )));
+        }
+        if siblings_from_this_node
+            .iter()
+            .any(|e| &e.edge_type == edge_type)
+        {
+            return Err(VmsError::DagValidation(format!(
+                "condition node {} already has a {} edge",
+                from_node.id,
+                edge_type.as_str()
+            )));
+        }
+    }
+
+    if sibling_edges
+        .iter()
+        .any(|e| e.from_node_id == from_node.id && e.to_node_id == to_node_id)
+    {
+        return Err(VmsError::DagValidation(
+            "an edge already exists between these two nodes".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn trigger_from_db(m: pipeline_trigger::Model) -> Result<PipelineTrigger, VmsError> {
@@ -818,5 +1056,123 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value, serde_json::json!({ "condition_expr": "x > 1" }));
+    }
+
+    // -- validate_new_edge --
+
+    fn node_of_type(node_type: CoreNodeType) -> PipelineNode {
+        PipelineNode {
+            id: Uuid::new_v4(),
+            pipeline_id: Uuid::new_v4(),
+            node_type,
+            action_config: None,
+            destination_id: None,
+            contact_list_id: None,
+            transport_config: None,
+            condition_expr: None,
+            label: None,
+            pos_x: None,
+            pos_y: None,
+        }
+    }
+
+    #[test]
+    fn transport_source_rejects_any_outgoing_edge() {
+        let from = node_of_type(CoreNodeType::Transport);
+        let result = validate_new_edge(&from, &CoreEdgeType::Default, Uuid::new_v4(), &[]);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn device_control_source_rejects_any_outgoing_edge() {
+        let from = node_of_type(CoreNodeType::DeviceControl);
+        let result = validate_new_edge(&from, &CoreEdgeType::Default, Uuid::new_v4(), &[]);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn non_condition_source_rejects_branch_edge_type() {
+        let from = node_of_type(CoreNodeType::Action);
+        let result = validate_new_edge(&from, &CoreEdgeType::TrueBranch, Uuid::new_v4(), &[]);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn condition_source_rejects_default_edge_type() {
+        let from = node_of_type(CoreNodeType::Condition);
+        let result = validate_new_edge(&from, &CoreEdgeType::Default, Uuid::new_v4(), &[]);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn condition_source_accepts_first_branch_edge() {
+        let from = node_of_type(CoreNodeType::Condition);
+        let result = validate_new_edge(&from, &CoreEdgeType::TrueBranch, Uuid::new_v4(), &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn condition_source_rejects_duplicate_branch() {
+        let from = node_of_type(CoreNodeType::Condition);
+        let existing = PipelineEdge {
+            id: Uuid::new_v4(),
+            pipeline_id: from.pipeline_id,
+            from_node_id: from.id,
+            to_node_id: Uuid::new_v4(),
+            edge_type: CoreEdgeType::TrueBranch,
+        };
+        let result = validate_new_edge(
+            &from,
+            &CoreEdgeType::TrueBranch,
+            Uuid::new_v4(),
+            &[existing],
+        );
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn condition_source_rejects_a_third_outgoing_edge() {
+        let from = node_of_type(CoreNodeType::Condition);
+        let e1 = PipelineEdge {
+            id: Uuid::new_v4(),
+            pipeline_id: from.pipeline_id,
+            from_node_id: from.id,
+            to_node_id: Uuid::new_v4(),
+            edge_type: CoreEdgeType::TrueBranch,
+        };
+        let e2 = PipelineEdge {
+            id: Uuid::new_v4(),
+            pipeline_id: from.pipeline_id,
+            from_node_id: from.id,
+            to_node_id: Uuid::new_v4(),
+            edge_type: CoreEdgeType::FalseBranch,
+        };
+        // A third edge, even with a nonsense repeated branch, must still be
+        // rejected on the "already has 2" check before the "duplicate
+        // branch" check would also apply.
+        let result = validate_new_edge(&from, &CoreEdgeType::TrueBranch, Uuid::new_v4(), &[e1, e2]);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn rejects_duplicate_edge_between_the_same_pair() {
+        let from = node_of_type(CoreNodeType::Action);
+        let to_id = Uuid::new_v4();
+        let existing = PipelineEdge {
+            id: Uuid::new_v4(),
+            pipeline_id: from.pipeline_id,
+            from_node_id: from.id,
+            to_node_id: to_id,
+            edge_type: CoreEdgeType::Default,
+        };
+        let result = validate_new_edge(&from, &CoreEdgeType::Default, to_id, &[existing]);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn valid_default_edge_from_a_non_condition_node_passes() {
+        let from = node_of_type(CoreNodeType::Action);
+        let result = validate_new_edge(&from, &CoreEdgeType::Default, Uuid::new_v4(), &[]);
+        assert!(result.is_ok());
     }
 }
