@@ -46,6 +46,11 @@ pub enum VmsError {
     #[error("api key {0} not found")]
     ApiKeyNotFound(Uuid),
 
+    /// A pipeline node with the given ID does not exist, or does not belong
+    /// to the pipeline it was requested under.
+    #[error("node {0} not found")]
+    NodeNotFound(Uuid),
+
     /// A transport destination (S3 bucket, SMTP relay, webhook, …) was not found.
     #[error("destination {0} not found")]
     DestinationNotFound(Uuid),

@@ -2,6 +2,7 @@ mod auth;
 mod cameras;
 mod destinations;
 mod health;
+mod pipeline_nodes;
 mod pipelines;
 mod sources;
 mod users;
@@ -10,6 +11,7 @@ mod webhooks;
 pub use auth::{AccessTokenResponse, AuthResponse, LoginBody, RefreshBody, SetupBody, UserDto};
 pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
+pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
 pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
@@ -110,6 +112,17 @@ fn protected_routes() -> Router {
                             Router::with_path("runs")
                                 .get(pipelines::list_runs)
                                 .push(Router::with_path("{run_id}").get(pipelines::get_run)),
+                        )
+                        .push(
+                            Router::with_path("nodes")
+                                .get(pipeline_nodes::list_nodes)
+                                .post(pipeline_nodes::create_node)
+                                .push(
+                                    Router::with_path("{node_id}")
+                                        .get(pipeline_nodes::get_node)
+                                        .patch(pipeline_nodes::update_node)
+                                        .delete(pipeline_nodes::delete_node),
+                                ),
                         ),
                 ),
         )
