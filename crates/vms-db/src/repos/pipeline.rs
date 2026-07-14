@@ -1,6 +1,8 @@
+use std::collections::{HashMap, HashSet};
+
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait,
-    PaginatorTrait, QueryFilter,
+    PaginatorTrait, QueryFilter, TransactionTrait,
 };
 use uuid::Uuid;
 use vms_core::{
@@ -327,7 +329,9 @@ impl PipelineRepo {
         .await
         .map_err(db_err)?;
 
-        node_from_db(model)
+        let created = node_from_db(model)?;
+        self.recompute_refs(pipeline_id).await?;
+        Ok(created)
     }
 
     pub async fn get_node(&self, node_id: Uuid) -> Result<Option<PipelineNode>, VmsError> {
@@ -356,6 +360,7 @@ impl PipelineRepo {
             .map_err(db_err)?
             .ok_or(VmsError::NodeNotFound(node_id))?;
 
+        let pipeline_id = existing.pipeline_id;
         let node_type = node_type_from_db(&existing.node_type);
         validate_update_shape(
             &node_type,
@@ -409,7 +414,9 @@ impl PipelineRepo {
         }
 
         let updated = active.update(&self.db).await.map_err(db_err)?;
-        node_from_db(updated)
+        let updated = node_from_db(updated)?;
+        self.recompute_refs(pipeline_id).await?;
+        Ok(updated)
     }
 
     /// Delete a node. Cascades to any edges referencing it (the
@@ -422,8 +429,9 @@ impl PipelineRepo {
             .await
             .map_err(db_err)?
             .ok_or(VmsError::NodeNotFound(node_id))?;
+        let pipeline_id = node.pipeline_id;
         node.delete(&self.db).await.map_err(db_err)?;
-        Ok(())
+        self.recompute_refs(pipeline_id).await
     }
 
     // -- Edge CRUD --
@@ -602,6 +610,63 @@ impl PipelineRepo {
             .ok_or(VmsError::CameraNotFound(camera_id))
     }
 
+    // -- Resource Manager ref-table derivation --
+
+    /// Recompute `pipeline_camera_refs`/`pipeline_source_refs` for
+    /// `pipeline_id` from its current nodes and triggers, replacing
+    /// whatever was stored before in one transaction. Called after every
+    /// node/trigger write (create/update/delete) — recomputing the small
+    /// number of rows one pipeline can have is simpler and just as correct
+    /// as diffing, and this never runs on any hot path (only pipeline-graph
+    /// edits, never pipeline execution).
+    pub async fn recompute_refs(&self, pipeline_id: Uuid) -> Result<(), VmsError> {
+        let nodes = self.load_nodes(pipeline_id).await?;
+        let triggers = self.load_triggers(pipeline_id).await?;
+
+        let camera_refs = derive_camera_refs(&nodes, &triggers);
+        let source_refs: HashSet<Uuid> = triggers
+            .iter()
+            .filter(|t| t.enabled)
+            .filter_map(|t| t.source_id)
+            .collect();
+
+        let txn = self.db.begin().await.map_err(db_err)?;
+
+        pipeline_camera_ref::Entity::delete_many()
+            .filter(pipeline_camera_ref::Column::PipelineId.eq(pipeline_id))
+            .exec(&txn)
+            .await
+            .map_err(db_err)?;
+        for cam_ref in &camera_refs {
+            pipeline_camera_ref::ActiveModel {
+                pipeline_id: Set(pipeline_id),
+                camera_id: Set(cam_ref.camera_id),
+                needs_ring_buffer: Set(cam_ref.needs_ring_buffer),
+                needs_analytics: Set(cam_ref.needs_analytics),
+            }
+            .insert(&txn)
+            .await
+            .map_err(db_err)?;
+        }
+
+        pipeline_source_ref::Entity::delete_many()
+            .filter(pipeline_source_ref::Column::PipelineId.eq(pipeline_id))
+            .exec(&txn)
+            .await
+            .map_err(db_err)?;
+        for &source_id in &source_refs {
+            pipeline_source_ref::ActiveModel {
+                pipeline_id: Set(pipeline_id),
+                source_id: Set(source_id),
+            }
+            .insert(&txn)
+            .await
+            .map_err(db_err)?;
+        }
+
+        txn.commit().await.map_err(db_err)
+    }
+
     // -- Trigger CRUD --
 
     /// Create a trigger. `config`'s own serde tag determines the stored
@@ -637,7 +702,9 @@ impl PipelineRepo {
         .await
         .map_err(db_err)?;
 
-        trigger_from_db(model)
+        let created = trigger_from_db(model)?;
+        self.recompute_refs(pipeline_id).await?;
+        Ok(created)
     }
 
     pub async fn get_trigger(&self, trigger_id: Uuid) -> Result<Option<PipelineTrigger>, VmsError> {
@@ -668,6 +735,7 @@ impl PipelineRepo {
             .map_err(db_err)?
             .ok_or(VmsError::TriggerNotFound(trigger_id))?;
 
+        let pipeline_id = existing.pipeline_id;
         let existing_type = trigger_type_from_db(&existing.trigger_type);
         let existing_config = serde_json::from_value::<TriggerConfig>(existing.config.clone())
             .map_err(|e| VmsError::Serialization(format!("trigger {trigger_id}: config: {e}")))?;
@@ -709,7 +777,9 @@ impl PipelineRepo {
         }
 
         let updated = active.update(&self.db).await.map_err(db_err)?;
-        trigger_from_db(updated)
+        let updated = trigger_from_db(updated)?;
+        self.recompute_refs(pipeline_id).await?;
+        Ok(updated)
     }
 
     pub async fn delete_trigger(&self, trigger_id: Uuid) -> Result<(), VmsError> {
@@ -718,8 +788,9 @@ impl PipelineRepo {
             .await
             .map_err(db_err)?
             .ok_or(VmsError::TriggerNotFound(trigger_id))?;
+        let pipeline_id = trigger.pipeline_id;
         trigger.delete(&self.db).await.map_err(db_err)?;
-        Ok(())
+        self.recompute_refs(pipeline_id).await
     }
 }
 
@@ -767,6 +838,103 @@ fn action_type_from_config(cfg: &ActionConfig) -> pipeline_node::ActionType {
         ActionConfig::SetStreamQuality(_) => Db::SetStreamQuality,
         ActionConfig::TriggerAlarmOutput(_) => Db::TriggerAlarmOutput,
     }
+}
+
+/// The camera an action config explicitly targets, for the six action types
+/// that carry a `camera_id: Option<Uuid>` field. Every other action type
+/// operates on an upstream artifact or has no camera concept at all (e.g.
+/// `trigger_alarm_output` addresses a relay by `output_id`, not a camera).
+/// Written as an exhaustive match rather than a wildcard fallback so adding
+/// a camera-scoped variant later forces a decision here instead of silently
+/// defaulting to "no camera".
+fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid> {
+    match config {
+        ActionConfig::ExtractClip(c) => c.camera_id,
+        ActionConfig::Snapshot(c) => c.camera_id,
+        ActionConfig::PtzMove(c) => c.camera_id,
+        ActionConfig::StartRecording(c) => c.camera_id,
+        ActionConfig::StopRecording(c) => c.camera_id,
+        ActionConfig::SetStreamQuality(c) => c.camera_id,
+        ActionConfig::Transcode(_)
+        | ActionConfig::MergeClips(_)
+        | ActionConfig::Compress(_)
+        | ActionConfig::Encrypt(_)
+        | ActionConfig::Watermark(_)
+        | ActionConfig::RenderNotification(_)
+        | ActionConfig::Delay(_)
+        | ActionConfig::TriggerAlarmOutput(_) => None,
+    }
+}
+
+/// Which cameras a pipeline's nodes/triggers reference, and what each one
+/// needs. `needs_ring_buffer` is set by an `extract_clip` node.
+/// `needs_analytics` has no producer yet — no action or trigger type reads
+/// detections until steps 9-13/9-14 land — so it's always `false` for now;
+/// this function is the one place that will need a new match arm when they
+/// do.
+///
+/// A camera is referenced by (a) any *enabled* trigger's resolved
+/// `camera_id`, or (b) any node whose action config carries an explicit
+/// `camera_id` (`camera_id_from_action_config`). For the camera-scoped
+/// action types, `None` means "inherit from the `TriggerContext` at
+/// runtime" (see each config's own doc comment in `vms-core::action`) — in
+/// that case the camera is only statically resolvable if the pipeline also
+/// has at least one camera-scoped enabled trigger, in which case the
+/// node's requirements are applied to *every* such trigger's camera
+/// (over-provisioning a ring buffer on a candidate camera is far cheaper
+/// than silently missing pre-event footage on the real one). If no
+/// trigger resolves a camera either, that node's requirement can't be
+/// placed anywhere and is dropped — a pipeline that only fires from
+/// `Manual`/`Schedule`/unscoped `Event` triggers has no statically knowable
+/// camera for an implicit-camera node until the moment it actually fires.
+fn derive_camera_refs(
+    nodes: &[PipelineNode],
+    triggers: &[PipelineTrigger],
+) -> Vec<PipelineCameraRef> {
+    let trigger_cameras: HashSet<Uuid> = triggers
+        .iter()
+        .filter(|t| t.enabled)
+        .filter_map(|t| t.camera_id)
+        .collect();
+
+    let mut refs: HashMap<Uuid, (bool, bool)> = HashMap::new();
+    for &camera_id in &trigger_cameras {
+        refs.entry(camera_id).or_insert((false, false));
+    }
+
+    for node in nodes {
+        let Some(action_config) = &node.action_config else {
+            continue;
+        };
+        let needs_ring_buffer = matches!(action_config, ActionConfig::ExtractClip(_));
+        let needs_analytics = false; // no analytics action/trigger type exists yet
+
+        match camera_id_from_action_config(action_config) {
+            Some(camera_id) => {
+                let entry = refs.entry(camera_id).or_insert((false, false));
+                entry.0 |= needs_ring_buffer;
+                entry.1 |= needs_analytics;
+            }
+            None if needs_ring_buffer || needs_analytics => {
+                for &camera_id in &trigger_cameras {
+                    let entry = refs.entry(camera_id).or_insert((false, false));
+                    entry.0 |= needs_ring_buffer;
+                    entry.1 |= needs_analytics;
+                }
+            }
+            None => {}
+        }
+    }
+
+    refs.into_iter()
+        .map(
+            |(camera_id, (needs_ring_buffer, needs_analytics))| PipelineCameraRef {
+                camera_id,
+                needs_ring_buffer,
+                needs_analytics,
+            },
+        )
+        .collect()
 }
 
 /// Serialize whichever of `action_config`/`transport_config`/`condition_expr`
@@ -1627,5 +1795,153 @@ mod tests {
             trigger_type_from_db(&trigger_type_to_db(&CoreTriggerType::Stat)),
             CoreTriggerType::Stat
         );
+    }
+
+    // -- derive_camera_refs / camera_id_from_action_config --
+
+    fn action_node(action_config: ActionConfig) -> PipelineNode {
+        PipelineNode {
+            action_config: Some(action_config),
+            ..node_of_type(CoreNodeType::Action)
+        }
+    }
+
+    fn trigger_row(
+        config: TriggerConfig,
+        source_id: Option<Uuid>,
+        camera_id: Option<Uuid>,
+        enabled: bool,
+    ) -> PipelineTrigger {
+        PipelineTrigger {
+            id: Uuid::new_v4(),
+            pipeline_id: Uuid::new_v4(),
+            trigger_type: trigger_type_from_config(&config),
+            source_id,
+            camera_id,
+            config,
+            enabled,
+        }
+    }
+
+    fn extract_clip_config(camera_id: Option<Uuid>) -> ActionConfig {
+        ActionConfig::ExtractClip(vms_core::action::ExtractClipConfig {
+            pre_event_secs: 5,
+            post_event_secs: 5,
+            format: "mp4".into(),
+            camera_id,
+            use_manual_range: false,
+        })
+    }
+
+    fn ptz_move_config(camera_id: Option<Uuid>) -> ActionConfig {
+        ActionConfig::PtzMove(vms_core::action::PtzMoveConfig {
+            camera_id,
+            command: vms_core::action::PtzCommand::Preset { preset_id: 1 },
+        })
+    }
+
+    #[test]
+    fn camera_id_from_action_config_reads_the_six_camera_scoped_variants() {
+        let cam = Uuid::new_v4();
+        assert_eq!(
+            camera_id_from_action_config(&extract_clip_config(Some(cam))),
+            Some(cam)
+        );
+        assert_eq!(
+            camera_id_from_action_config(&ptz_move_config(Some(cam))),
+            Some(cam)
+        );
+    }
+
+    #[test]
+    fn camera_id_from_action_config_returns_none_for_artifact_only_actions() {
+        assert_eq!(camera_id_from_action_config(&delay_config()), None);
+    }
+
+    #[test]
+    fn extract_clip_with_explicit_camera_sets_needs_ring_buffer() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![action_node(extract_clip_config(Some(cam)))];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].camera_id, cam);
+        assert!(refs[0].needs_ring_buffer);
+        assert!(!refs[0].needs_analytics);
+    }
+
+    #[test]
+    fn ptz_move_with_explicit_camera_creates_a_bare_ref() {
+        // No ring buffer needed, but the camera's pipeline still needs to
+        // be running for the PTZ command to have somewhere to go.
+        let cam = Uuid::new_v4();
+        let nodes = vec![action_node(ptz_move_config(Some(cam)))];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].camera_id, cam);
+        assert!(!refs[0].needs_ring_buffer);
+    }
+
+    #[test]
+    fn implicit_camera_extract_clip_inherits_from_a_scoped_trigger() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![action_node(extract_clip_config(None))];
+        let triggers = vec![trigger_row(system_config(Some(cam)), None, Some(cam), true)];
+
+        let refs = derive_camera_refs(&nodes, &triggers);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].camera_id, cam);
+        assert!(refs[0].needs_ring_buffer);
+    }
+
+    #[test]
+    fn implicit_camera_extract_clip_with_no_scoped_trigger_is_dropped() {
+        // Nothing statically identifies which camera this would run
+        // against — a Manual/Schedule-only pipeline, or an unscoped Event
+        // trigger, can't resolve it until the moment it actually fires.
+        let nodes = vec![action_node(extract_clip_config(None))];
+        let triggers = vec![trigger_row(schedule_config(), None, None, true)];
+
+        let refs = derive_camera_refs(&nodes, &triggers);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn disabled_trigger_camera_is_not_referenced() {
+        let cam = Uuid::new_v4();
+        let triggers = vec![trigger_row(
+            system_config(Some(cam)),
+            None,
+            Some(cam),
+            false,
+        )];
+        let refs = derive_camera_refs(&[], &triggers);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn trigger_only_reference_gets_a_bare_ref_row() {
+        let cam = Uuid::new_v4();
+        let triggers = vec![trigger_row(system_config(Some(cam)), None, Some(cam), true)];
+        let refs = derive_camera_refs(&[], &triggers);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].camera_id, cam);
+        assert!(!refs[0].needs_ring_buffer);
+        assert!(!refs[0].needs_analytics);
+    }
+
+    #[test]
+    fn needs_ring_buffer_ors_across_multiple_nodes_on_the_same_camera() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![
+            action_node(ptz_move_config(Some(cam))),
+            action_node(extract_clip_config(Some(cam))),
+        ];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].needs_ring_buffer);
     }
 }
