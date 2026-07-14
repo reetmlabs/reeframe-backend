@@ -277,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
     // -- HTTP API --
     let trigger_evaluator_shutdown = trigger_evaluator.clone();
     let state = AppState {
+        db: db.clone(),
         camera_repo,
         source_repo,
         dest_repo,

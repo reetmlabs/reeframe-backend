@@ -33,7 +33,11 @@ use crate::{middleware::AuthMiddleware, state::AppState};
 /// endpoints whose entire purpose is obtaining or refreshing a token.
 fn public_routes() -> Router {
     Router::new()
-        .push(Router::with_path("health").get(health::health))
+        .push(
+            Router::with_path("health")
+                .get(health::health)
+                .push(Router::with_path("ready").get(health::ready)),
+        )
         .push(
             Router::with_path("webhooks")
                 .push(Router::with_path("{id}").post(webhooks::receive_webhook)),

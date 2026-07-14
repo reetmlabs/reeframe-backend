@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use sea_orm::DatabaseConnection;
 use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DestinationRepo, PipelineRepo,
     PipelineRunRepo, SourceRepo, UserRepo,
@@ -16,6 +17,10 @@ use crate::auth::LocalJwtAuthProvider;
 /// `Arc` (MediaManager, EventBus, PipelineRegistry) so cloning is cheap.
 #[derive(Clone)]
 pub struct AppState {
+    /// Raw connection, used only by the readiness probe (`GET /health/ready`) to
+    /// check liveness and pending-migration status directly. Every other handler
+    /// goes through a repo instead.
+    pub db: DatabaseConnection,
     pub camera_repo: CameraRepo,
     pub source_repo: SourceRepo,
     pub dest_repo: DestinationRepo,
