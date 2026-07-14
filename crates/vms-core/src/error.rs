@@ -56,6 +56,11 @@ pub enum VmsError {
     #[error("edge {0} not found")]
     EdgeNotFound(Uuid),
 
+    /// A pipeline trigger with the given ID does not exist, or does not
+    /// belong to the pipeline it was requested under.
+    #[error("trigger {0} not found")]
+    TriggerNotFound(Uuid),
+
     /// A transport destination (S3 bucket, SMTP relay, webhook, …) was not found.
     #[error("destination {0} not found")]
     DestinationNotFound(Uuid),

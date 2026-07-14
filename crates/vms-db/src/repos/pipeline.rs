@@ -15,7 +15,8 @@ use vms_core::{
 };
 
 use crate::entities::{
-    pipeline_camera_ref, pipeline_edge, pipeline_node, pipeline_source_ref, pipeline_trigger,
+    camera, contact_list, destination, pipeline_camera_ref, pipeline_edge, pipeline_node,
+    pipeline_source_ref, pipeline_trigger, source,
 };
 
 use super::{db_err, now};
@@ -72,6 +73,23 @@ pub struct CreateEdge {
 /// and recreate it, same rationale as `UpdateNode` for `node_type`.
 pub struct UpdateEdge {
     pub edge_type: CoreEdgeType,
+}
+
+pub struct CreateTrigger {
+    pub config: TriggerConfig,
+    pub source_id: Option<Uuid>,
+    pub camera_id: Option<Uuid>,
+    pub enabled: bool,
+}
+
+/// `config`, if supplied, must be the same `TriggerConfig` variant the
+/// trigger already has — changing trigger type is a delete + recreate, same
+/// rationale as `UpdateNode`'s immutable `node_type`.
+pub struct UpdateTrigger {
+    pub config: Option<TriggerConfig>,
+    pub source_id: Option<Option<Uuid>>,
+    pub camera_id: Option<Option<Uuid>>,
+    pub enabled: Option<bool>,
 }
 
 // -- Repository --
@@ -263,6 +281,12 @@ impl PipelineRepo {
             input.destination_id,
             &input.condition_expr,
         )?;
+        if let Some(dest_id) = input.destination_id {
+            self.require_destination_exists(dest_id).await?;
+        }
+        if let Some(cl_id) = input.contact_list_id {
+            self.require_contact_list_exists(cl_id).await?;
+        }
 
         if input.node_type == CoreNodeType::TriggerRoot {
             let existing_roots = pipeline_node::Entity::find()
@@ -339,6 +363,12 @@ impl PipelineRepo {
             &input.transport_config,
             &input.condition_expr,
         )?;
+        if let Some(Some(dest_id)) = input.destination_id {
+            self.require_destination_exists(dest_id).await?;
+        }
+        if let Some(Some(cl_id)) = input.contact_list_id {
+            self.require_contact_list_exists(cl_id).await?;
+        }
 
         let mut active: pipeline_node::ActiveModel = existing.into();
 
@@ -522,6 +552,174 @@ impl PipelineRepo {
             .await?
             .filter(|n| n.pipeline_id == pipeline_id)
             .ok_or(VmsError::NodeNotFound(node_id))
+    }
+
+    // -- Cross-entity FK existence checks --
+    //
+    // `pipeline_nodes.destination_id`/`contact_list_id` and
+    // `pipeline_triggers.source_id`/`camera_id` are all `ON DELETE
+    // RESTRICT` foreign keys, so an unknown id isn't silently accepted —
+    // but without a check here it surfaces as a raw "FOREIGN KEY
+    // constraint failed" `VmsError::Database` (a `500`), not the clean
+    // `404`-mapped not-found error every other cross-entity reference in
+    // this file returns. Caught live while verifying step 9-7's trigger
+    // `source_id`/`camera_id`; fixed here for nodes' `destination_id`/
+    // `contact_list_id` too since it's the exact same bug shape.
+
+    async fn require_destination_exists(&self, destination_id: Uuid) -> Result<(), VmsError> {
+        destination::Entity::find_by_id(destination_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .map(|_| ())
+            .ok_or(VmsError::DestinationNotFound(destination_id))
+    }
+
+    async fn require_contact_list_exists(&self, contact_list_id: Uuid) -> Result<(), VmsError> {
+        contact_list::Entity::find_by_id(contact_list_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .map(|_| ())
+            .ok_or_else(|| VmsError::NotFound(format!("contact list {contact_list_id} not found")))
+    }
+
+    async fn require_source_exists(&self, source_id: Uuid) -> Result<(), VmsError> {
+        source::Entity::find_by_id(source_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .map(|_| ())
+            .ok_or(VmsError::SourceNotFound(source_id))
+    }
+
+    async fn require_camera_exists(&self, camera_id: Uuid) -> Result<(), VmsError> {
+        camera::Entity::find_by_id(camera_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .map(|_| ())
+            .ok_or(VmsError::CameraNotFound(camera_id))
+    }
+
+    // -- Trigger CRUD --
+
+    /// Create a trigger. `config`'s own serde tag determines the stored
+    /// `trigger_type`; `source_id`/`camera_id` are validated against it by
+    /// `validate_trigger_shape`, and the stored `camera_id` is re-derived
+    /// from `config` for `System` triggers by `effective_camera_id`.
+    pub async fn create_trigger(
+        &self,
+        pipeline_id: Uuid,
+        input: CreateTrigger,
+    ) -> Result<PipelineTrigger, VmsError> {
+        validate_trigger_shape(&input.config, input.source_id, input.camera_id)?;
+        if let Some(src_id) = input.source_id {
+            self.require_source_exists(src_id).await?;
+        }
+        let camera_id = effective_camera_id(&input.config, input.camera_id);
+        if let Some(cam_id) = camera_id {
+            self.require_camera_exists(cam_id).await?;
+        }
+        let trigger_type = trigger_type_from_config(&input.config);
+
+        let model = pipeline_trigger::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            pipeline_id: Set(pipeline_id),
+            trigger_type: Set(trigger_type_to_db(&trigger_type)),
+            source_id: Set(input.source_id),
+            camera_id: Set(camera_id),
+            config: Set(serde_json::to_value(&input.config)?),
+            enabled: Set(input.enabled),
+            created_at: Set(now()),
+        }
+        .insert(&self.db)
+        .await
+        .map_err(db_err)?;
+
+        trigger_from_db(model)
+    }
+
+    pub async fn get_trigger(&self, trigger_id: Uuid) -> Result<Option<PipelineTrigger>, VmsError> {
+        let Some(m) = pipeline_trigger::Entity::find_by_id(trigger_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+        else {
+            return Ok(None);
+        };
+        trigger_from_db(m).map(Some)
+    }
+
+    /// Partial update. `config` cannot change trigger type (see
+    /// [`UpdateTrigger`]'s doc comment). Re-validates the combination of
+    /// whichever fields are being changed against whichever are staying the
+    /// same — e.g. changing just `camera_id` on an existing `Event` trigger
+    /// still needs to be checked against that trigger's existing
+    /// `source_id`, not just the field actually being edited.
+    pub async fn update_trigger(
+        &self,
+        trigger_id: Uuid,
+        input: UpdateTrigger,
+    ) -> Result<PipelineTrigger, VmsError> {
+        let existing = pipeline_trigger::Entity::find_by_id(trigger_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .ok_or(VmsError::TriggerNotFound(trigger_id))?;
+
+        let existing_type = trigger_type_from_db(&existing.trigger_type);
+        let existing_config = serde_json::from_value::<TriggerConfig>(existing.config.clone())
+            .map_err(|e| VmsError::Serialization(format!("trigger {trigger_id}: config: {e}")))?;
+
+        let effective_config = input.config.clone().unwrap_or(existing_config);
+        if trigger_type_from_config(&effective_config) != existing_type {
+            return Err(VmsError::DagValidation(format!(
+                "cannot change trigger type from {} to {} — delete and recreate instead",
+                existing_type.as_str(),
+                trigger_type_from_config(&effective_config).as_str()
+            )));
+        }
+
+        let effective_source_id = input.source_id.unwrap_or(existing.source_id);
+        let effective_camera_id_input = input.camera_id.unwrap_or(existing.camera_id);
+        validate_trigger_shape(
+            &effective_config,
+            effective_source_id,
+            effective_camera_id_input,
+        )?;
+        if let Some(src_id) = effective_source_id {
+            self.require_source_exists(src_id).await?;
+        }
+        let derived_camera_id = effective_camera_id(&effective_config, effective_camera_id_input);
+        if let Some(cam_id) = derived_camera_id {
+            self.require_camera_exists(cam_id).await?;
+        }
+
+        let mut active: pipeline_trigger::ActiveModel = existing.into();
+        if let Some(cfg) = &input.config {
+            active.config = Set(serde_json::to_value(cfg)?);
+        }
+        if let Some(v) = input.source_id {
+            active.source_id = Set(v);
+        }
+        active.camera_id = Set(derived_camera_id);
+        if let Some(v) = input.enabled {
+            active.enabled = Set(v);
+        }
+
+        let updated = active.update(&self.db).await.map_err(db_err)?;
+        trigger_from_db(updated)
+    }
+
+    pub async fn delete_trigger(&self, trigger_id: Uuid) -> Result<(), VmsError> {
+        let trigger = pipeline_trigger::Entity::find_by_id(trigger_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .ok_or(VmsError::TriggerNotFound(trigger_id))?;
+        trigger.delete(&self.db).await.map_err(db_err)?;
+        Ok(())
     }
 }
 
@@ -857,16 +1055,132 @@ fn validate_new_edge(
     Ok(())
 }
 
-fn trigger_from_db(m: pipeline_trigger::Model) -> Result<PipelineTrigger, VmsError> {
+fn trigger_type_from_db(db_type: &pipeline_trigger::TriggerType) -> CoreTriggerType {
     use pipeline_trigger::TriggerType as Db;
-
-    let trigger_type = match m.trigger_type {
+    match db_type {
         Db::Schedule => CoreTriggerType::Schedule,
         Db::Event => CoreTriggerType::Event,
         Db::System => CoreTriggerType::System,
         Db::Manual => CoreTriggerType::Manual,
         Db::Stat => CoreTriggerType::Stat,
-    };
+    }
+}
+
+fn trigger_type_to_db(core_type: &CoreTriggerType) -> pipeline_trigger::TriggerType {
+    use pipeline_trigger::TriggerType as Db;
+    match core_type {
+        CoreTriggerType::Schedule => Db::Schedule,
+        CoreTriggerType::Event => Db::Event,
+        CoreTriggerType::System => Db::System,
+        CoreTriggerType::Manual => Db::Manual,
+        CoreTriggerType::Stat => Db::Stat,
+    }
+}
+
+/// The `trigger_type` a given `TriggerConfig` implies — `PipelineTrigger`
+/// and the `pipeline_triggers.trigger_type` column both carry this as a
+/// separate field from `config` even though `config`'s own serde tag
+/// already encodes it, mirroring how `pipeline_nodes.action_type` mirrors
+/// `ActionConfig`'s tag (kept for querying without deserializing `config`).
+fn trigger_type_from_config(config: &TriggerConfig) -> CoreTriggerType {
+    match config {
+        TriggerConfig::Schedule { .. } => CoreTriggerType::Schedule,
+        TriggerConfig::Event { .. } => CoreTriggerType::Event,
+        TriggerConfig::System { .. } => CoreTriggerType::System,
+        TriggerConfig::Manual { .. } => CoreTriggerType::Manual,
+        TriggerConfig::Stat { .. } => CoreTriggerType::Stat,
+    }
+}
+
+/// The top-level `camera_id` column to store for a given config + the
+/// caller-supplied top-level `camera_id`.
+///
+/// For `System` triggers this is *always* derived from
+/// `TriggerConfig::System::camera_id`, never from the caller's top-level
+/// value (rejected earlier by `validate_trigger_shape`) — `evaluate_event`
+/// (`vms-engine`) reads the config's own `camera_id` for `System` triggers,
+/// not the top-level column, so the two must never be able to diverge. For
+/// every other trigger type the top-level value passes through unchanged.
+fn effective_camera_id(config: &TriggerConfig, camera_id: Option<Uuid>) -> Option<Uuid> {
+    match config {
+        TriggerConfig::System {
+            camera_id: cfg_camera_id,
+            ..
+        } => *cfg_camera_id,
+        _ => camera_id,
+    }
+}
+
+/// Rejects `source_id`/`camera_id` combinations that `vms-engine`'s
+/// `TriggerEvaluator` can't act on correctly for `config`'s trigger type:
+///
+/// - `Schedule`/`Manual` triggers never look at either field — reject both.
+/// - `Event` triggers reject having *both* set: `start_event_listener`
+///   subscribes to the source topic if `source_id` is set, the camera topic
+///   only as a fallback when it isn't — so a `camera_id` alongside a
+///   `source_id` would silently never be checked at subscription time, then
+///   never match at evaluation time (an event arriving on a source topic
+///   has no `camera_id`), making the trigger permanently unreachable. Both
+///   unset is valid — it broadens the subscription to every resource the
+///   pipeline touches.
+/// - `System` triggers scope to a camera via `config`'s own field, not the
+///   top-level one (see `effective_camera_id`) — reject a directly supplied
+///   top-level `camera_id` so there's exactly one place to set it. Reject
+///   `source_id` outright; System triggers always listen on the global
+///   `TopicKey::System`.
+/// - `Stat` triggers have no `source_id` concept; `camera_id` is the *only*
+///   way to scope a per-feed metric (`FeedBitrateKbps`/`FeedPacketLossPercent`),
+///   so it's accepted freely.
+fn validate_trigger_shape(
+    config: &TriggerConfig,
+    source_id: Option<Uuid>,
+    camera_id: Option<Uuid>,
+) -> Result<(), VmsError> {
+    match config {
+        TriggerConfig::Schedule { .. } | TriggerConfig::Manual { .. } => {
+            if source_id.is_some() || camera_id.is_some() {
+                return Err(VmsError::DagValidation(format!(
+                    "{} trigger must not set source_id or camera_id",
+                    trigger_type_from_config(config).as_str()
+                )));
+            }
+        }
+        TriggerConfig::Event { .. } => {
+            if source_id.is_some() && camera_id.is_some() {
+                return Err(VmsError::DagValidation(
+                    "event trigger cannot set both source_id and camera_id — only one \
+                     is ever used to subscribe, so the other would silently never match"
+                        .into(),
+                ));
+            }
+        }
+        TriggerConfig::System { .. } => {
+            if source_id.is_some() {
+                return Err(VmsError::DagValidation(
+                    "system trigger must not set source_id".into(),
+                ));
+            }
+            if camera_id.is_some() {
+                return Err(VmsError::DagValidation(
+                    "system trigger scopes to a camera via config.camera_id, \
+                     not the top-level camera_id field"
+                        .into(),
+                ));
+            }
+        }
+        TriggerConfig::Stat { .. } => {
+            if source_id.is_some() {
+                return Err(VmsError::DagValidation(
+                    "stat trigger must not set source_id".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn trigger_from_db(m: pipeline_trigger::Model) -> Result<PipelineTrigger, VmsError> {
+    let trigger_type = trigger_type_from_db(&m.trigger_type);
 
     let config = serde_json::from_value::<TriggerConfig>(m.config)
         .map_err(|e| VmsError::Serialization(format!("trigger {}: config: {e}", m.id)))?;
@@ -1174,5 +1488,144 @@ mod tests {
         let from = node_of_type(CoreNodeType::Action);
         let result = validate_new_edge(&from, &CoreEdgeType::Default, Uuid::new_v4(), &[]);
         assert!(result.is_ok());
+    }
+
+    // -- validate_trigger_shape / effective_camera_id --
+
+    fn schedule_config() -> TriggerConfig {
+        TriggerConfig::Schedule {
+            mode: vms_core::trigger::ScheduleMode::Interval { interval_secs: 60 },
+            timezone: "UTC".into(),
+        }
+    }
+
+    fn event_config() -> TriggerConfig {
+        TriggerConfig::Event {
+            filter: None,
+            duration_secs: None,
+        }
+    }
+
+    fn system_config(camera_id: Option<Uuid>) -> TriggerConfig {
+        TriggerConfig::System {
+            signal: vms_core::trigger::SystemSignal::FeedDisconnected,
+            camera_id,
+        }
+    }
+
+    fn stat_config() -> TriggerConfig {
+        TriggerConfig::Stat {
+            metric: vms_core::trigger::StatMetric::FeedBitrateKbps,
+            path: None,
+            operator: vms_core::trigger::CompareOperator::LessThan,
+            threshold: 100.0,
+            sustained_secs: 0,
+            cooldown_secs: 0,
+        }
+    }
+
+    #[test]
+    fn schedule_trigger_rejects_source_and_camera_id() {
+        let result = validate_trigger_shape(&schedule_config(), Some(Uuid::new_v4()), None);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn event_trigger_allows_neither_id_set() {
+        assert!(validate_trigger_shape(&event_config(), None, None).is_ok());
+    }
+
+    #[test]
+    fn event_trigger_allows_source_id_only() {
+        assert!(validate_trigger_shape(&event_config(), Some(Uuid::new_v4()), None).is_ok());
+    }
+
+    #[test]
+    fn event_trigger_allows_camera_id_only() {
+        assert!(validate_trigger_shape(&event_config(), None, Some(Uuid::new_v4())).is_ok());
+    }
+
+    #[test]
+    fn event_trigger_rejects_both_source_and_camera_id() {
+        let result =
+            validate_trigger_shape(&event_config(), Some(Uuid::new_v4()), Some(Uuid::new_v4()));
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn system_trigger_rejects_source_id() {
+        let result = validate_trigger_shape(&system_config(None), Some(Uuid::new_v4()), None);
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn system_trigger_rejects_top_level_camera_id() {
+        let result = validate_trigger_shape(&system_config(None), None, Some(Uuid::new_v4()));
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn system_trigger_with_only_config_camera_id_passes() {
+        assert!(validate_trigger_shape(&system_config(Some(Uuid::new_v4())), None, None).is_ok());
+    }
+
+    #[test]
+    fn stat_trigger_rejects_source_id_but_allows_camera_id() {
+        let rejected = validate_trigger_shape(&stat_config(), Some(Uuid::new_v4()), None);
+        assert!(matches!(rejected, Err(VmsError::DagValidation(_))));
+
+        let allowed = validate_trigger_shape(&stat_config(), None, Some(Uuid::new_v4()));
+        assert!(allowed.is_ok());
+    }
+
+    #[test]
+    fn effective_camera_id_derives_from_system_config_not_the_input() {
+        let cfg_cam = Uuid::new_v4();
+        let caller_supplied = Uuid::new_v4();
+        assert_eq!(
+            effective_camera_id(&system_config(Some(cfg_cam)), Some(caller_supplied)),
+            Some(cfg_cam)
+        );
+        assert_eq!(
+            effective_camera_id(&system_config(None), Some(caller_supplied)),
+            None
+        );
+    }
+
+    #[test]
+    fn effective_camera_id_passes_through_for_non_system_triggers() {
+        let caller_supplied = Uuid::new_v4();
+        assert_eq!(
+            effective_camera_id(&event_config(), Some(caller_supplied)),
+            Some(caller_supplied)
+        );
+    }
+
+    #[test]
+    fn trigger_type_from_config_matches_each_variant() {
+        assert_eq!(
+            trigger_type_from_config(&schedule_config()),
+            CoreTriggerType::Schedule
+        );
+        assert_eq!(
+            trigger_type_from_config(&event_config()),
+            CoreTriggerType::Event
+        );
+        assert_eq!(
+            trigger_type_from_config(&system_config(None)),
+            CoreTriggerType::System
+        );
+        assert_eq!(
+            trigger_type_from_config(&stat_config()),
+            CoreTriggerType::Stat
+        );
+    }
+
+    #[test]
+    fn trigger_type_round_trips_through_db_conversions() {
+        assert_eq!(
+            trigger_type_from_db(&trigger_type_to_db(&CoreTriggerType::Stat)),
+            CoreTriggerType::Stat
+        );
     }
 }

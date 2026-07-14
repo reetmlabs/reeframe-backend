@@ -42,6 +42,22 @@ pub enum TriggerType {
     Stat,
 }
 
+impl TriggerType {
+    /// Canonical snake_case string form — matches the `#[serde(rename_all =
+    /// "snake_case")]` wire representation, for use in error messages so
+    /// they read the same as the JSON a client actually sent (same
+    /// rationale as `NodeType::as_str()`/`EdgeType::as_str()`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TriggerType::Schedule => "schedule",
+            TriggerType::Event => "event",
+            TriggerType::System => "system",
+            TriggerType::Manual => "manual",
+            TriggerType::Stat => "stat",
+        }
+    }
+}
+
 // -- Schedule --
 
 /// Defines the cadence for a [`TriggerConfig::Schedule`] trigger.

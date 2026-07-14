@@ -4,6 +4,7 @@ mod destinations;
 mod health;
 mod pipeline_edges;
 mod pipeline_nodes;
+mod pipeline_triggers;
 mod pipelines;
 mod sources;
 mod users;
@@ -14,6 +15,7 @@ pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
 pub use pipeline_edges::{CreateEdgeBody, UpdateEdgeBody};
 pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
+pub use pipeline_triggers::{CreateTriggerBody, UpdateTriggerBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
 pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
@@ -135,6 +137,17 @@ fn protected_routes() -> Router {
                                         .get(pipeline_edges::get_edge)
                                         .patch(pipeline_edges::update_edge)
                                         .delete(pipeline_edges::delete_edge),
+                                ),
+                        )
+                        .push(
+                            Router::with_path("triggers")
+                                .get(pipeline_triggers::list_triggers)
+                                .post(pipeline_triggers::create_trigger)
+                                .push(
+                                    Router::with_path("{trigger_id}")
+                                        .get(pipeline_triggers::get_trigger)
+                                        .patch(pipeline_triggers::update_trigger)
+                                        .delete(pipeline_triggers::delete_trigger),
                                 ),
                         ),
                 ),

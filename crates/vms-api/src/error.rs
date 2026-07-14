@@ -67,6 +67,7 @@ impl From<VmsError> for ApiError {
             | VmsError::ApiKeyNotFound(_)
             | VmsError::NodeNotFound(_)
             | VmsError::EdgeNotFound(_)
+            | VmsError::TriggerNotFound(_)
             | VmsError::NotFound(_) => StatusCode::NOT_FOUND,
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
