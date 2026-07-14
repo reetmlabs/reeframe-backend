@@ -88,6 +88,14 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 prometheus         = { version = "0.14", default-features = false }
 
+# OTLP tracing/logs export (additive — only active when an
+# OTEL_EXPORTER_OTLP_*_ENDPOINT env var is set; see vms-daemon::main::init_tracing)
+opentelemetry                  = "0.32"
+opentelemetry_sdk              = "0.32"
+opentelemetry-otlp             = "0.32"
+opentelemetry-appender-tracing = "0.32"
+tracing-opentelemetry          = "0.33"
+
 # Config
 figment = { version = "0.10", features = ["toml", "env"] }
 

@@ -185,6 +185,7 @@ All settings have sane defaults. Override via environment variable or config fil
 | `VMS_MEDIA__CHUNK_DURATION_SECS` | `300` | Seconds per recording chunk |
 | `VMS_API__BIND` | `0.0.0.0:8080` | HTTP server bind address |
 | `RUST_LOG` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | If set, additionally exports traces and logs via OTLP (HTTP/protobuf) to this collector URL (e.g. `http://localhost:4318`). Unset by default — stderr JSON logging always runs regardless. |
 
 Config files (lowest → highest priority, all optional):
 
