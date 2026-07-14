@@ -4,6 +4,8 @@ use dashmap::DashMap;
 use tokio::sync::broadcast;
 use vms_core::event::{Event, TopicKey};
 
+use crate::metrics::Metrics;
+
 /// Capacity used when none is specified.
 pub const DEFAULT_CAPACITY: usize = 512;
 
@@ -19,6 +21,7 @@ pub const DEFAULT_CAPACITY: usize = 512;
 pub struct EventBus {
     channels: DashMap<TopicKey, broadcast::Sender<Event>>,
     capacity: usize,
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl EventBus {
@@ -32,6 +35,20 @@ impl EventBus {
         Arc::new(Self {
             channels: DashMap::new(),
             capacity,
+            metrics: None,
+        })
+    }
+
+    /// Same as [`new`](EventBus::new), but records every publish onto
+    /// `metrics` (`event_bus_published_total`, by topic kind). Kept as a
+    /// separate constructor rather than an added `new` parameter so the
+    /// existing dozen `EventBus::new(capacity)` test call sites across this
+    /// crate don't need to thread a `Metrics` handle through.
+    pub fn new_with_metrics(capacity: usize, metrics: Arc<Metrics>) -> Arc<Self> {
+        Arc::new(Self {
+            channels: DashMap::new(),
+            capacity,
+            metrics: Some(metrics),
         })
     }
 
@@ -70,12 +87,29 @@ impl EventBus {
         let result = sender.send(event);
         drop(sender); // release shard read lock before potential write below
         match result {
-            Ok(n) => tracing::trace!(topic = %key.topic_string(), receivers = n, "event published"),
+            Ok(n) => {
+                tracing::trace!(topic = %key.topic_string(), receivers = n, "event published");
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_event_published(topic_kind(key));
+                }
+            }
             Err(_) => {
                 self.channels.remove(key);
                 tracing::trace!(topic = %key.topic_string(), "event dropped — no active receivers, channel pruned");
             }
         }
+    }
+}
+
+/// Maps a [`TopicKey`] to its *kind* — a small fixed vocabulary safe to use
+/// as a Prometheus label, as opposed to [`TopicKey::topic_string`] which
+/// embeds a raw UUID for `Camera`/`Source` and would blow up cardinality.
+fn topic_kind(key: &TopicKey) -> &'static str {
+    match key {
+        TopicKey::Camera(_) => "camera",
+        TopicKey::Source(_) => "source",
+        TopicKey::System => "system",
+        TopicKey::Stat => "stat",
     }
 }
 

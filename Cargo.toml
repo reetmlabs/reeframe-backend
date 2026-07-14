@@ -24,7 +24,7 @@ tokio-util = "0.7"
 futures    = "0.3"
 
 # Web framework (Salvo replaces axum)
-salvo = { version = "0.91", features = ["anyhow", "affix-state", "jwt-auth", "cors"] }
+salvo = { version = "0.91", features = ["anyhow", "affix-state", "jwt-auth", "cors", "matched-path"] }
 
 # Database (SeaORM — SQLite, MySQL, PostgreSQL)
 sea-orm           = { version = "2.0.0-rc.37", features = [
@@ -86,6 +86,7 @@ color-eyre = "0.6"
 # Observability
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus         = { version = "0.14", default-features = false }
 
 # Config
 figment = { version = "0.10", features = ["toml", "env"] }

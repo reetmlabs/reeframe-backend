@@ -3820,6 +3820,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "prometheus"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ca5326d8d0b950a9acd87e6a3f94745394f62e4dae1b1ee22b2bc0c394af43a"
+dependencies = [
+ "cfg-if",
+ "fnv",
+ "lazy_static",
+ "memchr",
+ "parking_lot",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ptr_meta"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6328,6 +6342,7 @@ dependencies = [
  "chrono-tz",
  "dashmap",
  "evalexpr",
+ "prometheus",
  "sea-orm",
  "serde_json",
  "sysinfo",

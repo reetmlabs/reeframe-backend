@@ -17,8 +17,10 @@ use vms_db::{
     entities::{pipeline_run::RunStatus, run_node_result::NodeResultStatus},
     DestinationRepo, PipelineRunRepo,
 };
-use vms_transports::TransportDispatcher;
 use vms_media::{MediaManager, RingBufferManager};
+use vms_transports::TransportDispatcher;
+
+use crate::metrics::Metrics;
 
 // -- Executor --
 
@@ -50,6 +52,7 @@ pub struct PipelineExecutor {
     /// node starts and updated after every chunk.  The API layer can expose
     /// this via SSE or WebSocket for UI progress bars.
     progress_map: Arc<DashMap<ProgressKey, TransferProgress>>,
+    metrics: Arc<Metrics>,
 }
 
 impl PipelineExecutor {
@@ -60,6 +63,7 @@ impl PipelineExecutor {
         ring_buffer: Arc<RingBufferManager>,
         recording_dir: PathBuf,
         encryption_key: Option<[u8; 32]>,
+        metrics: Arc<Metrics>,
     ) -> Arc<Self> {
         Arc::new(Self {
             repo,
@@ -69,6 +73,7 @@ impl PipelineExecutor {
             recording_dir,
             encryption_key,
             progress_map: Arc::new(DashMap::new()),
+            metrics,
         })
     }
 
@@ -120,7 +125,15 @@ impl PipelineExecutor {
             camera_rtsp_urls,
         };
         let outcome = self
-            .walk_dag(&pipeline.dag, &ctx, run_id, &result_ids, &action_ctx, &self.dest_repo, &self.progress_map)
+            .walk_dag(
+                &pipeline.dag,
+                &ctx,
+                run_id,
+                &result_ids,
+                &action_ctx,
+                &self.dest_repo,
+                &self.progress_map,
+            )
             .await;
 
         // -- 4. Finalise run --
@@ -129,12 +142,14 @@ impl PipelineExecutor {
                 self.repo
                     .finish_run(run_id, RunStatus::Completed, None)
                     .await?;
+                self.metrics.record_pipeline_run("completed");
                 tracing::info!(%run_id, pipeline_id = %pipeline.id, "Pipeline run completed");
             }
             Err(e) => {
                 self.repo
                     .finish_run(run_id, RunStatus::Failed, Some(e.to_string()))
                     .await?;
+                self.metrics.record_pipeline_run("failed");
                 tracing::error!(
                     %run_id,
                     pipeline_id = %pipeline.id,
@@ -255,8 +270,7 @@ impl PipelineExecutor {
 
             let result_id = result_ids[&node_id];
             let node = &dag.nodes[&node_id];
-            let output_json =
-                serde_json::to_value(&node_output).unwrap_or(serde_json::Value::Null);
+            let output_json = serde_json::to_value(&node_output).unwrap_or(serde_json::Value::Null);
 
             if !node_output.success {
                 let error_msg = node_output
@@ -291,12 +305,7 @@ impl PipelineExecutor {
 
             // Save output -> DB row -> completed
             self.repo
-                .finish_node_result(
-                    result_id,
-                    NodeResultStatus::Completed,
-                    output_json,
-                    None,
-                )
+                .finish_node_result(result_id, NodeResultStatus::Completed, output_json, None)
                 .await?;
 
             for &child in &dag.adjacency[&node_id] {
@@ -387,7 +396,10 @@ pub(crate) async fn execute_node(
                 .first()
                 .cloned()
                 .unwrap_or_else(|| NodeOutput::success(node.id));
-            NodeOutput { node_id: node.id, ..base }
+            NodeOutput {
+                node_id: node.id,
+                ..base
+            }
         }
 
         NodeType::Action | NodeType::DeviceControl => {
@@ -600,8 +612,8 @@ mod tests {
     async fn fork_passes_through_parent_metadata() {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::Fork);
-        let parent = NodeOutput::success(Uuid::new_v4())
-            .with_metadata(serde_json::json!({"key": "value"}));
+        let parent =
+            NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"key": "value"}));
         let ctx = schedule_ctx(pid);
         let dr = dest_repo().await;
         let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;

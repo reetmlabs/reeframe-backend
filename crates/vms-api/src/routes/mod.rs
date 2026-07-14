@@ -4,6 +4,7 @@ mod contact_lists;
 mod contacts;
 mod destinations;
 mod health;
+mod metrics;
 mod pipeline_edges;
 mod pipeline_nodes;
 mod pipeline_triggers;
@@ -26,7 +27,10 @@ pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
 
 use salvo::prelude::*;
 
-use crate::{middleware::AuthMiddleware, state::AppState};
+use crate::{
+    middleware::{AuthMiddleware, MetricsMiddleware},
+    state::AppState,
+};
 
 /// Routes reachable without a valid access token: health, inbound webhooks
 /// (step 8-4 has its own accept/reject logic instead), and the three auth
@@ -38,6 +42,7 @@ fn public_routes() -> Router {
                 .get(health::health)
                 .push(Router::with_path("ready").get(health::ready)),
         )
+        .push(Router::with_path("metrics").get(metrics::scrape))
         .push(
             Router::with_path("webhooks")
                 .push(Router::with_path("{id}").post(webhooks::receive_webhook)),
@@ -195,6 +200,7 @@ fn protected_routes() -> Router {
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .hoop(MetricsMiddleware::new(state.metrics.clone()))
         .hoop(salvo::affix_state::inject(state))
         .push(public_routes())
         .push(protected_routes())

@@ -14,7 +14,8 @@ use vms_db::{
     PipelineRepo, PipelineRunRepo, SourceRepo, UserRepo,
 };
 use vms_engine::{
-    EventBus, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
+    EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor,
+    TriggerEvaluator,
 };
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 use vms_sources::SourceManager;
@@ -145,8 +146,11 @@ async fn main() -> anyhow::Result<()> {
     let ring_buffer_manager = RingBufferManager::new(media_manager.clone());
     tracing::info!("Ring buffer manager ready");
 
+    // -- Metrics --
+    let metrics = Metrics::new();
+
     // -- Event Bus --
-    let event_bus = EventBus::new(vms_engine::DEFAULT_CAPACITY);
+    let event_bus = EventBus::new_with_metrics(vms_engine::DEFAULT_CAPACITY, metrics.clone());
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
 
     // -- Source Manager --
@@ -246,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         ring_buffer_manager.clone(),
         cfg.media.recording_dir.clone(),
         Some(encryption_key),
+        metrics.clone(),
     );
     tracing::info!("Pipeline executor ready");
 
@@ -295,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
         resource_manager,
         trigger_evaluator,
         stat_monitor,
+        metrics,
     };
 
     let router = build_router(state);

@@ -5,7 +5,9 @@ use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DestinationRepo, PipelineRepo,
     PipelineRunRepo, SourceRepo, UserRepo,
 };
-use vms_engine::{EventBus, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator};
+use vms_engine::{
+    EventBus, Metrics, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
+};
 use vms_media::{MediaManager, RingBufferManager};
 
 use crate::auth::LocalJwtAuthProvider;
@@ -38,4 +40,5 @@ pub struct AppState {
     pub resource_manager: Arc<ResourceManager>,
     pub trigger_evaluator: Arc<TriggerEvaluator>,
     pub stat_monitor: Arc<StatMonitor>,
+    pub metrics: Arc<Metrics>,
 }

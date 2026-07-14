@@ -1,8 +1,11 @@
 //! Request-level middleware (Salvo hoops).
 
+use std::sync::Arc;
+
 use salvo::http::header::AUTHORIZATION;
 use salvo::prelude::*;
 use vms_core::{AuthClaims, AuthProvider, VmsError};
+use vms_engine::Metrics;
 
 use crate::{error::ApiError, state::AppState};
 
@@ -88,6 +91,48 @@ fn extract_bearer_token(req: &Request) -> Option<&str> {
 
 fn extract_api_key(req: &Request) -> Option<&str> {
     req.headers().get(API_KEY_HEADER)?.to_str().ok()
+}
+
+/// Records `http_requests_total{route, method, status}` for every request
+/// that matches a route. Holds its own `Arc<Metrics>` (passed in at
+/// construction, in `build_router`) rather than reading it from the
+/// `Depot`, so it works whether it's mounted before or after the
+/// `affix-state` hoop.
+///
+/// `req.matched_path()` (the `matched-path` Salvo feature) is already
+/// populated by the time any hoop runs — Salvo resolves routing before
+/// dispatching the hoop chain — so it's safe to read before *or* after
+/// `ctrl.call_next()`. The status code is not: it's only final once the
+/// downstream chain has actually run, so that read happens after.
+pub struct MetricsMiddleware {
+    metrics: Arc<Metrics>,
+}
+
+impl MetricsMiddleware {
+    pub fn new(metrics: Arc<Metrics>) -> Self {
+        Self { metrics }
+    }
+}
+
+#[async_trait]
+impl Handler for MetricsMiddleware {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        depot: &mut Depot,
+        res: &mut Response,
+        ctrl: &mut FlowCtrl,
+    ) {
+        let method = req.method().as_str().to_owned();
+
+        ctrl.call_next(req, depot, res).await;
+
+        // Unset means no handler explicitly set one — Salvo defaults that to
+        // 200 once every hoop has run, so mirror that here.
+        let status = res.status_code.unwrap_or(StatusCode::OK);
+        self.metrics
+            .record_http_request(req.matched_path(), &method, status.as_u16());
+    }
 }
 
 // -- Tests --

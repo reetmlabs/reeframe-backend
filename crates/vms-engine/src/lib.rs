@@ -2,6 +2,7 @@
 //              pipeline executor, resource manager, and stat monitor.
 
 pub mod event_bus;
+pub mod metrics;
 pub mod pipeline_executor;
 pub mod pipeline_registry;
 pub mod resource_manager;
@@ -10,6 +11,7 @@ pub mod time_helpers;
 pub mod trigger_evaluator;
 
 pub use event_bus::{EventBus, DEFAULT_CAPACITY};
+pub use metrics::Metrics;
 pub use pipeline_executor::PipelineExecutor;
 pub use pipeline_registry::PipelineRegistry;
 pub use resource_manager::ResourceManager;
