@@ -65,6 +65,14 @@ pub enum VmsError {
     #[error("destination {0} not found")]
     DestinationNotFound(Uuid),
 
+    /// A contact (notification recipient) with the given ID does not exist.
+    #[error("contact {0} not found")]
+    ContactNotFound(Uuid),
+
+    /// A contact list with the given ID does not exist.
+    #[error("contact list {0} not found")]
+    ContactListNotFound(Uuid),
+
     /// A structural rule was violated when compiling a pipeline DAG.
     ///
     /// The inner string describes the specific rule that failed (e.g. "pipeline

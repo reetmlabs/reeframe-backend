@@ -589,7 +589,7 @@ impl PipelineRepo {
             .await
             .map_err(db_err)?
             .map(|_| ())
-            .ok_or_else(|| VmsError::NotFound(format!("contact list {contact_list_id} not found")))
+            .ok_or(VmsError::ContactListNotFound(contact_list_id))
     }
 
     async fn require_source_exists(&self, source_id: Uuid) -> Result<(), VmsError> {

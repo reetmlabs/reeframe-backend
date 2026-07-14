@@ -68,6 +68,8 @@ impl From<VmsError> for ApiError {
             | VmsError::NodeNotFound(_)
             | VmsError::EdgeNotFound(_)
             | VmsError::TriggerNotFound(_)
+            | VmsError::ContactNotFound(_)
+            | VmsError::ContactListNotFound(_)
             | VmsError::NotFound(_) => StatusCode::NOT_FOUND,
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,

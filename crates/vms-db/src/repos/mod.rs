@@ -1,5 +1,7 @@
 pub mod api_key;
 pub mod camera;
+pub mod contact;
+pub mod contact_list;
 pub mod destination;
 pub mod pipeline;
 pub mod pipeline_run;
@@ -8,6 +10,8 @@ pub mod user;
 
 pub use api_key::ApiKeyRepo;
 pub use camera::CameraRepo;
+pub use contact::ContactRepo;
+pub use contact_list::ContactListRepo;
 pub use destination::DestinationRepo;
 pub use pipeline::PipelineRepo;
 pub use pipeline_run::PipelineRunRepo;

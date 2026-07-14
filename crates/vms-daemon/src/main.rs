@@ -10,8 +10,8 @@ use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, EnvFilter};
 use vms_api::{auth::LocalJwtAuthProvider, routes::build_router, state::AppState};
 use vms_db::{
-    ApiKeyRepo, CameraRepo, Crypto, DestinationRepo, Migrator, PipelineRepo, PipelineRunRepo,
-    SourceRepo, UserRepo,
+    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, Migrator,
+    PipelineRepo, PipelineRunRepo, SourceRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
@@ -118,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
     let camera_repo = CameraRepo::new(db.clone(), crypto.clone());
     let source_repo = SourceRepo::new(db.clone(), crypto.clone());
     let dest_repo = DestinationRepo::new(db.clone(), crypto);
+    let contact_repo = ContactRepo::new(db.clone());
+    let contact_list_repo = ContactListRepo::new(db.clone());
     let pipeline_repo = PipelineRepo::new(db.clone());
     let pipeline_run_repo = PipelineRunRepo::new(db.clone());
     let user_repo = UserRepo::new(db.clone());
@@ -278,6 +280,8 @@ async fn main() -> anyhow::Result<()> {
         camera_repo,
         source_repo,
         dest_repo,
+        contact_repo,
+        contact_list_repo,
         pipeline_repo,
         pipeline_run_repo,
         user_repo,

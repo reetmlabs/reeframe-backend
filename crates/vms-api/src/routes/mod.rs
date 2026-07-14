@@ -1,5 +1,7 @@
 mod auth;
 mod cameras;
+mod contact_lists;
+mod contacts;
 mod destinations;
 mod health;
 mod pipeline_edges;
@@ -12,6 +14,8 @@ mod webhooks;
 
 pub use auth::{AccessTokenResponse, AuthResponse, LoginBody, RefreshBody, SetupBody, UserDto};
 pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
+pub use contact_lists::{ContactListDto, CreateContactListBody, UpdateContactListBody};
+pub use contacts::{ContactDto, CreateContactBody, UpdateContactBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
 pub use pipeline_edges::{CreateEdgeBody, UpdateEdgeBody};
 pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
@@ -98,6 +102,37 @@ fn protected_routes() -> Router {
                         .get(destinations::get_destination)
                         .patch(destinations::update_destination)
                         .delete(destinations::delete_destination),
+                ),
+        )
+        .push(
+            Router::with_path("contacts")
+                .get(contacts::list_contacts)
+                .post(contacts::create_contact)
+                .push(
+                    Router::with_path("{id}")
+                        .get(contacts::get_contact)
+                        .patch(contacts::update_contact)
+                        .delete(contacts::delete_contact),
+                ),
+        )
+        .push(
+            Router::with_path("contact-lists")
+                .get(contact_lists::list_contact_lists)
+                .post(contact_lists::create_contact_list)
+                .push(
+                    Router::with_path("{id}")
+                        .get(contact_lists::get_contact_list)
+                        .patch(contact_lists::update_contact_list)
+                        .delete(contact_lists::delete_contact_list)
+                        .push(
+                            Router::with_path("members")
+                                .get(contact_lists::list_members)
+                                .push(
+                                    Router::with_path("{contact_id}")
+                                        .post(contact_lists::add_member)
+                                        .delete(contact_lists::remove_member),
+                                ),
+                        ),
                 ),
         )
         .push(
