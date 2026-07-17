@@ -125,13 +125,22 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Repository layer ready");
 
     // -- Media Manager --
+    // `media_event_tx` is created up front because both `vms-media` (motion/
+    // scene-change/tamper detection) and `vms-sources` adapters publish onto
+    // the same channel; the bridge task below forwards each onto the Event
+    // Bus by whichever ID it carries, keeping both crates free of a
+    // vms-engine dependency.
     tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
+    let (media_event_tx, mut media_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let media_manager = Arc::new(
-        MediaManager::new(MediaConfig {
-            recording_dir: cfg.media.recording_dir.clone(),
-            chunk_duration_secs: cfg.media.chunk_duration_secs,
-            rtsp_bind: cfg.rtsp.bind.clone(),
-        })
+        MediaManager::new(
+            MediaConfig {
+                recording_dir: cfg.media.recording_dir.clone(),
+                chunk_duration_secs: cfg.media.chunk_duration_secs,
+                rtsp_bind: cfg.rtsp.bind.clone(),
+            },
+            media_event_tx.clone(),
+        )
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to initialise media manager");
             anyhow::anyhow!(e)
@@ -151,17 +160,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
 
     // -- Source Manager --
-    // Adapters publish onto `source_event_tx`; this task forwards each event
-    // onto the Event Bus, keeping vms-sources free of a vms-engine dependency.
-    let (source_event_tx, mut source_event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let source_manager = SourceManager::new(source_event_tx);
-    let source_event_bus = event_bus.clone();
+    let source_manager = SourceManager::new(media_event_tx);
+    let bridge_event_bus = event_bus.clone();
     tokio::spawn(async move {
-        while let Some(event) = source_event_rx.recv().await {
-            let Some(source_id) = event.source_id else {
+        while let Some(event) = media_event_rx.recv().await {
+            let topic = if let Some(source_id) = event.source_id {
+                vms_core::TopicKey::Source(source_id)
+            } else if let Some(camera_id) = event.camera_id {
+                vms_core::TopicKey::Camera(camera_id)
+            } else {
                 continue;
             };
-            source_event_bus.publish(&vms_core::TopicKey::Source(source_id), event);
+            bridge_event_bus.publish(&topic, event);
         }
     });
     tracing::info!("Source manager ready");

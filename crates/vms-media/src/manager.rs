@@ -6,10 +6,13 @@ use std::{
 
 use gstreamer::prelude::*;
 
+use tokio::sync::mpsc;
 use uuid::Uuid;
+use vms_core::event::Event;
 use vms_core::VmsError;
 
 use crate::camera_stream::{build_camera_stream, spawn_monitor};
+use crate::motion_branch::{self, MotionHandle};
 use crate::relay::RelayServer;
 use crate::ring_buffer::RingBuffer;
 use crate::ring_buffer_branch;
@@ -63,13 +66,25 @@ pub struct MediaManager {
     config: MediaConfig,
     cameras: Mutex<HashMap<Uuid, CameraHandle>>,
     relay: Arc<RelayServer>,
+    /// Sender used to publish `Event`s (motion, scene-change, tamper,
+    /// signal-loss) produced by [`motion_branch`] onto the daemon's
+    /// event-bus bridge — see [`start_motion_detection`](Self::start_motion_detection).
+    event_tx: mpsc::UnboundedSender<Event>,
+    motion: Mutex<HashMap<Uuid, MotionHandle>>,
 }
 
 impl MediaManager {
     /// Create a new `MediaManager` and initialise GStreamer.
     ///
     /// `gstreamer::init()` is idempotent — safe to call multiple times.
-    pub fn new(config: MediaConfig) -> Result<Self, VmsError> {
+    ///
+    /// `event_tx` is where motion/scene-change/tamper events get sent —
+    /// the same channel `vms-sources` adapters publish onto, bridged to the
+    /// `EventBus` in `main.rs`. Keeps this crate free of a `vms-engine` dependency.
+    pub fn new(
+        config: MediaConfig,
+        event_tx: mpsc::UnboundedSender<Event>,
+    ) -> Result<Self, VmsError> {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
         let relay = Arc::new(RelayServer::new(&config.rtsp_bind)?);
@@ -77,11 +92,31 @@ impl MediaManager {
             config,
             cameras: Mutex::new(HashMap::new()),
             relay,
+            event_tx,
+            motion: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Start continuous recording for a camera. No-op if already running.
-    pub async fn start_camera(&self, camera_id: Uuid, rtsp_url: &str) -> Result<(), VmsError> {
+    /// Start continuous recording for a camera, and its motion-detection
+    /// pipeline alongside it. No-op if the recording pipeline is already
+    /// running.
+    ///
+    /// `motion_rtsp_url` should be the camera's dedicated low-resolution
+    /// sub-stream when it has one, and the main stream otherwise — the
+    /// caller resolves that preference (mirroring how `start_relay`'s caller
+    /// already does, in `vms-api/src/routes/cameras.rs`), since
+    /// `MediaManager` doesn't hold camera configuration itself. Motion
+    /// detection runs unconditionally whenever the recording pipeline runs —
+    /// it's cheap classical CV, not gated behind a per-pipeline "needs_X"
+    /// flag the way the ring buffer / analytics branch are. Starting it is
+    /// best-effort: a failure here is logged but doesn't fail the recording
+    /// pipeline that just started successfully.
+    pub async fn start_camera(
+        &self,
+        camera_id: Uuid,
+        rtsp_url: &str,
+        motion_rtsp_url: &str,
+    ) -> Result<(), VmsError> {
         {
             let cameras = self.cameras.lock().unwrap();
             if cameras.contains_key(&camera_id) {
@@ -110,10 +145,20 @@ impl MediaManager {
 
         self.cameras.lock().unwrap().insert(
             camera_id,
-            CameraHandle { pipeline, rtsp_url: rtsp_url.to_owned(), shutdown_tx, task },
+            CameraHandle {
+                pipeline,
+                rtsp_url: rtsp_url.to_owned(),
+                shutdown_tx,
+                task,
+            },
         );
 
         tracing::info!(camera_id = %camera_id, rtsp_url, "Recording pipeline started");
+
+        if let Err(e) = self.start_motion_detection(camera_id, motion_rtsp_url) {
+            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
+        }
+
         Ok(())
     }
 
@@ -145,7 +190,8 @@ impl MediaManager {
         self.relay.stop_relay(camera_id);
     }
 
-    /// Stop the recording pipeline for a camera. Does not affect the relay.
+    /// Stop the recording pipeline for a camera, and its motion-detection
+    /// pipeline if one is running. Does not affect the relay.
     pub async fn stop_camera(&self, camera_id: Uuid) -> Result<(), VmsError> {
         let handle = self.cameras.lock().unwrap().remove(&camera_id);
 
@@ -155,10 +201,13 @@ impl MediaManager {
             tracing::info!(camera_id = %camera_id, "Recording pipeline stopped");
         }
 
+        self.stop_motion_detection(camera_id).await;
+
         Ok(())
     }
 
-    /// Stop all recording pipelines and all relays, wait for monitor tasks to exit.
+    /// Stop all recording pipelines, all motion-detection pipelines, and all
+    /// relays, wait for monitor/analyzer tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
         let handles: Vec<(Uuid, CameraHandle)> = {
             let mut cameras = self.cameras.lock().unwrap();
@@ -171,8 +220,45 @@ impl MediaManager {
             self.relay.stop_relay(id);
         }
 
+        let motion_handles: Vec<MotionHandle> = {
+            let mut motion = self.motion.lock().unwrap();
+            motion.drain().map(|(_, h)| h).collect()
+        };
+        for h in motion_handles {
+            h.stop().await;
+        }
+
         tracing::info!("MediaManager shutdown complete");
         Ok(())
+    }
+
+    /// Start the standalone motion/scene-change/tamper detection pipeline
+    /// for a camera. No-op if one is already running for this camera.
+    ///
+    /// `rtsp_url` should be the camera's dedicated low-resolution sub-stream
+    /// when it has one, and the main stream otherwise — the caller resolves
+    /// that preference (mirroring how `start_relay`'s caller already does,
+    /// in `vms-api/src/routes/cameras.rs`), since `MediaManager` doesn't hold
+    /// camera configuration itself.
+    pub fn start_motion_detection(&self, camera_id: Uuid, rtsp_url: &str) -> Result<(), VmsError> {
+        {
+            let motion = self.motion.lock().unwrap();
+            if motion.contains_key(&camera_id) {
+                return Ok(());
+            }
+        }
+        let handle = motion_branch::start(camera_id, rtsp_url, self.event_tx.clone())?;
+        self.motion.lock().unwrap().insert(camera_id, handle);
+        Ok(())
+    }
+
+    /// Stop the motion-detection pipeline for a camera. No-op if none is running.
+    pub async fn stop_motion_detection(&self, camera_id: Uuid) {
+        let handle = self.motion.lock().unwrap().remove(&camera_id);
+        if let Some(h) = handle {
+            h.stop().await;
+            tracing::info!(camera_id = %camera_id, "Motion detection pipeline stopped");
+        }
     }
 
     /// Return the relay URL for a camera if recording (and relay) is active.
@@ -340,8 +426,7 @@ fn snapshot_from_tee(
 
     let encoder_name = if format == "png" { "pngenc" } else { "jpegenc" };
     let encoder = {
-        let mut b = gstreamer::ElementFactory::make(encoder_name)
-            .name(format!("cam_{id}_snapenc"));
+        let mut b = gstreamer::ElementFactory::make(encoder_name).name(format!("cam_{id}_snapenc"));
         if format != "png" {
             b = b.property("quality", quality as i32);
         }
@@ -394,11 +479,23 @@ fn snapshot_from_tee(
     // Wire decodebin's dynamic video src pad to videoconvert
     let convert_weak = convert.downgrade();
     decodebin.connect_pad_added(move |_, src_pad| {
-        let caps = match src_pad.current_caps() { Some(c) => c, None => return };
-        let s = match caps.structure(0) { Some(s) => s, None => return };
-        if !s.name().starts_with("video/") { return; }
-        let Some(convert) = convert_weak.upgrade() else { return };
-        let Some(sink_pad) = convert.static_pad("sink") else { return };
+        let caps = match src_pad.current_caps() {
+            Some(c) => c,
+            None => return,
+        };
+        let s = match caps.structure(0) {
+            Some(s) => s,
+            None => return,
+        };
+        if !s.name().starts_with("video/") {
+            return;
+        }
+        let Some(convert) = convert_weak.upgrade() else {
+            return;
+        };
+        let Some(sink_pad) = convert.static_pad("sink") else {
+            return;
+        };
         if !sink_pad.is_linked() {
             src_pad.link(&sink_pad).ok();
         }
@@ -410,9 +507,13 @@ fn snapshot_from_tee(
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
-                let sample = sink.pull_sample().map_err(|_| gstreamer::FlowError::Error)?;
+                let sample = sink
+                    .pull_sample()
+                    .map_err(|_| gstreamer::FlowError::Error)?;
                 let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
-                let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
+                let map = buffer
+                    .map_readable()
+                    .map_err(|_| gstreamer::FlowError::Error)?;
                 if let Some(sender) = tx.lock().ok().and_then(|mut g| g.take()) {
                     let _ = sender.send(map.to_vec());
                 }
@@ -471,10 +572,8 @@ fn detach_snapshot_branch(
         format!("cam_{id}_snapenc"),
         format!("cam_{id}_snapsink"),
     ];
-    let elements: Vec<gstreamer::Element> = names
-        .iter()
-        .filter_map(|n| pipeline.by_name(n))
-        .collect();
+    let elements: Vec<gstreamer::Element> =
+        names.iter().filter_map(|n| pipeline.by_name(n)).collect();
 
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let pipeline_clone = pipeline.clone();

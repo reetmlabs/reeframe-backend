@@ -248,7 +248,17 @@ pub async fn start_recording(
         password.as_deref(),
     );
 
-    state.media_manager.start_camera(id, &rtsp_url).await?;
+    // Motion detection prefers the camera's dedicated low-resolution
+    // sub-stream, same precedence as `start_relay` above.
+    let motion_url = match &camera.sub_rtsp_url {
+        Some(sub) => build_rtsp_url(sub, camera.username.as_deref(), password.as_deref()),
+        None => rtsp_url.clone(),
+    };
+
+    state
+        .media_manager
+        .start_camera(id, &rtsp_url, &motion_url)
+        .await?;
     Ok(Json(serde_json::json!({"recording": true})))
 }
 
@@ -296,11 +306,18 @@ pub async fn start_relay(
 
     let source_url = match &camera.sub_rtsp_url {
         Some(sub) => build_rtsp_url(sub, camera.username.as_deref(), password.as_deref()),
-        None => build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password.as_deref()),
+        None => build_rtsp_url(
+            &camera.rtsp_url,
+            camera.username.as_deref(),
+            password.as_deref(),
+        ),
     };
 
     let had_cached_codec = camera.codec.is_some();
-    let codec = state.media_manager.start_relay(id, &source_url, camera.codec.as_deref()).await?;
+    let codec = state
+        .media_manager
+        .start_relay(id, &source_url, camera.codec.as_deref())
+        .await?;
 
     // Persist the detected codec so future daemon restarts can skip the probe.
     if !had_cached_codec {

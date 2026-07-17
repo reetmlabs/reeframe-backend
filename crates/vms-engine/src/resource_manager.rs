@@ -8,7 +8,7 @@ use vms_core::{
     resource::{ResourceEntry, ResourceId, ResourceState},
     VmsError,
 };
-use vms_db::{CameraRepo, SourceRepo};
+use vms_db::{entities::camera, CameraRepo, SourceRepo};
 use vms_media::{MediaManager, RingBufferManager};
 use vms_sources::SourceManager;
 
@@ -280,7 +280,10 @@ impl ResourceManager {
             return Err(VmsError::CameraNotFound(cam_id));
         };
         let rtsp_url = build_rtsp_url(&cam.rtsp_url, cam.username.as_deref(), password.as_deref());
-        self.media.start_camera(cam_id, &rtsp_url).await
+        let motion_url = resolve_motion_url(&cam, password.as_deref());
+        self.media
+            .start_camera(cam_id, &rtsp_url, &motion_url)
+            .await
     }
 
     async fn start_source(&self, source_id: Uuid) -> Result<(), VmsError> {
@@ -317,4 +320,16 @@ fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>
         }
     }
     base_url.to_string()
+}
+
+/// Resolve the URL motion detection should consume for a camera: the
+/// dedicated low-resolution sub-stream when one is configured, falling back
+/// to the main stream otherwise — the same precedence `start_relay` already
+/// uses (`vms-api/src/routes/cameras.rs`), so a feature meant to be cheap
+/// enough to always run doesn't default to decoding full resolution.
+fn resolve_motion_url(cam: &camera::Model, password: Option<&str>) -> String {
+    match &cam.sub_rtsp_url {
+        Some(sub) => build_rtsp_url(sub, cam.username.as_deref(), password),
+        None => build_rtsp_url(&cam.rtsp_url, cam.username.as_deref(), password),
+    }
 }
