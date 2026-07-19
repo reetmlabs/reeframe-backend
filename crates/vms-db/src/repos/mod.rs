@@ -7,6 +7,7 @@ pub mod export_job;
 pub mod pipeline;
 pub mod pipeline_run;
 pub mod recording;
+pub mod setting;
 pub mod source;
 pub mod user;
 
@@ -19,6 +20,7 @@ pub use export_job::ExportJobRepo;
 pub use pipeline::PipelineRepo;
 pub use pipeline_run::PipelineRunRepo;
 pub use recording::RecordingRepo;
+pub use setting::SettingsRepo;
 pub use source::SourceRepo;
 pub use user::UserRepo;
 

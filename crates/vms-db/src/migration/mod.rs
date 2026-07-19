@@ -48,6 +48,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000018_create_api_keys::Migration),
             Box::new(m20260101_000019_create_recordings::Migration),
             Box::new(m20260101_000020_create_export_jobs::Migration),
+            Box::new(m20260101_000021_create_settings::Migration),
         ]
     }
 }

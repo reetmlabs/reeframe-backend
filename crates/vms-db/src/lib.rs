@@ -38,5 +38,5 @@ pub use migration::Migrator;
 pub use repos::{
     recording::OpenChunk, user::verify_password, ApiKeyRepo, CameraRepo, ContactListRepo,
     ContactRepo, DestinationRepo, ExportJobRepo, PipelineRepo, PipelineRunRepo, RecordingRepo,
-    SourceRepo, UserRepo,
+    SettingsRepo, SourceRepo, UserRepo,
 };
