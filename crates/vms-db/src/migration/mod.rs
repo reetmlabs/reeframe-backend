@@ -20,6 +20,7 @@ mod m20260101_000017_create_users;
 mod m20260101_000018_create_api_keys;
 mod m20260101_000019_create_recordings;
 mod m20260101_000020_create_export_jobs;
+mod m20260101_000021_create_settings;
 
 pub struct Migrator;
 
