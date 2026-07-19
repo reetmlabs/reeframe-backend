@@ -15,5 +15,5 @@ pub use metrics::Metrics;
 pub use pipeline_executor::PipelineExecutor;
 pub use pipeline_registry::PipelineRegistry;
 pub use resource_manager::ResourceManager;
-pub use stat_monitor::StatMonitor;
+pub use stat_monitor::{RetentionConfig, StatMonitor};
 pub use trigger_evaluator::TriggerEvaluator;

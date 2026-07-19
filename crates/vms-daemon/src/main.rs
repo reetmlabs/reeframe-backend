@@ -17,8 +17,8 @@ use vms_db::{
     Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo, UserRepo,
 };
 use vms_engine::{
-    EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor,
-    TriggerEvaluator,
+    EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, RetentionConfig,
+    StatMonitor, TriggerEvaluator,
 };
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 use vms_sources::SourceManager;
@@ -362,6 +362,12 @@ async fn main() -> anyhow::Result<()> {
 
     // -- Stat Monitor --
     let stat_monitor = StatMonitor::new(trigger_evaluator.clone(), pipeline_registry.clone());
+    stat_monitor.set_retention(RetentionConfig {
+        recording_repo: recording_repo.clone(),
+        recording_dir: cfg.media.recording_dir.clone(),
+        retention_days: cfg.recordings.retention_days,
+        retention_disk_threshold_percent: cfg.recordings.retention_disk_threshold_percent,
+    });
     stat_monitor.clone().start();
     tracing::info!("Stat monitor started");
 

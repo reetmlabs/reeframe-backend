@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sysinfo::{Disks, System};
 use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, StatMetric, TriggerConfig};
+use vms_db::RecordingRepo;
 
 use crate::{pipeline_registry::RegistrySnapshot, PipelineRegistry, TriggerEvaluator};
 
@@ -17,17 +19,40 @@ const SLOW_INTERVAL_SECS: u64 = 15;
 /// A metric is "near" a threshold when the relative distance is below this fraction.
 /// E.g. 0.20 means within ±20 % of the threshold value.
 const NEAR_MARGIN: f64 = 0.20;
+/// Cap on how many oldest-chunk batches the disk-threshold sweep will delete
+/// in a single tick — deleting recordings is the correct response to a full
+/// recording disk, but this stops it from looping forever if the disk is
+/// full for some unrelated reason and deleting every recording still
+/// wouldn't clear it.
+const MAX_RETENTION_BATCHES_PER_TICK: usize = 20;
+const RETENTION_BATCH_SIZE: u64 = 10;
+
+/// Recording retention configuration, set once via [`StatMonitor::set_retention`]
+/// after construction (kept out of `new()`'s signature so existing tests and
+/// call sites that don't care about retention are unaffected).
+pub struct RetentionConfig {
+    pub recording_repo: RecordingRepo,
+    pub recording_dir: PathBuf,
+    pub retention_days: u32,
+    pub retention_disk_threshold_percent: f64,
+}
 
 /// Polls system metrics and feeds readings to the [`TriggerEvaluator`].
 ///
 /// Wraps `sysinfo` behind a `Mutex` so the same `System` instance is reused
 /// across polls — sysinfo works best when it can diff successive readings
 /// (especially for CPU usage, which is meaningless on the very first sample).
+///
+/// Also sweeps recording retention on the same tick (once [`Self::set_retention`]
+/// has been called) — age-based and disk-threshold-based cleanup reuse this
+/// poller instead of running a second one, since it already computes disk
+/// usage on every cycle.
 pub struct StatMonitor {
     evaluator: Arc<TriggerEvaluator>,
     registry: Arc<PipelineRegistry>,
     sys: Mutex<System>,
     disks: Mutex<Disks>,
+    retention: Mutex<Option<RetentionConfig>>,
 }
 
 impl StatMonitor {
@@ -37,7 +62,15 @@ impl StatMonitor {
             registry,
             sys: Mutex::new(System::new()),
             disks: Mutex::new(Disks::new()),
+            retention: Mutex::new(None),
         })
+    }
+
+    /// Set the recording-retention configuration this monitor sweeps on
+    /// every poll tick. Separate from `new()` so tests and any other call
+    /// site that doesn't care about retention are unaffected.
+    pub fn set_retention(&self, config: RetentionConfig) {
+        *self.retention.lock().unwrap() = Some(config);
     }
 
     // -- Polling loop --
@@ -59,6 +92,7 @@ impl StatMonitor {
             loop {
                 tokio::time::sleep(Duration::from_secs(interval_secs)).await;
                 let near = self.poll();
+                self.sweep_retention().await;
                 let next = if near {
                     FAST_INTERVAL_SECS
                 } else {
@@ -86,14 +120,28 @@ impl StatMonitor {
         // -- CPU --
         let cpu = self.cpu_percent();
         tracing::trace!(cpu, "cpu_usage_percent");
-        self.evaluator.evaluate_stat_impl(&snapshot.pipelines, &StatMetric::CpuUsagePercent, None, None, cpu);
-        near |= self.is_near_threshold(&snapshot.pipelines, &StatMetric::CpuUsagePercent, None, cpu);
+        self.evaluator.evaluate_stat_impl(
+            &snapshot.pipelines,
+            &StatMetric::CpuUsagePercent,
+            None,
+            None,
+            cpu,
+        );
+        near |=
+            self.is_near_threshold(&snapshot.pipelines, &StatMetric::CpuUsagePercent, None, cpu);
 
         // -- RAM --
         let ram = self.ram_percent();
         tracing::trace!(ram, "ram_usage_percent");
-        self.evaluator.evaluate_stat_impl(&snapshot.pipelines, &StatMetric::RamUsagePercent, None, None, ram);
-        near |= self.is_near_threshold(&snapshot.pipelines, &StatMetric::RamUsagePercent, None, ram);
+        self.evaluator.evaluate_stat_impl(
+            &snapshot.pipelines,
+            &StatMetric::RamUsagePercent,
+            None,
+            None,
+            ram,
+        );
+        near |=
+            self.is_near_threshold(&snapshot.pipelines, &StatMetric::RamUsagePercent, None, ram);
 
         // -- Disk — only paths referenced by active triggers --
         for path in self.active_disk_paths(&snapshot.pipelines) {
@@ -107,7 +155,12 @@ impl StatMonitor {
                         None,
                         pct,
                     );
-                    near |= self.is_near_threshold(&snapshot.pipelines, &StatMetric::DiskUsagePercent, Some(&path), pct);
+                    near |= self.is_near_threshold(
+                        &snapshot.pipelines,
+                        &StatMetric::DiskUsagePercent,
+                        Some(&path),
+                        pct,
+                    );
                 }
                 None => {
                     tracing::warn!(
@@ -119,6 +172,92 @@ impl StatMonitor {
         }
 
         near
+    }
+
+    // -- Recording retention --
+
+    /// Age-based cleanup first (delete what's definitely past its retention
+    /// window regardless of disk usage), then disk-threshold cleanup (delete
+    /// the oldest remaining chunks first until usage drops back under the
+    /// configured threshold). No-op until [`Self::set_retention`] has been
+    /// called.
+    async fn sweep_retention(&self) {
+        let (recording_repo, recording_dir, retention_days, disk_threshold_percent) = {
+            let guard = self.retention.lock().unwrap();
+            let Some(cfg) = guard.as_ref() else {
+                return;
+            };
+            (
+                cfg.recording_repo.clone(),
+                cfg.recording_dir.clone(),
+                cfg.retention_days,
+                cfg.retention_disk_threshold_percent,
+            )
+        };
+
+        if retention_days > 0 {
+            let cutoff =
+                (chrono::Utc::now() - chrono::Duration::days(retention_days as i64)).fixed_offset();
+            match recording_repo.list_older_than(cutoff).await {
+                Ok(rows) => {
+                    for row in rows {
+                        self.delete_recording_row(&recording_repo, row).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Retention sweep: failed to list aged recordings")
+                }
+            }
+        }
+
+        if disk_threshold_percent > 0.0 {
+            if let Some(dir_str) = recording_dir.to_str() {
+                for _ in 0..MAX_RETENTION_BATCHES_PER_TICK {
+                    let Some(pct) = self.disk_percent(dir_str) else {
+                        break;
+                    };
+                    if pct < disk_threshold_percent {
+                        break;
+                    }
+                    match recording_repo
+                        .list_oldest_finalized(RETENTION_BATCH_SIZE)
+                        .await
+                    {
+                        Ok(rows) if !rows.is_empty() => {
+                            for row in rows {
+                                self.delete_recording_row(&recording_repo, row).await;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn delete_recording_row(
+        &self,
+        repo: &RecordingRepo,
+        row: vms_db::entities::recording::Model,
+    ) {
+        if let Err(e) = tokio::fs::remove_file(&row.file_path).await {
+            tracing::warn!(
+                recording_id = %row.id,
+                file_path = %row.file_path,
+                error = %e,
+                "Retention sweep: failed to delete file on disk — DB row will still be removed",
+            );
+        }
+        match repo.delete(row.id).await {
+            Ok(()) => tracing::info!(
+                recording_id = %row.id,
+                file_path = %row.file_path,
+                "Retention sweep: deleted recording",
+            ),
+            Err(e) => {
+                tracing::error!(recording_id = %row.id, error = %e, "Retention sweep: failed to delete DB row")
+            }
+        }
     }
 
     /// Returns `true` if `actual` is within [`NEAR_MARGIN`] of the threshold of
@@ -179,7 +318,10 @@ impl StatMonitor {
     ///
     /// Called on every poll so newly enabled pipelines are picked up without
     /// a restart.
-    fn active_disk_paths(&self, snapshot: &HashMap<Uuid, Arc<CompiledPipeline>>) -> HashSet<String> {
+    fn active_disk_paths(
+        &self,
+        snapshot: &HashMap<Uuid, Arc<CompiledPipeline>>,
+    ) -> HashSet<String> {
         let mut paths = HashSet::new();
 
         for pipeline in snapshot.values() {

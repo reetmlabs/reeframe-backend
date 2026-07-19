@@ -44,6 +44,26 @@ impl Default for MediaConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct RecordingsConfig {
+    /// Delete finalized recordings older than this many days. `0` disables
+    /// age-based cleanup.
+    pub retention_days: u32,
+    /// Once disk usage on the recording directory's filesystem crosses this
+    /// percentage, delete the oldest finalized recordings first until it
+    /// drops back under it. `0` disables disk-threshold cleanup.
+    pub retention_disk_threshold_percent: f64,
+}
+
+impl Default for RecordingsConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: 30,
+            retention_disk_threshold_percent: 90.0,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ApiConfig {
     /// Address and port the HTTP server binds to.
     pub bind: String,
@@ -107,6 +127,7 @@ impl Default for AuthConfig {
 pub struct AppConfig {
     pub database: DatabaseConfig,
     pub media: MediaConfig,
+    pub recordings: RecordingsConfig,
     pub api: ApiConfig,
     pub rtsp: RtspConfig,
     pub auth: AuthConfig,
@@ -124,6 +145,7 @@ impl Default for AppConfig {
         Self {
             database: DatabaseConfig::default(),
             media: MediaConfig::default(),
+            recordings: RecordingsConfig::default(),
             api: ApiConfig::default(),
             rtsp: RtspConfig::default(),
             auth: AuthConfig::default(),
@@ -150,6 +172,8 @@ impl Default for AppConfig {
 /// | `VMS_ENCRYPTION_KEY`       | `encryption_key`            |
 /// | `VMS_DATABASE__URL`        | `database.url`              |
 /// | `VMS_MEDIA__RECORDING_DIR` | `media.recording_dir`       |
+/// | `VMS_RECORDINGS__RETENTION_DAYS` | `recordings.retention_days` |
+/// | `VMS_RECORDINGS__RETENTION_DISK_THRESHOLD_PERCENT` | `recordings.retention_disk_threshold_percent` |
 /// | `VMS_API__BIND`            | `api.bind`                  |
 /// | `VMS_RTSP__BIND`           | `rtsp.bind`                 |
 /// | `VMS_AUTH__MODE`           | `auth.mode`                 |
