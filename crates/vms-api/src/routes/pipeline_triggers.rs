@@ -1,8 +1,8 @@
 //! Pipeline trigger CRUD — `/pipelines/{id}/triggers[/{trigger_id}]`.
 //!
-//! The last piece of the pipeline-graph-editing gap (nodes in 9-5, edges in
-//! 9-6, triggers here). This is also where a trigger's `source_id`/
-//! `camera_id` actually get set — the two FK columns step 9-8 will read to
+//! The last piece of the pipeline-graph-editing gap (nodes and edges have
+//! their own route modules; triggers here). This is also where a trigger's
+//! `source_id`/`camera_id` actually get set — the two FK columns used to
 //! derive `pipeline_source_refs`/`pipeline_camera_ref`.
 //!
 //! `config` is `vms_core::TriggerConfig` directly — its own serde tag

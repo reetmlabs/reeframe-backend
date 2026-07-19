@@ -102,7 +102,7 @@ impl ContactListRepo {
     // a contact or a list cleans up membership rows automatically. That does
     // *not* stop an insert referencing IDs that never existed in the first
     // place, so `add_member` still needs the same proactive existence checks
-    // used for every other cross-entity reference in `pipeline.rs` (9-7) —
+    // used for every other cross-entity reference in `pipeline.rs` —
     // otherwise a bad ID surfaces as a raw "FOREIGN KEY constraint failed"
     // `500` instead of a clean `404`.
 

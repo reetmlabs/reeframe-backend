@@ -36,4 +36,12 @@ pub enum RecordingChunkEvent {
         end_time: DateTime<Utc>,
         size_bytes: i64,
     },
+    /// A fragment that `splitmuxsink` opened but never actually wrote any
+    /// data to before closing — observed live as a byproduct of a
+    /// still-unresolved reconnect bug: every reconnect that survives long
+    /// enough eventually produces one genuinely empty (0-byte) fragment
+    /// right before erroring out. The still-open row `Opened` created for
+    /// it should be deleted outright, not backfilled as if it were a real
+    /// chunk.
+    Discarded { camera_id: Uuid, file_path: String },
 }

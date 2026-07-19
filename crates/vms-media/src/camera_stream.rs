@@ -59,7 +59,7 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
 /// monitor can look them up by name instead of recreating them.
 /// State shared between the codec-detection `pad-added` handler, the
 /// `format-location-full` chunk-naming callback, and the reconnect
-/// monitor's session-timestamp refresh (Step 10b) — all three need to agree
+/// monitor's session-timestamp refresh — all three need to agree
 /// on the current recording session's filename timestamp prefix, and the
 /// naming callback additionally needs whichever codec the pad-added handler
 /// most recently detected (recorded, not assumed, since it's negotiated
@@ -77,7 +77,7 @@ impl ChunkNaming {
         })
     }
 
-    /// Called by the reconnect monitor (Step 10b) so chunks opened after a
+    /// Called by the reconnect monitor so chunks opened after a
     /// reconnect get a fresh filename prefix — otherwise the fragment index
     /// restarting from 0 would collide with the previous session's chunk 0
     /// on disk.
@@ -139,27 +139,23 @@ pub(crate) fn build_camera_stream(
     let location = recording_location(recording_dir, camera_id);
     let chunk_ns = chunk_duration_secs * 1_000_000_000;
 
-    // `muxer-factory`/`muxer-properties` only take effect with
-    // `async-finalize=true` (confirmed via `gst-inspect-1.0 splitmuxsink` —
-    // both are documented "Valid only for async-finalize = TRUE") — without
-    // it, `muxer-factory` was silently ignored and mp4mux was only ever
-    // used because it happens to be the element's own default. Setting
-    // `faststart=true` on the muxer itself (mp4mux/qtmux's own property —
-    // "the header is written at the end, then rewritten at the start when
-    // the file is closed") is what makes each finalized chunk immediately
-    // servable via HTTP Range requests (Step 10d) with no separate remux
-    // pass needed.
-    let muxer_properties = gstreamer::Structure::builder("properties")
-        .field("faststart", true)
-        .build();
-
+    // NOTE on faststart: `mp4mux`'s own `faststart=true` property looked
+    // like the cheap way to get progressively-servable chunks (HTTP Range
+    // streaming needs `moov` before `mdat`), but it only takes
+    // effect through `muxer-properties`, which itself only applies when
+    // `async-finalize=true` (confirmed via `gst-inspect-1.0 splitmuxsink`).
+    // Turning that on was tested live and reproducibly broke the *existing*
+    // reconnect path — every reconnect eventually errored with "Queued GOP
+    // time is negative" a couple of minutes later, because async-finalize's
+    // internal GOP queueing doesn't survive this pipeline's Null->Playing
+    // reconnect cycle cleanly. Continuous recording is the one thing that
+    // must never destabilize, so faststart is done as a separate pass on
+    // `fragment-closed` instead (see `remux_faststart`) — more disk I/O per
+    // chunk, but completely decoupled from the live pipeline's own state.
     let splitmux = gstreamer::ElementFactory::make("splitmuxsink")
         .name(format!("cam_{}_splitmux", camera_id.as_simple()))
         .property("location", &location)
         .property("max-size-time", chunk_ns)
-        .property("async-finalize", true)
-        .property("muxer-factory", "mp4mux")
-        .property("muxer-properties", &muxer_properties)
         .build()
         .map_err(|e| VmsError::Media(format!("splitmuxsink: {e}")))?;
 
@@ -240,14 +236,14 @@ pub(crate) fn build_camera_stream(
             return;
         }
 
-        // Audio pads are intentionally ignored for now (planned for Phase 2).
+        // Audio pads are intentionally ignored — this pipeline is video-only.
         // Checking `media=audio` here avoids spurious "unsupported encoding"
         // warnings for cameras that stream both video and audio over RTSP.
         if structure.get::<&str>("media").ok() == Some("audio") {
             tracing::debug!(
                 camera_id = %cam_id,
                 encoding = structure.get::<&str>("encoding-name").unwrap_or("unknown"),
-                "Audio stream detected — skipped (audio recording planned for Phase 2)",
+                "Audio stream detected — skipped (video-only pipeline)",
             );
             return;
         }
@@ -339,13 +335,13 @@ pub(crate) fn build_camera_stream(
 ///
 /// Backoff: 2 s -> 4 s -> … -> 60 s cap, reset to 2 s after a successful restart.
 /// On each reconnect `naming`'s session timestamp is refreshed so chunks from
-/// different sessions never collide on disk (Step 10b — chunk naming is now
-/// driven by `format-location-full`, not the `location` property, so this is
-/// the one place that needs updating instead of the splitmuxsink element).
+/// different sessions never collide on disk — chunk naming is driven by
+/// `format-location-full`, not the `location` property, so this is the one
+/// place that needs updating instead of the splitmuxsink element.
 ///
 /// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
 /// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
-/// file is finalized on disk (Step 10b).
+/// file is finalized on disk.
 pub(crate) fn spawn_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,
@@ -390,7 +386,7 @@ pub(crate) fn spawn_monitor(
                                 );
                             }
                             MessageView::Element(elem) => {
-                                handle_fragment_closed(camera_id, elem, &chunk_event_tx);
+                                handle_fragment_closed(camera_id, elem, &naming, &chunk_event_tx);
                             }
                             _ => {}
                         }
@@ -438,14 +434,25 @@ pub(crate) fn spawn_monitor(
 
 // -- Helpers --
 
+/// Below this many bytes, a "closed" fragment is treated as empty/garbage
+/// rather than a real chunk of footage — smaller than any valid MP4 could
+/// plausibly be (`ftyp` + `moov` + `mdat` box headers alone already exceed
+/// this). Observed live as a byproduct of a still-unresolved reconnect bug:
+/// every reconnect that survives long enough eventually produces one
+/// genuinely 0-byte fragment right before erroring out.
+const MIN_PLAUSIBLE_CHUNK_BYTES: u64 = 1024;
+
 /// Handle a `splitmuxsink-fragment-closed` element message: the previous
-/// chunk file is finalized on disk (faststart-remuxed already, since that's
-/// a muxer-side property, not a separate pass — see `build_camera_stream`),
-/// so this is the point to read its final size and emit
-/// `RecordingChunkEvent::Closed`.
+/// chunk file is finalized on disk. Runs the faststart remux (see
+/// `remux_faststart`) on a blocking thread — off the live pipeline entirely,
+/// so a slow remux can never stall bus-message processing or interact with
+/// the reconnect path — then reads the final size and emits
+/// `RecordingChunkEvent::Closed` (or `Discarded` for an empty/garbage
+/// fragment — see `MIN_PLAUSIBLE_CHUNK_BYTES`).
 fn handle_fragment_closed(
     camera_id: Uuid,
     elem: &gstreamer::message::Element,
+    naming: &Arc<ChunkNaming>,
     chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
 ) {
     let Some(structure) = elem.structure() else {
@@ -459,14 +466,139 @@ fn handle_fragment_closed(
         return;
     };
 
-    let size_bytes = std::fs::metadata(&file_path).map(|m| m.len() as i64).unwrap_or(0);
+    let codec = naming.codec.lock().unwrap().clone();
+    let chunk_event_tx = chunk_event_tx.clone();
 
-    let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
-        camera_id,
-        file_path,
-        end_time: chrono::Utc::now(),
-        size_bytes,
+    tokio::task::spawn_blocking(move || {
+        let on_disk_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+        if on_disk_size < MIN_PLAUSIBLE_CHUNK_BYTES {
+            tracing::warn!(
+                camera_id = %camera_id,
+                file_path,
+                size_bytes = on_disk_size,
+                "Discarding empty/garbage fragment — not indexing it as a real chunk",
+            );
+            std::fs::remove_file(&file_path).ok();
+            let _ = chunk_event_tx.send(RecordingChunkEvent::Discarded {
+                camera_id,
+                file_path,
+            });
+            return;
+        }
+
+        if let Some(codec) = codec.as_deref().and_then(codec_for) {
+            if let Err(e) = remux_faststart(&file_path, codec.parse_factory) {
+                tracing::warn!(
+                    camera_id = %camera_id,
+                    file_path,
+                    error = %e,
+                    "Faststart remux failed — chunk stays playable, just not progressively seekable",
+                );
+            }
+        }
+
+        let size_bytes = std::fs::metadata(&file_path)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+
+        let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
+            camera_id,
+            file_path,
+            end_time: chrono::Utc::now(),
+            size_bytes,
+        });
     });
+}
+
+/// Rewrite `path` in place so its `moov` atom sits before `mdat` — what lets
+/// an HTTP Range request serve a chunk progressively instead of
+/// needing the whole file downloaded first. `mp4mux`'s own `faststart=true`
+/// does exactly this, but only takes effect through `splitmuxsink`'s
+/// `muxer-properties`, which in turn requires `async-finalize=true` — tested
+/// live and found to reproducibly break the reconnect path (see the comment
+/// on `build_camera_stream`'s `splitmuxsink` construction). Running it here,
+/// as a completely separate one-shot pipeline over the already-closed file,
+/// costs an extra demux+remux pass per chunk but can never destabilize live
+/// recording — it operates on a file that's already finished.
+///
+/// Blocking — call from `spawn_blocking`, never from the async bus-watcher.
+fn remux_faststart(path: &str, parse_factory: &str) -> Result<(), VmsError> {
+    let tmp_path = format!("{path}.faststart.tmp");
+
+    let pipeline = gstreamer::Pipeline::new();
+    let filesrc = gstreamer::ElementFactory::make("filesrc")
+        .property("location", path)
+        .build()
+        .map_err(|e| VmsError::Media(format!("faststart filesrc: {e}")))?;
+    let demux = gstreamer::ElementFactory::make("qtdemux")
+        .build()
+        .map_err(|e| VmsError::Media(format!("faststart qtdemux: {e}")))?;
+    let parse = gstreamer::ElementFactory::make(parse_factory)
+        .build()
+        .map_err(|e| VmsError::Media(format!("faststart {parse_factory}: {e}")))?;
+    let mux = gstreamer::ElementFactory::make("mp4mux")
+        .property("faststart", true)
+        .build()
+        .map_err(|e| VmsError::Media(format!("faststart mp4mux: {e}")))?;
+    let sink = gstreamer::ElementFactory::make("filesink")
+        .property("location", &tmp_path)
+        .build()
+        .map_err(|e| VmsError::Media(format!("faststart filesink: {e}")))?;
+
+    pipeline
+        .add_many([&filesrc, &demux, &parse, &mux, &sink])
+        .map_err(|e| VmsError::Media(format!("faststart add_many: {e}")))?;
+
+    filesrc
+        .link(&demux)
+        .map_err(|e| VmsError::Media(format!("faststart link filesrc->demux: {e}")))?;
+    gstreamer::Element::link_many([&parse, &mux, &sink])
+        .map_err(|e| VmsError::Media(format!("faststart link parse->mux->sink: {e}")))?;
+
+    // qtdemux only exposes its src pad once it has parsed the file's moov —
+    // same dynamic-pad dance as the live pipeline's own codec wiring.
+    let parse_weak = parse.downgrade();
+    demux.connect_pad_added(move |_demux, pad| {
+        let Some(parse) = parse_weak.upgrade() else {
+            return;
+        };
+        let Some(sink_pad) = parse.static_pad("sink") else {
+            return;
+        };
+        if sink_pad.is_linked() {
+            return;
+        }
+        if let Err(e) = pad.link(&sink_pad) {
+            tracing::error!("faststart remux: link demux->parse failed: {e}");
+        }
+    });
+
+    pipeline
+        .set_state(gstreamer::State::Playing)
+        .map_err(|e| VmsError::Media(format!("faststart pipeline start: {e}")))?;
+
+    let bus = pipeline.bus().expect("pipeline bus missing");
+    let result = loop {
+        let Some(msg) = bus.timed_pop(gstreamer::ClockTime::from_seconds(30)) else {
+            break Err(VmsError::Media("faststart remux timed out".into()));
+        };
+        match msg.view() {
+            gstreamer::MessageView::Eos(_) => break Ok(()),
+            gstreamer::MessageView::Error(e) => {
+                break Err(VmsError::Media(format!(
+                    "faststart remux error: {}",
+                    e.error()
+                )));
+            }
+            _ => {}
+        }
+    };
+
+    pipeline.set_state(gstreamer::State::Null).ok();
+    result?;
+
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 /// Wall-clock timestamp prefix for a fresh recording session — a new one is

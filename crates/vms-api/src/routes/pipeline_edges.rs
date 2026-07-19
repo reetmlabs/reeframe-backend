@@ -1,10 +1,10 @@
 //! Pipeline edge CRUD — `/pipelines/{id}/edges[/{edge_id}]`.
 //!
-//! The second piece of the pipeline-graph-editing gap flagged in step 8 and
-//! closed by step 9 (nodes in 9-5, edges here, triggers in 9-7). This is
-//! also where the edge-dependent structural rules from `PipelineDag`'s doc
-//! comment — no cycles, `Transport`/`DeviceControl` must be leaves,
-//! `Condition` branch shape — finally become checkable; 9-5 could only
+//! The second piece of the pipeline-graph-editing gap (nodes have their own
+//! route module, edges here, triggers have theirs). This is also where the
+//! edge-dependent structural rules from `PipelineDag`'s doc comment — no
+//! cycles, `Transport`/`DeviceControl` must be leaves, `Condition` branch
+//! shape — finally become checkable; node creation alone could only
 //! enforce the node-level rules.
 //!
 //! Responses return [`PipelineEdge`] directly, same rationale as

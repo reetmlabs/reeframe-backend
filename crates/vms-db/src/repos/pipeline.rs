@@ -270,7 +270,7 @@ impl PipelineRepo {
     /// `Transport` node needs a `destination_id`) plus root uniqueness
     /// (rules 1 and 2). The edge-dependent rules (3, 4, 5 — no cycles,
     /// `Transport`/`DeviceControl` must be leaves, `Condition` needs exactly
-    /// two outgoing edges) can't be checked until step 9-6 adds edges.
+    /// two outgoing edges) can't be checked until edges exist.
     pub async fn create_node(
         &self,
         pipeline_id: Uuid,
@@ -420,9 +420,9 @@ impl PipelineRepo {
     }
 
     /// Delete a node. Cascades to any edges referencing it (the
-    /// `pipeline_edges` foreign keys are `ON DELETE CASCADE`, set up in
-    /// step 5's migration) — deleting a node mid-graph silently prunes its
-    /// edges rather than leaving dangling references.
+    /// `pipeline_edges` foreign keys are `ON DELETE CASCADE`) — deleting a
+    /// node mid-graph silently prunes its edges rather than leaving
+    /// dangling references.
     pub async fn delete_node(&self, node_id: Uuid) -> Result<(), VmsError> {
         let node = pipeline_node::Entity::find_by_id(node_id)
             .one(&self.db)
@@ -570,9 +570,10 @@ impl PipelineRepo {
     // but without a check here it surfaces as a raw "FOREIGN KEY
     // constraint failed" `VmsError::Database` (a `500`), not the clean
     // `404`-mapped not-found error every other cross-entity reference in
-    // this file returns. Caught live while verifying step 9-7's trigger
-    // `source_id`/`camera_id`; fixed here for nodes' `destination_id`/
-    // `contact_list_id` too since it's the exact same bug shape.
+    // this file returns. Caught live while verifying a trigger's
+    // `source_id`/`camera_id` validation; fixed here for nodes'
+    // `destination_id`/`contact_list_id` too since it's the exact same bug
+    // shape.
 
     async fn require_destination_exists(&self, destination_id: Uuid) -> Result<(), VmsError> {
         destination::Entity::find_by_id(destination_id)
@@ -869,9 +870,8 @@ fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid> {
 /// Which cameras a pipeline's nodes/triggers reference, and what each one
 /// needs. `needs_ring_buffer` is set by an `extract_clip` node.
 /// `needs_analytics` has no producer yet — no action or trigger type reads
-/// detections until steps 9-13/9-14 land — so it's always `false` for now;
-/// this function is the one place that will need a new match arm when they
-/// do.
+/// detections, so it's always `false` for now; this function is the one
+/// place that will need a new match arm once one does.
 ///
 /// A camera is referenced by (a) any *enabled* trigger's resolved
 /// `camera_id`, or (b) any node whose action config carries an explicit

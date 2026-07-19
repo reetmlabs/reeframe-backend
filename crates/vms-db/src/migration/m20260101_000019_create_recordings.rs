@@ -28,7 +28,7 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     // Nullable while the chunk is still being written —
-                    // backfilled by `splitmuxsink-fragment-closed` (Step 10b).
+                    // backfilled by `splitmuxsink-fragment-closed`.
                     .col(ColumnDef::new(Recording::EndTime).timestamp_with_time_zone())
                     .col(ColumnDef::new(Recording::SizeBytes).big_integer())
                     .col(ColumnDef::new(Recording::Codec).text())

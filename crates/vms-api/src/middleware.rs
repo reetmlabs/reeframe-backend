@@ -9,7 +9,7 @@ use vms_engine::Metrics;
 
 use crate::{error::ApiError, state::AppState};
 
-/// Header carrying a long-lived API key (step 9-4), checked when no
+/// Header carrying a long-lived API key, checked when no
 /// `Authorization: Bearer` header is present.
 const API_KEY_HEADER: &str = "x-api-key";
 
@@ -20,7 +20,7 @@ const API_KEY_HEADER: &str = "x-api-key";
 /// downstream handlers (e.g. `GET /auth/me`) to read.
 ///
 /// Mounted on every route except `GET /health`, `POST /webhooks/{id}`
-/// (external callers can't present either credential — step 8-4's webhook
+/// (external callers can't present either credential — the webhook
 /// route does its own accept/reject check instead), and `POST
 /// /auth/{setup,login,refresh}` (issuing/refreshing a token can't itself
 /// require one).

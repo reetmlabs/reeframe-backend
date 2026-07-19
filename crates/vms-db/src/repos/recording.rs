@@ -90,6 +90,26 @@ impl RecordingRepo {
         Ok(())
     }
 
+    /// Delete the still-open row for a fragment that `splitmuxsink` opened
+    /// but never wrote any real data to (`RecordingChunkEvent::Discarded`)
+    /// — a byproduct of a reconnect bug, not a real chunk of footage, so it
+    /// has no place in the index at all rather than being backfilled with
+    /// zero duration/size.
+    pub async fn discard_open_chunk(
+        &self,
+        camera_id: Uuid,
+        file_path: &str,
+    ) -> Result<(), VmsError> {
+        recording::Entity::delete_many()
+            .filter(recording::Column::CameraId.eq(camera_id))
+            .filter(recording::Column::FilePath.eq(file_path))
+            .filter(recording::Column::EndTime.is_null())
+            .exec(&self.db)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Chunks overlapping `[from, to)`. A chunk still being written
     /// (`end_time IS NULL`) has an unbounded effective end, so it overlaps
     /// whenever it already started before `to`.
@@ -173,7 +193,7 @@ impl RecordingRepo {
     }
 
     /// Chunks belonging to a camera, oldest first — used to build a
-    /// concatenated export in Step 10d.
+    /// concatenated export.
     pub async fn list_range_ordered(
         &self,
         camera_id: Uuid,
@@ -185,7 +205,7 @@ impl RecordingRepo {
 
     /// Finalized chunks (both a real `end_time` and `size_bytes`, i.e. not
     /// the one currently being written) older than `cutoff` — the age-based
-    /// half of the Step 10e retention sweep.
+    /// half of the retention sweep.
     pub async fn list_older_than(
         &self,
         cutoff: DateTimeWithTimeZone,
@@ -199,8 +219,8 @@ impl RecordingRepo {
     }
 
     /// Finalized chunks across every camera, oldest first — the
-    /// disk-threshold half of the Step 10e retention sweep (delete the
-    /// oldest chunks first until usage drops back under the configured
+    /// disk-threshold half of the retention sweep (delete the oldest
+    /// chunks first until usage drops back under the configured
     /// threshold).
     pub async fn list_oldest_finalized(
         &self,

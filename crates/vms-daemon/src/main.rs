@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!(
             mode = %cfg.auth.mode,
             "Unsupported [auth] mode — only 'local' is available in the community build \
-             ('oidc' requires vms-ent-auth, Phase 3)"
+             ('oidc' requires the vms-ent-auth enterprise crate)"
         );
         return Err(anyhow::anyhow!("unsupported auth mode: {}", cfg.auth.mode));
     }
@@ -131,9 +131,9 @@ async fn main() -> anyhow::Result<()> {
     // the same channel; the bridge task below forwards each onto the Event
     // Bus by whichever ID it carries, keeping both crates free of a
     // vms-engine dependency. `chunk_event_tx` is the equivalent channel for
-    // recording-chunk lifecycle bookkeeping (Step 10b) — `vms-media` has no
-    // DB access, so the consumer task below turns each event into a
-    // `RecordingRepo` call instead.
+    // recording-chunk lifecycle bookkeeping — `vms-media` has no DB access,
+    // so the consumer task below turns each event into a `RecordingRepo`
+    // call instead.
     tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
     let (media_event_tx, mut media_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (chunk_event_tx, mut chunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -155,8 +155,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Media manager and RTSP relay server ready");
 
     // -- Recording-chunk indexing bridge --
-    // Turns each `RecordingChunkEvent` (Step 10b) into a `recordings` row —
-    // insert on open, backfill end_time/size_bytes on close.
+    // Turns each `RecordingChunkEvent` into a `recordings` row — insert on
+    // open, backfill end_time/size_bytes on close.
     {
         let recording_repo = recording_repo.clone();
         tokio::spawn(async move {
@@ -191,10 +191,26 @@ async fn main() -> anyhow::Result<()> {
                         size_bytes,
                     } => {
                         if let Err(e) = recording_repo
-                            .close_chunk_by_path(camera_id, &file_path, end_time.fixed_offset(), size_bytes)
+                            .close_chunk_by_path(
+                                camera_id,
+                                &file_path,
+                                end_time.fixed_offset(),
+                                size_bytes,
+                            )
                             .await
                         {
                             tracing::error!(camera_id = %camera_id, error = %e, "Failed to record chunk close");
+                        }
+                    }
+                    RecordingChunkEvent::Discarded {
+                        camera_id,
+                        file_path,
+                    } => {
+                        if let Err(e) = recording_repo
+                            .discard_open_chunk(camera_id, &file_path)
+                            .await
+                        {
+                            tracing::error!(camera_id = %camera_id, error = %e, "Failed to discard empty chunk row");
                         }
                     }
                 }
@@ -415,7 +431,7 @@ async fn main() -> anyhow::Result<()> {
 // -- Helpers --
 
 /// Installs the global `tracing` subscriber: an always-on JSON layer to
-/// stderr (step 4d's original behavior), plus — only if
+/// stderr, plus — only if
 /// `OTEL_EXPORTER_OTLP_ENDPOINT` or one of the OTel SDK's more specific
 /// `OTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT` env vars is set — export of
 /// spans and log events to that collector over OTLP. With none of those set,

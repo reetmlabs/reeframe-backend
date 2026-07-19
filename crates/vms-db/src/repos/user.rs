@@ -8,7 +8,7 @@ use vms_core::VmsError;
 use super::{db_err, now};
 use crate::entities::user::{self, ActiveModel, UserRole};
 
-/// bcrypt work factor. Matches the Phase 2 multi-user design note in `RoadmapBE/roadmap.md`.
+/// bcrypt work factor.
 const BCRYPT_COST: u32 = 12;
 
 // -- Input types --

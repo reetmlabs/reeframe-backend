@@ -1,12 +1,12 @@
 //! API key management, nested under `/users/{id}/api-keys`.
 //!
 //! There is no general `/users` CRUD yet — user creation is still only
-//! possible via `POST /auth/setup` (step 9-2), and multi-user management is
-//! Phase 2 work. Every handler here is self-service only: a caller may only
+//! possible via `POST /auth/setup`, and multi-user management is future
+//! work. Every handler here is self-service only: a caller may only
 //! create, list, or revoke *their own* keys (`AuthClaims.user_id` must equal
 //! the `{id}` path segment). There is no admin-manages-others path yet
 //! either, since there's no second user or role-permission system to
-//! exercise it — that's Phase 2's RBAC enforcement middleware, not this.
+//! exercise it — that's future RBAC enforcement middleware, not this.
 
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};

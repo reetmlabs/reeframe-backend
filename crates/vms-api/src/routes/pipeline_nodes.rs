@@ -1,9 +1,9 @@
 //! Pipeline node CRUD — `/pipelines/{id}/nodes[/{node_id}]`.
 //!
-//! The missing write side of a shape that's been read (by the DAG compiler)
-//! since step 6: until this step, a pipeline's nodes could only ever be
-//! inserted directly into the database. Edges (step 9-6) and triggers
-//! (step 9-7) are the other two pieces of the same gap.
+//! The missing write side of a shape that's been read by the DAG compiler
+//! for a while: before this, a pipeline's nodes could only ever be
+//! inserted directly into the database. Edges and triggers are the other
+//! two pieces of the same gap, handled by their own route modules.
 //!
 //! Response bodies return [`PipelineNode`] directly rather than a hand-built
 //! DTO — it already derives `Serialize`, has no sensitive fields, and is

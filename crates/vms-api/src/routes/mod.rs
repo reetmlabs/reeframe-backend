@@ -33,7 +33,7 @@ use crate::{
 };
 
 /// Routes reachable without a valid access token: health, inbound webhooks
-/// (step 8-4 has its own accept/reject logic instead), and the three auth
+/// (which have their own accept/reject logic instead), and the three auth
 /// endpoints whose entire purpose is obtaining or refreshing a token.
 fn public_routes() -> Router {
     Router::new()

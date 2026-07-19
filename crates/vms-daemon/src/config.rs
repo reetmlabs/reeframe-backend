@@ -77,7 +77,8 @@ impl Default for RtspConfig {
 pub struct AuthConfig {
     /// `"local"` — the BE issues and validates its own JWTs with `jwt_secret`.
     /// `"oidc"` — validate IDP-issued tokens via a JWKS endpoint; requires
-    /// `vms-ent-auth` (Phase 3) and is not available in the community build.
+    /// the `vms-ent-auth` enterprise crate and is not available in the
+    /// community build.
     pub mode: String,
     /// HMAC-SHA256 signing secret for locally issued JWTs. Required when
     /// `mode = "local"`. Set via config file or VMS_AUTH__JWT_SECRET env var.

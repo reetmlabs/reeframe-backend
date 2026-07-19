@@ -101,9 +101,9 @@ pub struct MediaManager {
     /// signal-loss) produced by [`motion_branch`] onto the daemon's
     /// event-bus bridge.
     event_tx: mpsc::UnboundedSender<Event>,
-    /// Sender used to publish `RecordingChunkEvent`s (Step 10b) as
-    /// `splitmuxsink` opens/closes each chunk, for whichever task actually
-    /// has DB access to turn them into `recordings` rows.
+    /// Sender used to publish `RecordingChunkEvent`s as `splitmuxsink`
+    /// opens/closes each chunk, for whichever task actually has DB access
+    /// to turn them into `recordings` rows.
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     motion: Mutex<HashMap<Uuid, MotionHandle>>,
 }
@@ -116,8 +116,8 @@ impl MediaManager {
     /// `event_tx` is where motion/scene-change/tamper events get sent —
     /// the same channel `vms-sources` adapters publish onto, bridged to the
     /// `EventBus` in `main.rs`. `chunk_event_tx` is the equivalent channel
-    /// for recording-chunk lifecycle bookkeeping (Step 10b). Both keep this
-    /// crate free of a `vms-db`/`vms-engine` dependency.
+    /// for recording-chunk lifecycle bookkeeping. Both keep this crate free
+    /// of a `vms-db`/`vms-engine` dependency.
     pub fn new(
         config: MediaConfig,
         event_tx: mpsc::UnboundedSender<Event>,
