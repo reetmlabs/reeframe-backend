@@ -9,6 +9,7 @@ mod pipeline_edges;
 mod pipeline_nodes;
 mod pipeline_triggers;
 mod pipelines;
+mod recordings;
 mod sources;
 mod users;
 mod webhooks;
@@ -22,6 +23,7 @@ pub use pipeline_edges::{CreateEdgeBody, UpdateEdgeBody};
 pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
 pub use pipeline_triggers::{CreateTriggerBody, UpdateTriggerBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
+pub use recordings::{PlaybackDto, RecordingDto};
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
 pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
 
@@ -88,7 +90,9 @@ fn protected_routes() -> Router {
                             Router::with_path("relay")
                                 .push(Router::with_path("start").post(cameras::start_relay))
                                 .push(Router::with_path("stop").post(cameras::stop_relay)),
-                        ),
+                        )
+                        .push(Router::with_path("recordings").get(recordings::list_recordings))
+                        .push(Router::with_path("playback").get(recordings::get_playback)),
                 ),
         )
         .push(
