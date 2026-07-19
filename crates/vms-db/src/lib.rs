@@ -36,6 +36,7 @@ pub mod repos;
 pub use crypto::Crypto;
 pub use migration::Migrator;
 pub use repos::{
-    user::verify_password, ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DestinationRepo,
-    PipelineRepo, PipelineRunRepo, SourceRepo, UserRepo,
+    recording::OpenChunk, user::verify_password, ApiKeyRepo, CameraRepo, ContactListRepo,
+    ContactRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo,
+    UserRepo,
 };

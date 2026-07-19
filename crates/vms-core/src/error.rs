@@ -73,6 +73,11 @@ pub enum VmsError {
     #[error("contact list {0} not found")]
     ContactListNotFound(Uuid),
 
+    /// A recording (chunk) with the given ID does not exist, or does not
+    /// belong to the camera it was requested under.
+    #[error("recording {0} not found")]
+    RecordingNotFound(Uuid),
+
     /// A structural rule was violated when compiling a pipeline DAG.
     ///
     /// The inner string describes the specific rule that failed (e.g. "pipeline

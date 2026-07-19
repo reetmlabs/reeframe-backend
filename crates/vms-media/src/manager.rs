@@ -9,9 +9,9 @@ use gstreamer::prelude::*;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use vms_core::event::Event;
-use vms_core::VmsError;
+use vms_core::{RecordingChunkEvent, VmsError};
 
-use crate::camera_stream::{build_camera_stream, spawn_monitor};
+use crate::camera_stream::{build_camera_stream, spawn_monitor, ChunkNaming};
 use crate::motion_branch::{self, MotionHandle};
 use crate::relay::{RelayQuality, RelayServer};
 use crate::ring_buffer::RingBuffer;
@@ -52,6 +52,11 @@ struct CameraHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     /// Join handle for the bus-monitor / reconnect task.
     task: tokio::task::JoinHandle<()>,
+    /// Kept alive so the monitor task (which holds the other `Arc`) can
+    /// still refresh the session timestamp on reconnect — see
+    /// `camera_stream::ChunkNaming`.
+    #[allow(dead_code)]
+    naming: Arc<ChunkNaming>,
 }
 
 /// A camera's optional sub-stream pipeline — `rtspsrc -> [depay|parse] -> tee`,
@@ -96,6 +101,10 @@ pub struct MediaManager {
     /// signal-loss) produced by [`motion_branch`] onto the daemon's
     /// event-bus bridge.
     event_tx: mpsc::UnboundedSender<Event>,
+    /// Sender used to publish `RecordingChunkEvent`s (Step 10b) as
+    /// `splitmuxsink` opens/closes each chunk, for whichever task actually
+    /// has DB access to turn them into `recordings` rows.
+    chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     motion: Mutex<HashMap<Uuid, MotionHandle>>,
 }
 
@@ -106,10 +115,13 @@ impl MediaManager {
     ///
     /// `event_tx` is where motion/scene-change/tamper events get sent —
     /// the same channel `vms-sources` adapters publish onto, bridged to the
-    /// `EventBus` in `main.rs`. Keeps this crate free of a `vms-engine` dependency.
+    /// `EventBus` in `main.rs`. `chunk_event_tx` is the equivalent channel
+    /// for recording-chunk lifecycle bookkeeping (Step 10b). Both keep this
+    /// crate free of a `vms-db`/`vms-engine` dependency.
     pub fn new(
         config: MediaConfig,
         event_tx: mpsc::UnboundedSender<Event>,
+        chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     ) -> Result<Self, VmsError> {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
@@ -120,6 +132,7 @@ impl MediaManager {
             sub_streams: Mutex::new(HashMap::new()),
             relay,
             event_tx,
+            chunk_event_tx,
             motion: Mutex::new(HashMap::new()),
         })
     }
@@ -155,11 +168,12 @@ impl MediaManager {
             }
         }
 
-        let pipeline = build_camera_stream(
+        let (pipeline, naming) = build_camera_stream(
             camera_id,
             rtsp_url,
             &self.config.recording_dir,
             self.config.chunk_duration_secs,
+            self.chunk_event_tx.clone(),
         )?;
 
         pipeline
@@ -170,7 +184,8 @@ impl MediaManager {
         let task = spawn_monitor(
             camera_id,
             pipeline.clone(),
-            self.config.recording_dir.clone(),
+            naming.clone(),
+            self.chunk_event_tx.clone(),
             shutdown_rx,
         );
 
@@ -181,6 +196,7 @@ impl MediaManager {
                 rtsp_url: rtsp_url.to_owned(),
                 shutdown_tx,
                 task,
+                naming,
             },
         );
 

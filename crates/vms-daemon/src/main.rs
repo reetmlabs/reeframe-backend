@@ -14,7 +14,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use vms_api::{auth::LocalJwtAuthProvider, routes::build_router, state::AppState};
 use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, Migrator,
-    PipelineRepo, PipelineRunRepo, SourceRepo, UserRepo,
+    PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor,
@@ -120,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
     let contact_list_repo = ContactListRepo::new(db.clone());
     let pipeline_repo = PipelineRepo::new(db.clone());
     let pipeline_run_repo = PipelineRunRepo::new(db.clone());
+    let recording_repo = RecordingRepo::new(db.clone());
     let user_repo = UserRepo::new(db.clone());
     let api_key_repo = ApiKeyRepo::new(db.clone());
     tracing::info!("Repository layer ready");
@@ -129,9 +130,13 @@ async fn main() -> anyhow::Result<()> {
     // scene-change/tamper detection) and `vms-sources` adapters publish onto
     // the same channel; the bridge task below forwards each onto the Event
     // Bus by whichever ID it carries, keeping both crates free of a
-    // vms-engine dependency.
+    // vms-engine dependency. `chunk_event_tx` is the equivalent channel for
+    // recording-chunk lifecycle bookkeeping (Step 10b) — `vms-media` has no
+    // DB access, so the consumer task below turns each event into a
+    // `RecordingRepo` call instead.
     tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
     let (media_event_tx, mut media_event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (chunk_event_tx, mut chunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let media_manager = Arc::new(
         MediaManager::new(
             MediaConfig {
@@ -140,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
                 rtsp_bind: cfg.rtsp.bind.clone(),
             },
             media_event_tx.clone(),
+            chunk_event_tx,
         )
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to initialise media manager");
@@ -147,6 +153,54 @@ async fn main() -> anyhow::Result<()> {
         })?,
     );
     tracing::info!("Media manager and RTSP relay server ready");
+
+    // -- Recording-chunk indexing bridge --
+    // Turns each `RecordingChunkEvent` (Step 10b) into a `recordings` row —
+    // insert on open, backfill end_time/size_bytes on close.
+    {
+        let recording_repo = recording_repo.clone();
+        tokio::spawn(async move {
+            use vms_core::RecordingChunkEvent;
+
+            while let Some(event) = chunk_event_rx.recv().await {
+                match event {
+                    RecordingChunkEvent::Opened {
+                        camera_id,
+                        file_path,
+                        chunk_index,
+                        start_time,
+                        codec,
+                    } => {
+                        if let Err(e) = recording_repo
+                            .open_chunk(vms_db::OpenChunk {
+                                camera_id,
+                                file_path,
+                                chunk_index,
+                                start_time: start_time.fixed_offset(),
+                                codec,
+                            })
+                            .await
+                        {
+                            tracing::error!(camera_id = %camera_id, error = %e, "Failed to record chunk open");
+                        }
+                    }
+                    RecordingChunkEvent::Closed {
+                        camera_id,
+                        file_path,
+                        end_time,
+                        size_bytes,
+                    } => {
+                        if let Err(e) = recording_repo
+                            .close_chunk_by_path(camera_id, &file_path, end_time.fixed_offset(), size_bytes)
+                            .await
+                        {
+                            tracing::error!(camera_id = %camera_id, error = %e, "Failed to record chunk close");
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // -- Ring Buffer Manager --
     let ring_buffer_manager = RingBufferManager::new(media_manager.clone());
@@ -305,6 +359,7 @@ async fn main() -> anyhow::Result<()> {
         contact_list_repo,
         pipeline_repo,
         pipeline_run_repo,
+        recording_repo,
         user_repo,
         api_key_repo,
         auth_provider,

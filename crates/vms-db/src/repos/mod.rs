@@ -5,6 +5,7 @@ pub mod contact_list;
 pub mod destination;
 pub mod pipeline;
 pub mod pipeline_run;
+pub mod recording;
 pub mod source;
 pub mod user;
 
@@ -15,6 +16,7 @@ pub use contact_list::ContactListRepo;
 pub use destination::DestinationRepo;
 pub use pipeline::PipelineRepo;
 pub use pipeline_run::PipelineRunRepo;
+pub use recording::RecordingRepo;
 pub use source::SourceRepo;
 pub use user::UserRepo;
 

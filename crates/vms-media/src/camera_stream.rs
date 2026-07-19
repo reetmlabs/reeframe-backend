@@ -1,8 +1,12 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use gstreamer::prelude::*;
+use tokio::sync::mpsc;
 use uuid::Uuid;
-use vms_core::VmsError;
+use vms_core::{RecordingChunkEvent, VmsError};
 
 // -- Supported codecs --
 
@@ -53,6 +57,35 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
 ///
 /// Elements that vary per-camera are named `cam_{id}_{role}` so the reconnect
 /// monitor can look them up by name instead of recreating them.
+/// State shared between the codec-detection `pad-added` handler, the
+/// `format-location-full` chunk-naming callback, and the reconnect
+/// monitor's session-timestamp refresh (Step 10b) — all three need to agree
+/// on the current recording session's filename timestamp prefix, and the
+/// naming callback additionally needs whichever codec the pad-added handler
+/// most recently detected (recorded, not assumed, since it's negotiated
+/// per-camera from the SDP).
+pub(crate) struct ChunkNaming {
+    session_ts: Mutex<String>,
+    codec: Mutex<Option<String>>,
+}
+
+impl ChunkNaming {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            session_ts: Mutex::new(session_timestamp()),
+            codec: Mutex::new(None),
+        })
+    }
+
+    /// Called by the reconnect monitor (Step 10b) so chunks opened after a
+    /// reconnect get a fresh filename prefix — otherwise the fragment index
+    /// restarting from 0 would collide with the previous session's chunk 0
+    /// on disk.
+    pub(crate) fn refresh_session(&self) {
+        *self.session_ts.lock().unwrap() = session_timestamp();
+    }
+}
+
 /// Build a per-camera GStreamer pipeline for continuous recording.
 ///
 /// The codec is **not** assumed at build time. When `rtspsrc` connects to the
@@ -66,13 +99,19 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
 ///                                                                      ▼
 ///                                                      tee ---> queue ---> splitmuxsink (MP4)
 /// ```
+///
+/// `chunk_event_tx` carries `RecordingChunkEvent::Opened`/`Closed` out to
+/// whichever task actually has DB access (this crate deliberately has
+/// none) — see `vms_core::RecordingChunkEvent`'s doc comment for why.
 pub(crate) fn build_camera_stream(
     camera_id: Uuid,
     rtsp_url: &str,
     recording_dir: &std::path::Path,
     chunk_duration_secs: u64,
-) -> Result<gstreamer::Pipeline, VmsError> {
+    chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
+) -> Result<(gstreamer::Pipeline, Arc<ChunkNaming>), VmsError> {
     let gst_pipeline = gstreamer::Pipeline::new();
+    let naming = ChunkNaming::new();
 
     // -- rtspsrc --
     let src = gstreamer::ElementFactory::make("rtspsrc")
@@ -100,13 +139,58 @@ pub(crate) fn build_camera_stream(
     let location = recording_location(recording_dir, camera_id);
     let chunk_ns = chunk_duration_secs * 1_000_000_000;
 
+    // `muxer-factory`/`muxer-properties` only take effect with
+    // `async-finalize=true` (confirmed via `gst-inspect-1.0 splitmuxsink` —
+    // both are documented "Valid only for async-finalize = TRUE") — without
+    // it, `muxer-factory` was silently ignored and mp4mux was only ever
+    // used because it happens to be the element's own default. Setting
+    // `faststart=true` on the muxer itself (mp4mux/qtmux's own property —
+    // "the header is written at the end, then rewritten at the start when
+    // the file is closed") is what makes each finalized chunk immediately
+    // servable via HTTP Range requests (Step 10d) with no separate remux
+    // pass needed.
+    let muxer_properties = gstreamer::Structure::builder("properties")
+        .field("faststart", true)
+        .build();
+
     let splitmux = gstreamer::ElementFactory::make("splitmuxsink")
         .name(format!("cam_{}_splitmux", camera_id.as_simple()))
         .property("location", &location)
         .property("max-size-time", chunk_ns)
+        .property("async-finalize", true)
         .property("muxer-factory", "mp4mux")
+        .property("muxer-properties", &muxer_properties)
         .build()
         .map_err(|e| VmsError::Media(format!("splitmuxsink: {e}")))?;
+
+    // -- Chunk-open naming + indexing --
+    // `format-location-full` fires synchronously right before splitmuxsink
+    // opens each new fragment — the one point that gives the real wall-clock
+    // instant a specific chunk started (deriving it from filenames/chunk-index
+    // arithmetic would drift silently across reconnects). Returning a path
+    // here overrides the `location` property's own `%05d` pattern entirely.
+    {
+        let naming = naming.clone();
+        let tx = chunk_event_tx.clone();
+        let cam_id = camera_id;
+        let recording_dir = recording_dir.to_path_buf();
+        splitmux.connect("format-location-full", false, move |values| {
+            let fragment_id = values[1].get::<u32>().unwrap_or(0);
+            let session_ts = naming.session_ts.lock().unwrap().clone();
+            let codec = naming.codec.lock().unwrap().clone();
+            let file_path = chunk_location(&recording_dir, cam_id, &session_ts, fragment_id);
+
+            let _ = tx.send(RecordingChunkEvent::Opened {
+                camera_id: cam_id,
+                file_path: file_path.clone(),
+                chunk_index: fragment_id as i32,
+                start_time: chrono::Utc::now(),
+                codec,
+            });
+
+            Some(file_path.to_value())
+        });
+    }
 
     // -- Assemble static part of the pipeline --
     // Depayloader + parser are NOT added here — they are created dynamically
@@ -140,6 +224,7 @@ pub(crate) fn build_camera_stream(
     let pipeline_weak = gst_pipeline.downgrade();
     let tee_weak = tee.downgrade();
     let cam_id = camera_id;
+    let naming_for_pad_added = naming.clone();
 
     src.connect_pad_added(move |_src, src_pad| {
         // Only handle RTP src pads
@@ -171,6 +256,7 @@ pub(crate) fn build_camera_stream(
             Ok(e) => e.to_owned(),
             Err(_) => return,
         };
+        *naming_for_pad_added.codec.lock().unwrap() = Some(encoding.clone());
 
         let Some(gst_pipeline) = pipeline_weak.upgrade() else {
             return;
@@ -244,7 +330,7 @@ pub(crate) fn build_camera_stream(
         tracing::info!(camera_id = %cam_id, encoding, "Codec wired");
     });
 
-    Ok(gst_pipeline)
+    Ok((gst_pipeline, naming))
 }
 
 // -- Reconnect monitor task --
@@ -252,12 +338,19 @@ pub(crate) fn build_camera_stream(
 /// Spawn a tokio task that watches the GStreamer bus and reconnects on error/EOS.
 ///
 /// Backoff: 2 s -> 4 s -> … -> 60 s cap, reset to 2 s after a successful restart.
-/// On each reconnect the splitmuxsink location gets a fresh timestamp so chunks
-/// from different sessions never collide on disk.
+/// On each reconnect `naming`'s session timestamp is refreshed so chunks from
+/// different sessions never collide on disk (Step 10b — chunk naming is now
+/// driven by `format-location-full`, not the `location` property, so this is
+/// the one place that needs updating instead of the splitmuxsink element).
+///
+/// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
+/// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
+/// file is finalized on disk (Step 10b).
 pub(crate) fn spawn_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,
-    recording_dir: PathBuf,
+    naming: Arc<ChunkNaming>,
+    chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -296,6 +389,9 @@ pub(crate) fn spawn_monitor(
                                     "GStreamer warning",
                                 );
                             }
+                            MessageView::Element(elem) => {
+                                handle_fragment_closed(camera_id, elem, &chunk_event_tx);
+                            }
                             _ => {}
                         }
                     }
@@ -310,10 +406,7 @@ pub(crate) fn spawn_monitor(
             gst_pipeline.set_state(gstreamer::State::Null).ok();
 
             // Fresh timestamp prefix -> no chunk filename collisions
-            let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
-            if let Some(splitmux) = gst_pipeline.by_name(&splitmux_name) {
-                splitmux.set_property("location", recording_location(&recording_dir, camera_id));
-            }
+            naming.refresh_session();
 
             tracing::info!(
                 camera_id = %camera_id,
@@ -345,16 +438,78 @@ pub(crate) fn spawn_monitor(
 
 // -- Helpers --
 
-/// Unique chunk file location string for a recording session.
+/// Handle a `splitmuxsink-fragment-closed` element message: the previous
+/// chunk file is finalized on disk (faststart-remuxed already, since that's
+/// a muxer-side property, not a separate pass — see `build_camera_stream`),
+/// so this is the point to read its final size and emit
+/// `RecordingChunkEvent::Closed`.
+fn handle_fragment_closed(
+    camera_id: Uuid,
+    elem: &gstreamer::message::Element,
+    chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
+) {
+    let Some(structure) = elem.structure() else {
+        return;
+    };
+    if structure.name() != "splitmuxsink-fragment-closed" {
+        return;
+    }
+    let Ok(file_path) = structure.get::<String>("location") else {
+        tracing::warn!(camera_id = %camera_id, "fragment-closed message missing 'location'");
+        return;
+    };
+
+    let size_bytes = std::fs::metadata(&file_path).map(|m| m.len() as i64).unwrap_or(0);
+
+    let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
+        camera_id,
+        file_path,
+        end_time: chrono::Utc::now(),
+        size_bytes,
+    });
+}
+
+/// Wall-clock timestamp prefix for a fresh recording session — a new one is
+/// generated by [`ChunkNaming::refresh_session`] on every reconnect so chunk
+/// filenames never collide across sessions.
+fn session_timestamp() -> String {
+    chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string()
+}
+
+/// Unique chunk file location string for a recording session — kept only as
+/// the `location` property's fallback value (used if `format-location-full`
+/// ever returns `None`); the real per-chunk path in normal operation comes
+/// from [`chunk_location`], called from the naming signal in
+/// `build_camera_stream`.
 ///
 /// Example: `/var/recordings/cam_<id>_20260509T143022_chunk%05d.mp4`
 pub(crate) fn recording_location(base_dir: &std::path::Path, camera_id: Uuid) -> String {
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     base_dir
         .join(format!(
             "cam_{}_{}_chunk%05d.mp4",
             camera_id.as_simple(),
-            ts
+            session_timestamp()
+        ))
+        .to_string_lossy()
+        .to_string()
+}
+
+/// The exact path for one chunk, given the session's current timestamp
+/// prefix and this fragment's index — used by the `format-location-full`
+/// callback, which needs a concrete filename per fragment rather than the
+/// `%05d` pattern `recording_location` produces for the property fallback.
+fn chunk_location(
+    base_dir: &std::path::Path,
+    camera_id: Uuid,
+    session_ts: &str,
+    fragment_id: u32,
+) -> String {
+    base_dir
+        .join(format!(
+            "cam_{}_{}_chunk{:05}.mp4",
+            camera_id.as_simple(),
+            session_ts,
+            fragment_id
         ))
         .to_string_lossy()
         .to_string()

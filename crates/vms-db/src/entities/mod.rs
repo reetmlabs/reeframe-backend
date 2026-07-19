@@ -11,6 +11,7 @@ pub mod pipeline_node;
 pub mod pipeline_run;
 pub mod pipeline_source_ref;
 pub mod pipeline_trigger;
+pub mod recording;
 pub mod run_node_result;
 pub mod source;
 pub mod user;

@@ -70,6 +70,7 @@ impl From<VmsError> for ApiError {
             | VmsError::TriggerNotFound(_)
             | VmsError::ContactNotFound(_)
             | VmsError::ContactListNotFound(_)
+            | VmsError::RecordingNotFound(_)
             | VmsError::NotFound(_) => StatusCode::NOT_FOUND,
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,

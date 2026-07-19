@@ -25,6 +25,7 @@ pub mod event;
 pub mod node;
 pub mod pipeline;
 pub mod plugin;
+pub mod recording_event;
 pub mod resource;
 pub mod source;
 pub mod trigger;
@@ -34,6 +35,8 @@ pub mod trigger;
 pub use error::VmsError;
 
 pub use event::{Event, TopicKey};
+
+pub use recording_event::RecordingChunkEvent;
 
 pub use resource::{ResourceEntry, ResourceId, ResourceState, RingBufferMode};
 

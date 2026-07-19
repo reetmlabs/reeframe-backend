@@ -18,6 +18,7 @@ mod m20260101_000015_add_sub_rtsp_url;
 mod m20260101_000016_add_camera_codec;
 mod m20260101_000017_create_users;
 mod m20260101_000018_create_api_keys;
+mod m20260101_000019_create_recordings;
 
 pub struct Migrator;
 
@@ -43,6 +44,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000016_add_camera_codec::Migration),
             Box::new(m20260101_000017_create_users::Migration),
             Box::new(m20260101_000018_create_api_keys::Migration),
+            Box::new(m20260101_000019_create_recordings::Migration),
         ]
     }
 }
