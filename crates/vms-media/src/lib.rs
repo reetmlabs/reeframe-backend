@@ -22,6 +22,7 @@
 //! live view) added in later steps.
 
 pub(crate) mod camera_stream;
+pub mod export;
 pub mod manager;
 pub mod motion;
 pub(crate) mod motion_branch;
@@ -31,6 +32,7 @@ pub mod ring_buffer;
 pub(crate) mod ring_buffer_branch;
 pub(crate) mod sub_stream;
 
+pub use export::{export_range, ExportChunk};
 pub use manager::{MediaConfig, MediaManager};
 pub use motion::{MotionAnalyzer, MotionSignal};
 pub use relay::{RelayQuality, RelayServer};

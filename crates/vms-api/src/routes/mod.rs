@@ -3,6 +3,7 @@ mod cameras;
 mod contact_lists;
 mod contacts;
 mod destinations;
+mod export_jobs;
 mod health;
 mod metrics;
 mod pipeline_edges;
@@ -19,6 +20,7 @@ pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use contact_lists::{ContactListDto, CreateContactListBody, UpdateContactListBody};
 pub use contacts::{ContactDto, CreateContactBody, UpdateContactBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
+pub use export_jobs::{CreateExportBody, ExportJobDto};
 pub use pipeline_edges::{CreateEdgeBody, UpdateEdgeBody};
 pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
 pub use pipeline_triggers::{CreateTriggerBody, UpdateTriggerBody};
@@ -199,6 +201,21 @@ fn protected_routes() -> Router {
                                 ),
                         ),
                 ),
+        )
+        .push(
+            Router::with_path("recordings")
+                .push(Router::with_path("export").post(export_jobs::create_export))
+                .push(
+                    Router::with_path("{id}")
+                        .push(Router::with_path("stream").get(recordings::stream_recording)),
+                ),
+        )
+        .push(
+            Router::with_path("export-jobs").push(
+                Router::with_path("{id}")
+                    .get(export_jobs::get_export_job)
+                    .push(Router::with_path("download").get(export_jobs::download_export)),
+            ),
         )
 }
 

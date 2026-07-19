@@ -37,6 +37,6 @@ pub use crypto::Crypto;
 pub use migration::Migrator;
 pub use repos::{
     recording::OpenChunk, user::verify_password, ApiKeyRepo, CameraRepo, ContactListRepo,
-    ContactRepo, DestinationRepo, PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo,
-    UserRepo,
+    ContactRepo, DestinationRepo, ExportJobRepo, PipelineRepo, PipelineRunRepo, RecordingRepo,
+    SourceRepo, UserRepo,
 };

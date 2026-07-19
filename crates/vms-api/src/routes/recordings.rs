@@ -1,4 +1,5 @@
 use chrono::{DateTime, FixedOffset, Utc};
+use salvo::fs::NamedFile;
 use salvo::prelude::*;
 use serde::Serialize;
 use uuid::Uuid;
@@ -136,5 +137,31 @@ pub async fn get_playback(
         "nearest_before": before.map(|r| r.end_time),
         "nearest_after": after.map(|r| r.start_time),
     })));
+    Ok(())
+}
+
+/// GET /recordings/{id}/stream
+///
+/// Serves the chunk's MP4 file directly off disk with `Accept-Ranges: bytes`
+/// support (`salvo::fs::NamedFile` handles Range parsing, `206 Partial
+/// Content`, ETag/If-None-Match, etc.) — a browser/player `<video>` element
+/// can seek within it with zero server-side work per seek, since chunks are
+/// already faststart-remuxed (`moov` before `mdat`) when they're closed.
+#[handler]
+pub async fn stream_recording(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let id = parse_id(req)?;
+    let rec = state.recording_repo.get(id).await?;
+
+    let file = NamedFile::open(&rec.file_path).await.map_err(|e| {
+        tracing::error!(recording_id = %id, file_path = %rec.file_path, error = %e, "Recording file missing on disk");
+        ApiError::not_found(format!("recording {id} has no file on disk"))
+    })?;
+
+    file.send(req.headers(), res).await;
     Ok(())
 }

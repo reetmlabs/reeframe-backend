@@ -13,8 +13,8 @@ use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 use vms_api::{auth::LocalJwtAuthProvider, routes::build_router, state::AppState};
 use vms_db::{
-    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, Migrator,
-    PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo, UserRepo,
+    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, ExportJobRepo,
+    Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, StatMonitor,
@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
     let pipeline_repo = PipelineRepo::new(db.clone());
     let pipeline_run_repo = PipelineRunRepo::new(db.clone());
     let recording_repo = RecordingRepo::new(db.clone());
+    let export_job_repo = ExportJobRepo::new(db.clone());
     let user_repo = UserRepo::new(db.clone());
     let api_key_repo = ApiKeyRepo::new(db.clone());
     tracing::info!("Repository layer ready");
@@ -376,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
         pipeline_repo,
         pipeline_run_repo,
         recording_repo,
+        export_job_repo,
         user_repo,
         api_key_repo,
         auth_provider,
