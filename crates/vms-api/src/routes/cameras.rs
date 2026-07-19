@@ -5,6 +5,7 @@ use vms_db::{
     entities::camera::{self, RingBufferStorage},
     repos::camera::{CreateCamera, UpdateCamera},
 };
+use vms_media::RelayQuality;
 
 use crate::{
     error::{parse_body, parse_id, ApiError},
@@ -31,14 +32,24 @@ pub struct CameraDto {
     pub enabled: bool,
     /// `true` if a GStreamer recording pipeline is currently active.
     pub recording: bool,
-    /// RTSP relay URL served by this backend. `null` until relay is started.
+    /// Main-quality (full resolution) RTSP relay URL, intended for
+    /// full-screen live view. `null` until that relay is started.
     pub relay_url: Option<String>,
+    /// Sub-quality (low resolution) RTSP relay URL, intended for tile/grid
+    /// live view. `null` until that relay is started, or if the camera has
+    /// no `sub_rtsp_url` configured.
+    pub sub_relay_url: Option<String>,
     pub created_at: chrono::DateTime<chrono::FixedOffset>,
     pub updated_at: chrono::DateTime<chrono::FixedOffset>,
 }
 
 impl CameraDto {
-    fn from_model(m: camera::Model, recording: bool, relay_url: Option<String>) -> Self {
+    fn from_model(
+        m: camera::Model,
+        recording: bool,
+        relay_url: Option<String>,
+        sub_relay_url: Option<String>,
+    ) -> Self {
         Self {
             id: m.id,
             name: m.name,
@@ -54,6 +65,7 @@ impl CameraDto {
             enabled: m.enabled,
             recording,
             relay_url,
+            sub_relay_url,
             created_at: m.created_at,
             updated_at: m.updated_at,
         }
@@ -119,8 +131,9 @@ pub async fn list_cameras(depot: &mut Depot) -> Result<Json<Vec<CameraDto>>, Api
         .into_iter()
         .map(|m| {
             let recording = state.media_manager.is_running(m.id);
-            let relay_url = state.media_manager.relay_url(m.id);
-            CameraDto::from_model(m, recording, relay_url)
+            let relay_url = state.media_manager.relay_url(m.id, RelayQuality::Main);
+            let sub_relay_url = state.media_manager.relay_url(m.id, RelayQuality::Sub);
+            CameraDto::from_model(m, recording, relay_url, sub_relay_url)
         })
         .collect();
     Ok(Json(dtos))
@@ -155,7 +168,7 @@ pub async fn create_camera(
 
     let camera = state.camera_repo.create(input).await?;
     res.status_code(StatusCode::CREATED);
-    Ok(Json(CameraDto::from_model(camera, false, None)))
+    Ok(Json(CameraDto::from_model(camera, false, None, None)))
 }
 
 /// GET /cameras/{id}
@@ -169,8 +182,14 @@ pub async fn get_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<Cam
         .await?
         .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
     let recording = state.media_manager.is_running(id);
-    let relay_url = state.media_manager.relay_url(id);
-    Ok(Json(CameraDto::from_model(camera, recording, relay_url)))
+    let relay_url = state.media_manager.relay_url(id, RelayQuality::Main);
+    let sub_relay_url = state.media_manager.relay_url(id, RelayQuality::Sub);
+    Ok(Json(CameraDto::from_model(
+        camera,
+        recording,
+        relay_url,
+        sub_relay_url,
+    )))
 }
 
 /// PATCH /cameras/{id}
@@ -200,8 +219,14 @@ pub async fn update_camera(
 
     let camera = state.camera_repo.update(id, input).await?;
     let recording = state.media_manager.is_running(id);
-    let relay_url = state.media_manager.relay_url(id);
-    Ok(Json(CameraDto::from_model(camera, recording, relay_url)))
+    let relay_url = state.media_manager.relay_url(id, RelayQuality::Main);
+    let sub_relay_url = state.media_manager.relay_url(id, RelayQuality::Sub);
+    Ok(Json(CameraDto::from_model(
+        camera,
+        recording,
+        relay_url,
+        sub_relay_url,
+    )))
 }
 
 /// DELETE /cameras/{id}
@@ -248,16 +273,19 @@ pub async fn start_recording(
         password.as_deref(),
     );
 
-    // Motion detection prefers the camera's dedicated low-resolution
-    // sub-stream, same precedence as `start_relay` above.
-    let motion_url = match &camera.sub_rtsp_url {
-        Some(sub) => build_rtsp_url(sub, camera.username.as_deref(), password.as_deref()),
-        None => rtsp_url.clone(),
-    };
+    // Resolve credentials into the sub-stream URL too, if the camera has
+    // one — `MediaManager::start_camera` starts a persistent sub-stream
+    // pipeline from it (tapped by motion detection by default, and later by
+    // a sub-quality relay), the same low-res-first precedence `start_relay`
+    // above already uses.
+    let sub_rtsp_url = camera
+        .sub_rtsp_url
+        .as_deref()
+        .map(|sub| build_rtsp_url(sub, camera.username.as_deref(), password.as_deref()));
 
     state
         .media_manager
-        .start_camera(id, &rtsp_url, &motion_url)
+        .start_camera(id, &rtsp_url, sub_rtsp_url.as_deref())
         .await?;
     Ok(Json(serde_json::json!({"recording": true})))
 }
@@ -276,16 +304,26 @@ pub async fn stop_recording(
     Ok(())
 }
 
-/// POST /cameras/{id}/relay/start
+/// Parse the `?quality=main|sub` query parameter. Defaults to `Main` when
+/// absent, matching the pre-existing single-relay behavior for callers that
+/// don't know about the sub-quality relay yet.
+fn parse_relay_quality(req: &mut Request) -> Result<RelayQuality, ApiError> {
+    match req.query::<String>("quality").as_deref() {
+        None | Some("main") => Ok(RelayQuality::Main),
+        Some("sub") => Ok(RelayQuality::Sub),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "invalid quality '{other}' — expected 'main' or 'sub'"
+        ))),
+    }
+}
+
+/// POST /cameras/{id}/relay/start?quality=main|sub
 ///
-/// Starts the RTSP relay independently of recording. Probes the source URL for
-/// the codec, then registers a relay factory on the RTSP server.
-///
-/// Source URL priority:
-///   1. `sub_rtsp_url` (camera's own low-res sub-stream) — if set on the camera.
-///   2. `rtsp_url` (main stream) — fallback when no sub-stream is configured.
-///
-/// Credentials (username / password) are injected into whichever URL is used.
+/// Starts an RTSP relay mount bridged from the camera's already-running
+/// main or sub-stream pipeline (`?quality=sub` requires recording to have
+/// been started with a `sub_rtsp_url` configured) — never a new connection
+/// to the camera. Probes the codec on first use (any quality — main and sub
+/// are assumed to share one encoding), then registers the mount.
 #[handler]
 pub async fn start_relay(
     req: &mut Request,
@@ -293,10 +331,11 @@ pub async fn start_relay(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
+    let quality = parse_relay_quality(req)?;
 
-    let (camera, password) = state
+    let camera = state
         .camera_repo
-        .get_decrypted(id)
+        .get(id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
 
@@ -304,19 +343,10 @@ pub async fn start_relay(
         return Err(ApiError::bad_request("camera is disabled"));
     }
 
-    let source_url = match &camera.sub_rtsp_url {
-        Some(sub) => build_rtsp_url(sub, camera.username.as_deref(), password.as_deref()),
-        None => build_rtsp_url(
-            &camera.rtsp_url,
-            camera.username.as_deref(),
-            password.as_deref(),
-        ),
-    };
-
     let had_cached_codec = camera.codec.is_some();
     let codec = state
         .media_manager
-        .start_relay(id, &source_url, camera.codec.as_deref())
+        .start_relay(id, quality, camera.codec.as_deref())
         .await?;
 
     // Persist the detected codec so future daemon restarts can skip the probe.
@@ -326,11 +356,11 @@ pub async fn start_relay(
         }
     }
 
-    let relay_url = state.media_manager.relay_url(id);
+    let relay_url = state.media_manager.relay_url(id, quality);
     Ok(Json(serde_json::json!({ "relay_url": relay_url })))
 }
 
-/// POST /cameras/{id}/relay/stop
+/// POST /cameras/{id}/relay/stop?quality=main|sub
 #[handler]
 pub async fn stop_relay(
     req: &mut Request,
@@ -339,7 +369,8 @@ pub async fn stop_relay(
 ) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
-    state.media_manager.stop_relay(id);
+    let quality = parse_relay_quality(req)?;
+    state.media_manager.stop_relay(id, quality);
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }

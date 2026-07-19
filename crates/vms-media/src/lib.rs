@@ -26,10 +26,12 @@ pub mod manager;
 pub mod motion;
 pub(crate) mod motion_branch;
 pub mod relay;
+pub(crate) mod relay_bridge;
 pub mod ring_buffer;
 pub(crate) mod ring_buffer_branch;
+pub(crate) mod sub_stream;
 
 pub use manager::{MediaConfig, MediaManager};
 pub use motion::{MotionAnalyzer, MotionSignal};
-pub use relay::RelayServer;
+pub use relay::{RelayQuality, RelayServer};
 pub use ring_buffer::{RingBuffer, RingBufferManager, TimestampedFrame};

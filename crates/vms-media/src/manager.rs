@@ -13,9 +13,10 @@ use vms_core::VmsError;
 
 use crate::camera_stream::{build_camera_stream, spawn_monitor};
 use crate::motion_branch::{self, MotionHandle};
-use crate::relay::RelayServer;
+use crate::relay::{RelayQuality, RelayServer};
 use crate::ring_buffer::RingBuffer;
 use crate::ring_buffer_branch;
+use crate::sub_stream::{build_sub_stream, spawn_sub_monitor};
 
 // -- Config --
 
@@ -53,6 +54,27 @@ struct CameraHandle {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// A camera's optional sub-stream pipeline — `rtspsrc -> [depay|parse] -> tee`,
+/// no recording branch. See `sub_stream.rs`.
+struct SubStreamHandle {
+    pipeline: gstreamer::Pipeline,
+    /// The RTSP source URL this sub-stream was started with — needed if a
+    /// sub-quality relay later needs to probe the codec.
+    sub_rtsp_url: String,
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Name of the main pipeline's tee element for a camera.
+fn main_tee_name(camera_id: Uuid) -> String {
+    format!("cam_{}_tee", camera_id.as_simple())
+}
+
+/// Name of the sub-stream pipeline's tee element for a camera.
+fn sub_tee_name(camera_id: Uuid) -> String {
+    format!("cam_{}_subtee", camera_id.as_simple())
+}
+
 // -- MediaManager --
 
 /// Manages per-camera GStreamer pipelines.
@@ -65,10 +87,14 @@ struct CameraHandle {
 pub struct MediaManager {
     config: MediaConfig,
     cameras: Mutex<HashMap<Uuid, CameraHandle>>,
+    /// Optional per-camera sub-stream pipeline — exists only while the
+    /// camera has a configured sub-stream and something needs it (motion
+    /// detection by default; a future sub-quality relay tap will share it).
+    sub_streams: Mutex<HashMap<Uuid, SubStreamHandle>>,
     relay: Arc<RelayServer>,
     /// Sender used to publish `Event`s (motion, scene-change, tamper,
     /// signal-loss) produced by [`motion_branch`] onto the daemon's
-    /// event-bus bridge — see [`start_motion_detection`](Self::start_motion_detection).
+    /// event-bus bridge.
     event_tx: mpsc::UnboundedSender<Event>,
     motion: Mutex<HashMap<Uuid, MotionHandle>>,
 }
@@ -91,31 +117,36 @@ impl MediaManager {
         Ok(Self {
             config,
             cameras: Mutex::new(HashMap::new()),
+            sub_streams: Mutex::new(HashMap::new()),
             relay,
             event_tx,
             motion: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Start continuous recording for a camera, and its motion-detection
-    /// pipeline alongside it. No-op if the recording pipeline is already
-    /// running.
+    /// Start continuous recording for a camera, its optional sub-stream
+    /// pipeline, and motion detection — all tied to this one call, since
+    /// they're only ever torn down together (see [`stop_camera`](Self::stop_camera)).
+    /// No-op if the recording pipeline is already running.
     ///
-    /// `motion_rtsp_url` should be the camera's dedicated low-resolution
-    /// sub-stream when it has one, and the main stream otherwise — the
-    /// caller resolves that preference (mirroring how `start_relay`'s caller
-    /// already does, in `vms-api/src/routes/cameras.rs`), since
-    /// `MediaManager` doesn't hold camera configuration itself. Motion
-    /// detection runs unconditionally whenever the recording pipeline runs —
-    /// it's cheap classical CV, not gated behind a per-pipeline "needs_X"
-    /// flag the way the ring buffer / analytics branch are. Starting it is
-    /// best-effort: a failure here is logged but doesn't fail the recording
-    /// pipeline that just started successfully.
+    /// `sub_rtsp_url` is the camera's dedicated low-resolution sub-stream,
+    /// if it has one (the caller resolves credentials into the URL, same as
+    /// `rtsp_url`). A camera typically supports only two concurrent RTSP
+    /// sessions, already spoken for by this daemon: one for the main stream
+    /// (recording, full-screen relay, ring buffer), one for the sub-stream
+    /// (tile relay, analytics) — so motion detection never opens a
+    /// connection of its own. It taps the sub-stream pipeline's tee by
+    /// default (starting that pipeline here if it isn't already running),
+    /// falling back to the main pipeline's tee when the camera has no
+    /// sub-stream configured, or if starting the sub-stream pipeline fails.
+    /// Both the sub-stream and motion detection are best-effort: a failure
+    /// in either is logged but never fails the recording pipeline that just
+    /// started successfully.
     pub async fn start_camera(
         &self,
         camera_id: Uuid,
         rtsp_url: &str,
-        motion_rtsp_url: &str,
+        sub_rtsp_url: Option<&str>,
     ) -> Result<(), VmsError> {
         {
             let cameras = self.cameras.lock().unwrap();
@@ -146,7 +177,7 @@ impl MediaManager {
         self.cameras.lock().unwrap().insert(
             camera_id,
             CameraHandle {
-                pipeline,
+                pipeline: pipeline.clone(),
                 rtsp_url: rtsp_url.to_owned(),
                 shutdown_tx,
                 task,
@@ -155,71 +186,142 @@ impl MediaManager {
 
         tracing::info!(camera_id = %camera_id, rtsp_url, "Recording pipeline started");
 
-        if let Err(e) = self.start_motion_detection(camera_id, motion_rtsp_url) {
+        // Prefer the sub-stream for motion detection; fall back to main.
+        let (motion_pipeline, motion_tee) = match sub_rtsp_url {
+            Some(sub_url) => match self.start_sub_stream(camera_id, sub_url) {
+                Ok(sub_pipeline) => (sub_pipeline, sub_tee_name(camera_id)),
+                Err(e) => {
+                    tracing::warn!(
+                        camera_id = %camera_id,
+                        error = %e,
+                        "Failed to start sub-stream — motion detection will use the main stream instead",
+                    );
+                    (pipeline, main_tee_name(camera_id))
+                }
+            },
+            None => (pipeline, main_tee_name(camera_id)),
+        };
+
+        if let Err(e) = self.start_motion_detection(camera_id, &motion_pipeline, &motion_tee) {
             tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
         }
 
         Ok(())
     }
 
-    /// Start the RTSP relay for a camera.
+    /// Start an RTSP relay mount for a camera, bridged from whichever
+    /// pipeline `quality` selects — the main pipeline for
+    /// [`RelayQuality::Main`], the sub-stream pipeline for
+    /// [`RelayQuality::Sub`]. That pipeline must already be running
+    /// (recording started, with a sub-stream configured for `Sub`) —
+    /// relaying never starts a connection of its own.
     ///
-    /// When `cached_codec` is `Some`, the probe step is skipped (instant start).
-    /// When `None`, the camera is probed — takes up to 10 s on a first start.
-    /// Returns the codec in use (cached or freshly detected) so the caller can
-    /// persist it to the DB for future daemon restarts.
+    /// When `cached_codec` is `Some`, the probe step is skipped (instant
+    /// start). When `None`, a brief separate connection probes the relevant
+    /// stream's codec — takes up to 10 s on a first start. Returns the
+    /// codec in use (cached or freshly detected) so the caller can persist
+    /// it to the DB for future daemon restarts. Main and sub streams are
+    /// assumed to share one encoding, same as the camera's single cached
+    /// `codec` DB column — real cameras use the same encoder for both.
     pub async fn start_relay(
         &self,
         camera_id: Uuid,
-        source_url: &str,
+        quality: RelayQuality,
         cached_codec: Option<&str>,
     ) -> Result<String, VmsError> {
-        if self.relay.is_relaying(camera_id) {
-            return Ok(self.relay.codec(camera_id).unwrap_or_default());
+        if self.relay.is_relaying(camera_id, quality) {
+            return Ok(self.relay.codec(camera_id, quality).unwrap_or_default());
         }
+
+        let (pipeline, tee_name, probe_url) = match quality {
+            RelayQuality::Main => {
+                let cameras = self.cameras.lock().unwrap();
+                let h = cameras.get(&camera_id).ok_or_else(|| {
+                    VmsError::Media(format!(
+                        "camera {camera_id} is not running — cannot start relay"
+                    ))
+                })?;
+                (
+                    h.pipeline.clone(),
+                    main_tee_name(camera_id),
+                    h.rtsp_url.clone(),
+                )
+            }
+            RelayQuality::Sub => {
+                let subs = self.sub_streams.lock().unwrap();
+                let h = subs.get(&camera_id).ok_or_else(|| {
+                    VmsError::Media(format!(
+                        "sub-stream is not running for camera {camera_id} — start recording with a sub-stream configured first"
+                    ))
+                })?;
+                (
+                    h.pipeline.clone(),
+                    sub_tee_name(camera_id),
+                    h.sub_rtsp_url.clone(),
+                )
+            }
+        };
+
         let codec = match cached_codec {
             Some(c) => c.to_owned(),
-            None => crate::relay::probe_codec(source_url).await?,
+            None => crate::relay::probe_codec(&probe_url).await?,
         };
-        self.relay.start_relay(camera_id, source_url, &codec)?;
+
+        self.relay
+            .start_relay(camera_id, quality, &pipeline, &tee_name, &codec)?;
         Ok(codec)
     }
 
-    /// Stop the RTSP relay for a camera. No-op if not relaying.
-    pub fn stop_relay(&self, camera_id: Uuid) {
-        self.relay.stop_relay(camera_id);
+    /// Stop an RTSP relay mount for a camera/quality. No-op if not relaying.
+    pub fn stop_relay(&self, camera_id: Uuid, quality: RelayQuality) {
+        let pipeline = match quality {
+            RelayQuality::Main => self
+                .cameras
+                .lock()
+                .unwrap()
+                .get(&camera_id)
+                .map(|h| h.pipeline.clone()),
+            RelayQuality::Sub => self
+                .sub_streams
+                .lock()
+                .unwrap()
+                .get(&camera_id)
+                .map(|h| h.pipeline.clone()),
+        };
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        self.relay.stop_relay(camera_id, quality, &pipeline);
     }
 
-    /// Stop the recording pipeline for a camera, and its motion-detection
-    /// pipeline if one is running. Does not affect the relay.
+    /// Stop the recording pipeline for a camera, its sub-stream pipeline if
+    /// one is running, motion detection, and any relay mounts bridged from
+    /// either pipeline.
+    ///
+    /// Order matters: motion detection and both relay qualities are
+    /// detached first (while both pipelines are still `Playing`, so their
+    /// blocking-pad-probe detaches can complete cleanly), then the
+    /// sub-stream pipeline is torn down, then the main one.
     pub async fn stop_camera(&self, camera_id: Uuid) -> Result<(), VmsError> {
-        let handle = self.cameras.lock().unwrap().remove(&camera_id);
+        self.stop_motion_detection(camera_id).await;
+        self.stop_relay(camera_id, RelayQuality::Main);
+        self.stop_relay(camera_id, RelayQuality::Sub);
+        self.stop_sub_stream(camera_id).await;
 
+        let handle = self.cameras.lock().unwrap().remove(&camera_id);
         if let Some(h) = handle {
             let _ = h.shutdown_tx.send(());
             h.task.await.ok();
             tracing::info!(camera_id = %camera_id, "Recording pipeline stopped");
         }
 
-        self.stop_motion_detection(camera_id).await;
-
         Ok(())
     }
 
-    /// Stop all recording pipelines, all motion-detection pipelines, and all
-    /// relays, wait for monitor/analyzer tasks to exit.
+    /// Stop all recording pipelines, all sub-stream pipelines, all
+    /// motion-detection branches, and all relay mounts, wait for
+    /// monitor/analyzer tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
-        let handles: Vec<(Uuid, CameraHandle)> = {
-            let mut cameras = self.cameras.lock().unwrap();
-            cameras.drain().collect()
-        };
-
-        for (id, h) in handles {
-            let _ = h.shutdown_tx.send(());
-            h.task.await.ok();
-            self.relay.stop_relay(id);
-        }
-
         let motion_handles: Vec<MotionHandle> = {
             let mut motion = self.motion.lock().unwrap();
             motion.drain().map(|(_, h)| h).collect()
@@ -228,42 +330,115 @@ impl MediaManager {
             h.stop().await;
         }
 
+        // Relay mounts must be torn down before the pipelines they're
+        // bridged from.
+        let camera_ids: Vec<Uuid> = self.cameras.lock().unwrap().keys().copied().collect();
+        for id in camera_ids {
+            self.stop_relay(id, RelayQuality::Main);
+            self.stop_relay(id, RelayQuality::Sub);
+        }
+
+        let sub_handles: Vec<(Uuid, SubStreamHandle)> = {
+            let mut subs = self.sub_streams.lock().unwrap();
+            subs.drain().collect()
+        };
+        for (_, h) in sub_handles {
+            let _ = h.shutdown_tx.send(());
+            h.task.await.ok();
+        }
+
+        let handles: Vec<(Uuid, CameraHandle)> = {
+            let mut cameras = self.cameras.lock().unwrap();
+            cameras.drain().collect()
+        };
+        for (_id, h) in handles {
+            let _ = h.shutdown_tx.send(());
+            h.task.await.ok();
+        }
+
         tracing::info!("MediaManager shutdown complete");
         Ok(())
     }
 
-    /// Start the standalone motion/scene-change/tamper detection pipeline
-    /// for a camera. No-op if one is already running for this camera.
-    ///
-    /// `rtsp_url` should be the camera's dedicated low-resolution sub-stream
-    /// when it has one, and the main stream otherwise — the caller resolves
-    /// that preference (mirroring how `start_relay`'s caller already does,
-    /// in `vms-api/src/routes/cameras.rs`), since `MediaManager` doesn't hold
-    /// camera configuration itself.
-    pub fn start_motion_detection(&self, camera_id: Uuid, rtsp_url: &str) -> Result<(), VmsError> {
+    /// Start the camera's sub-stream pipeline if not already running, and
+    /// return a clone of its `Pipeline` (for the caller to attach a branch
+    /// to). No-op — just returns the existing pipeline — if already running.
+    fn start_sub_stream(
+        &self,
+        camera_id: Uuid,
+        sub_rtsp_url: &str,
+    ) -> Result<gstreamer::Pipeline, VmsError> {
+        {
+            let subs = self.sub_streams.lock().unwrap();
+            if let Some(h) = subs.get(&camera_id) {
+                return Ok(h.pipeline.clone());
+            }
+        }
+
+        let pipeline = build_sub_stream(camera_id, sub_rtsp_url)?;
+        pipeline
+            .set_state(gstreamer::State::Playing)
+            .map_err(|e| VmsError::Media(format!("start sub-stream {camera_id}: {e}")))?;
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = spawn_sub_monitor(camera_id, pipeline.clone(), shutdown_rx);
+
+        self.sub_streams.lock().unwrap().insert(
+            camera_id,
+            SubStreamHandle {
+                pipeline: pipeline.clone(),
+                sub_rtsp_url: sub_rtsp_url.to_owned(),
+                shutdown_tx,
+                task,
+            },
+        );
+
+        tracing::info!(camera_id = %camera_id, sub_rtsp_url, "Sub-stream pipeline started");
+        Ok(pipeline)
+    }
+
+    /// Stop the camera's sub-stream pipeline. No-op if none is running.
+    async fn stop_sub_stream(&self, camera_id: Uuid) {
+        let handle = self.sub_streams.lock().unwrap().remove(&camera_id);
+        if let Some(h) = handle {
+            let _ = h.shutdown_tx.send(());
+            h.task.await.ok();
+            tracing::info!(camera_id = %camera_id, "Sub-stream pipeline stopped");
+        }
+    }
+
+    /// Attach the motion/scene-change/tamper detection branch to
+    /// `tee_name`'s tee on `pipeline`. No-op if one is already running for
+    /// this camera.
+    fn start_motion_detection(
+        &self,
+        camera_id: Uuid,
+        pipeline: &gstreamer::Pipeline,
+        tee_name: &str,
+    ) -> Result<(), VmsError> {
         {
             let motion = self.motion.lock().unwrap();
             if motion.contains_key(&camera_id) {
                 return Ok(());
             }
         }
-        let handle = motion_branch::start(camera_id, rtsp_url, self.event_tx.clone())?;
+        let handle = motion_branch::attach(pipeline, tee_name, camera_id, self.event_tx.clone())?;
         self.motion.lock().unwrap().insert(camera_id, handle);
         Ok(())
     }
 
-    /// Stop the motion-detection pipeline for a camera. No-op if none is running.
-    pub async fn stop_motion_detection(&self, camera_id: Uuid) {
+    /// Stop the motion-detection branch for a camera. No-op if none is running.
+    async fn stop_motion_detection(&self, camera_id: Uuid) {
         let handle = self.motion.lock().unwrap().remove(&camera_id);
         if let Some(h) = handle {
             h.stop().await;
-            tracing::info!(camera_id = %camera_id, "Motion detection pipeline stopped");
+            tracing::info!(camera_id = %camera_id, "Motion detection branch stopped");
         }
     }
 
-    /// Return the relay URL for a camera if recording (and relay) is active.
-    pub fn relay_url(&self, camera_id: Uuid) -> Option<String> {
-        self.relay.relay_url(camera_id)
+    /// Return the relay URL for a camera/quality if that relay mount is active.
+    pub fn relay_url(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
+        self.relay.relay_url(camera_id, quality)
     }
 
     /// Attach a ring-buffer appsink branch to a running camera pipeline.
@@ -305,9 +480,9 @@ impl MediaManager {
         ring_buffer_branch::detach(&pipeline, camera_id)
     }
 
-    /// Return the codec currently in use for a camera's relay, if the relay is running.
-    pub fn relay_codec(&self, camera_id: Uuid) -> Option<String> {
-        self.relay.codec(camera_id)
+    /// Return the codec currently in use for a camera/quality's relay, if running.
+    pub fn relay_codec(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
+        self.relay.codec(camera_id, quality)
     }
 
     /// Return `true` if a camera pipeline is currently running.

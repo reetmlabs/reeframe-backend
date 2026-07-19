@@ -201,7 +201,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Resource manager ready");
 
     // -- Auto-start relays for cameras that have a cached codec --
-    // These start instantly (no probe needed), so live view is available immediately.
+    // These start instantly (no probe needed). Relays now bridge from an
+    // already-running pipeline's tee rather than opening a connection of
+    // their own (see `vms-media`'s relay rework), so this only applies to
+    // cameras whose pipeline `resource_manager.recover()` (above) already
+    // started — cameras not referenced by any enabled pipeline are left
+    // alone rather than auto-started into continuous recording just to
+    // pre-warm a relay that wasn't otherwise going to run.
     {
         let all_cameras = camera_repo.list().await.unwrap_or_default();
         let cached: Vec<_> = all_cameras
@@ -217,32 +223,34 @@ async fn main() -> anyhow::Result<()> {
             for cam in cached {
                 let id = cam.id;
                 let codec = cam.codec.unwrap();
-                match camera_repo.get_decrypted(id).await {
-                    Ok(Some((c, password))) => {
-                        let source_url = match &c.sub_rtsp_url {
-                            Some(sub) => daemon_build_rtsp_url(
-                                sub,
-                                c.username.as_deref(),
-                                password.as_deref(),
-                            ),
-                            None => daemon_build_rtsp_url(
-                                &c.rtsp_url,
-                                c.username.as_deref(),
-                                password.as_deref(),
-                            ),
-                        };
-                        match media_manager
-                            .start_relay(id, &source_url, Some(&codec))
-                            .await
-                        {
-                            Ok(_) => tracing::info!(camera_id = %id, codec, "Relay auto-started"),
-                            Err(e) => {
-                                tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start relay")
-                            }
-                        }
+
+                if !media_manager.is_running(id) {
+                    tracing::debug!(
+                        camera_id = %id,
+                        "Skipping relay auto-start — camera pipeline is not running"
+                    );
+                    continue;
+                }
+
+                match media_manager
+                    .start_relay(id, vms_media::RelayQuality::Main, Some(&codec))
+                    .await
+                {
+                    Ok(_) => tracing::info!(camera_id = %id, codec, "Main relay auto-started"),
+                    Err(e) => {
+                        tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start main relay")
                     }
-                    _ => {
-                        tracing::warn!(camera_id = %id, "Could not load camera for relay auto-start")
+                }
+
+                if cam.sub_rtsp_url.is_some() {
+                    match media_manager
+                        .start_relay(id, vms_media::RelayQuality::Sub, Some(&codec))
+                        .await
+                    {
+                        Ok(_) => tracing::info!(camera_id = %id, codec, "Sub relay auto-started"),
+                        Err(e) => {
+                            tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start sub relay")
+                        }
                     }
                 }
             }
@@ -495,13 +503,4 @@ async fn shutdown_signal() {
 /// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.
 fn db_kind(url: &str) -> &str {
     url.split("://").next().unwrap_or("unknown")
-}
-
-fn daemon_build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>) -> String {
-    if let (Some(u), Some(p)) = (username, password) {
-        if let Some(rest) = base_url.strip_prefix("rtsp://") {
-            return format!("rtsp://{}:{}@{}", u, p, rest);
-        }
-    }
-    base_url.to_string()
 }

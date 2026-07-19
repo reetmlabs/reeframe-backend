@@ -59,43 +59,50 @@ fn caps_name(id: Uuid) -> String {
 fn sink_name(id: Uuid) -> String {
     format!("cam_{}_motionsink", id.as_simple())
 }
-fn tee_name(id: Uuid) -> String {
-    format!("cam_{}_tee", id.as_simple())
-}
 
-/// Handle to a running per-camera motion-analysis task. Element teardown is
-/// handled by [`detach`] (called by the caller before dropping this), so all
-/// this holds is the analyzer task itself.
+/// Handle to a running per-camera motion-analysis branch. Holds the
+/// pipeline it's attached to and its camera ID so [`stop`](Self::stop) can
+/// detach the GStreamer elements itself — the caller doesn't need to
+/// remember which pipeline (main or sub) motion detection ended up on.
 pub struct MotionHandle {
+    pipeline: gstreamer::Pipeline,
+    camera_id: Uuid,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl MotionHandle {
-    /// Signal the analyzer task to stop and wait for it to exit. Call
-    /// [`detach`] first to tear down the GStreamer elements themselves.
+    /// Detach the GStreamer elements, signal the analyzer task to stop, and
+    /// wait for it to exit.
     pub async fn stop(self) {
+        if let Err(e) = detach(&self.pipeline, self.camera_id) {
+            tracing::warn!(camera_id = %self.camera_id, error = %e, "Failed to detach motion branch");
+        }
         let _ = self.shutdown_tx.send(());
         self.task.await.ok();
     }
 }
 
-/// Attach a motion-analysis branch to the live tee of camera `camera_id`.
+/// Attach a motion-analysis branch to `tee_name`'s tee on `pipeline`.
 ///
-/// Every analyzed frame produces zero or more [`MotionSignal`]s, converted
-/// to [`Event`]s (`TopicKey::Camera`) and sent on `event_tx` — the same
+/// `tee_name` is the caller's choice of which tee to attach to — the
+/// sub-stream's tee by default, or the main pipeline's tee when the camera
+/// has no sub-stream configured (see `MediaManager::start_camera`). Every
+/// analyzed frame produces zero or more [`MotionSignal`]s, converted to
+/// [`Event`]s (`TopicKey::Camera`) and sent on `event_tx` — the same
 /// bridge-to-`EventBus` channel used by `vms-sources` adapters, keeping this
 /// crate free of a `vms-engine` dependency.
 ///
 /// Safe to call while the pipeline is `Playing`.
 pub fn attach(
     pipeline: &gstreamer::Pipeline,
+    tee_name: &str,
     camera_id: Uuid,
     event_tx: mpsc::UnboundedSender<Event>,
 ) -> Result<MotionHandle, VmsError> {
-    let tee = pipeline
-        .by_name(&tee_name(camera_id))
-        .ok_or_else(|| VmsError::Media(format!("tee not found for camera {camera_id}")))?;
+    let tee = pipeline.by_name(tee_name).ok_or_else(|| {
+        VmsError::Media(format!("tee '{tee_name}' not found for camera {camera_id}"))
+    })?;
 
     let queue = gstreamer::ElementFactory::make("queue")
         .name(queue_name(camera_id))
@@ -260,21 +267,25 @@ pub fn attach(
         }
     });
 
-    tracing::info!(camera_id = %camera_id, "Motion detection branch attached");
-    Ok(MotionHandle { shutdown_tx, task })
+    tracing::info!(camera_id = %camera_id, tee_name, "Motion detection branch attached");
+    Ok(MotionHandle {
+        pipeline: pipeline.clone(),
+        camera_id,
+        shutdown_tx,
+        task,
+    })
 }
 
 /// Detach the motion-analysis branch from camera `camera_id`'s tee.
 ///
 /// Same blocking-pad-probe pattern as [`crate::ring_buffer_branch::detach`],
-/// extended to the larger element chain this branch has. Returns
+/// extended to the larger element chain this branch has. The tee itself is
+/// found via the queue's connected peer pad rather than by name, so this
+/// works regardless of which tee (main or sub) `attach` used. Returns
 /// immediately — cleanup is asynchronous. Safe to call while `Playing`. If
 /// no branch is attached for this camera, this is a no-op.
-pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsError> {
+fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsError> {
     let Some(queue) = pipeline.by_name(&queue_name(camera_id)) else {
-        return Ok(());
-    };
-    let Some(tee) = pipeline.by_name(&tee_name(camera_id)) else {
         return Ok(());
     };
 
@@ -293,6 +304,9 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
     let tee_src = queue_sink
         .peer()
         .ok_or_else(|| VmsError::Media("motion queue sink has no peer pad".into()))?;
+    let tee = tee_src
+        .parent_element()
+        .ok_or_else(|| VmsError::Media("motion tee src pad has no parent element".into()))?;
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
 

@@ -6,12 +6,12 @@ use vms_core::VmsError;
 
 // -- Supported codecs --
 
-struct CodecElements {
-    depay_factory: &'static str,
-    parse_factory: &'static str,
+pub(crate) struct CodecElements {
+    pub(crate) depay_factory: &'static str,
+    pub(crate) parse_factory: &'static str,
 }
 
-fn codec_for(encoding_name: &str) -> Option<CodecElements> {
+pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
     match encoding_name.to_uppercase().as_str() {
         "H264" => Some(CodecElements {
             depay_factory: "rtph264depay",

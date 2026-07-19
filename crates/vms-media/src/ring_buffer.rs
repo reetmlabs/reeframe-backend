@@ -227,9 +227,13 @@ impl RingBufferManager {
         let filename = format!("clip_{}_{}.mp4", camera_id.as_simple(), ts);
         let output_path = output_dir.join(&filename);
 
+        // Ring buffer always taps the main pipeline's tee (see
+        // `MediaManager::attach_ring_buffer`), so the main-quality relay's
+        // cached codec (if a main relay has ever been started) is the right
+        // one to reuse here — falls back to H264 if it hasn't.
         let codec = self
             .media
-            .relay_codec(camera_id)
+            .relay_codec(camera_id, crate::relay::RelayQuality::Main)
             .unwrap_or_else(|| "H264".to_owned());
 
         let out = output_path.clone();

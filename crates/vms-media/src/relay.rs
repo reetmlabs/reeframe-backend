@@ -5,20 +5,63 @@ use gstreamer_rtsp_server::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
+use crate::relay_bridge::{self, RelayBridgeHandle};
+
+// -- RelayQuality --
+
+/// Which of a camera's two persistent pipelines a relay mount is bridged
+/// from. A camera typically supports only two concurrent RTSP sessions —
+/// already spoken for by the main pipeline (recording) and the optional
+/// sub-stream pipeline (see `sub_stream.rs`) — so both relay qualities tap
+/// one of those two pipelines' tees rather than opening connections of
+/// their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelayQuality {
+    /// Full resolution — same connection recording uses. Intended for
+    /// full-screen live view.
+    Main,
+    /// The camera's dedicated low-resolution sub-stream, when configured.
+    /// Intended for tile/grid live view.
+    Sub,
+}
+
+impl RelayQuality {
+    fn path_suffix(self) -> &'static str {
+        match self {
+            RelayQuality::Main => "",
+            RelayQuality::Sub => "/sub",
+        }
+    }
+
+    fn branch_suffix(self) -> &'static str {
+        match self {
+            RelayQuality::Main => "relay",
+            RelayQuality::Sub => "subrelay",
+        }
+    }
+}
+
 // -- RelayServer --
 
-/// Per-camera RTSP relay server powered by `gstreamer-rtsp-server`.
+struct RelayEntry {
+    codec: String,
+    bridge: RelayBridgeHandle,
+}
+
+/// Per-camera, per-quality RTSP relay server powered by `gstreamer-rtsp-server`.
 ///
-/// Each camera is served at `rtsp://{bind_host}:{bind_port}/{camera_id}`.
-/// The relay opens its own RTSP connection to the source camera (sub_rtsp_url
-/// when available, otherwise rtsp_url) so the recording pipeline is unaffected.
+/// Each camera can be served at up to two mounts:
+/// `rtsp://{bind_host}:{bind_port}/{camera_id}` (main) and
+/// `.../{camera_id}/sub` (sub). Both are bridged from an already-running
+/// pipeline's tee (see `relay_bridge.rs`) — the relay never opens its own
+/// connection to the camera.
 ///
-/// A dedicated GLib main loop runs on a background thread to drive I/O for the
-/// RTSP server without interfering with GStreamer's own main context.
+/// A dedicated GLib main loop runs on a background thread to drive I/O for
+/// the RTSP server without interfering with GStreamer's own main context.
 pub struct RelayServer {
     mounts: gstreamer_rtsp_server::RTSPMountPoints,
     bind: String,
-    relays: Mutex<HashMap<Uuid, String>>,
+    relays: Mutex<HashMap<(Uuid, RelayQuality), RelayEntry>>,
     _loop_thread: std::thread::JoinHandle<()>,
 }
 
@@ -44,6 +87,8 @@ impl RelayServer {
 
         let loop_thread = std::thread::spawn(move || main_loop.run());
 
+        relay_bridge::warmup();
+
         tracing::info!(bind, "RTSP relay server listening");
 
         Ok(Self {
@@ -54,56 +99,92 @@ impl RelayServer {
         })
     }
 
-    /// Register an RTSP relay for a camera.
+    /// Register an RTSP relay mount for a camera, bridged from `tee_name`'s
+    /// tee on `pipeline` (the main pipeline for [`RelayQuality::Main`], the
+    /// sub-stream pipeline for [`RelayQuality::Sub`]). No-op if already
+    /// registered for this `(camera_id, quality)`.
     ///
-    /// `source_url` is the RTSP URL the relay will connect to (sub_rtsp_url if
-    /// available, otherwise rtsp_url). `codec` is the RTP encoding name as
-    /// reported by the camera's SDP (e.g. "H264", "H265", "JPEG").
-    ///
-    /// The relay is served at `rtsp://{bind_host}:{port}/{camera_id}`.
+    /// `codec` is the RTP encoding name as reported by the camera's SDP
+    /// (e.g. "H264", "H265", "JPEG").
     pub fn start_relay(
         &self,
         camera_id: Uuid,
-        source_url: &str,
+        quality: RelayQuality,
+        pipeline: &gstreamer::Pipeline,
+        tee_name: &str,
         codec: &str,
     ) -> Result<(), VmsError> {
-        validate_relay_url(source_url)?;
+        if self
+            .relays
+            .lock()
+            .unwrap()
+            .contains_key(&(camera_id, quality))
+        {
+            return Ok(());
+        }
 
-        let launch = relay_launch_str(source_url, codec).ok_or_else(|| {
-            VmsError::Media(format!("RTSP relay: unsupported codec '{codec}'"))
-        })?;
+        let path = relay_path(camera_id, quality);
+        let bridge = relay_bridge::attach(
+            pipeline,
+            tee_name,
+            camera_id,
+            quality.branch_suffix(),
+            &self.mounts,
+            &path,
+            codec,
+        )?;
 
-        let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
-        factory.set_launch(&launch);
-        factory.set_shared(true);
-
-        let path = relay_path(camera_id);
-        self.mounts.add_factory(&path, factory);
-        self.relays.lock().unwrap().insert(camera_id, codec.to_owned());
+        self.relays.lock().unwrap().insert(
+            (camera_id, quality),
+            RelayEntry {
+                codec: codec.to_owned(),
+                bridge,
+            },
+        );
 
         tracing::info!(
             camera_id = %camera_id,
+            quality = ?quality,
             codec,
-            source_url,
-            relay = %self.relay_url(camera_id).unwrap_or_default(),
+            relay = %self.relay_url(camera_id, quality).unwrap_or_default(),
             "Relay registered",
         );
         Ok(())
     }
 
-    /// Remove the relay for a camera. No-op if not registered.
-    pub fn stop_relay(&self, camera_id: Uuid) {
-        self.mounts.remove_factory(&relay_path(camera_id));
-        self.relays.lock().unwrap().remove(&camera_id);
-        tracing::info!(camera_id = %camera_id, "Relay removed");
+    /// Remove the relay mount for a camera/quality and detach its tee-tap
+    /// from `pipeline`. No-op if not registered.
+    pub fn stop_relay(
+        &self,
+        camera_id: Uuid,
+        quality: RelayQuality,
+        pipeline: &gstreamer::Pipeline,
+    ) {
+        let entry = self.relays.lock().unwrap().remove(&(camera_id, quality));
+        if let Some(entry) = entry {
+            if let Err(e) = relay_bridge::detach(pipeline, &self.mounts, camera_id, &entry.bridge) {
+                tracing::warn!(
+                    camera_id = %camera_id,
+                    quality = ?quality,
+                    error = %e,
+                    "Failed to detach relay bridge",
+                );
+            }
+        }
+        tracing::info!(camera_id = %camera_id, quality = ?quality, "Relay removed");
     }
 
-    /// Return the relay URL for a camera if a relay is currently registered.
+    /// Return the relay URL for a camera/quality if currently registered.
     ///
     /// When the bind host is `0.0.0.0` or `::`, the machine's primary outbound IP
     /// is substituted so that the returned URL is routable by clients on the LAN.
-    pub fn relay_url(&self, camera_id: Uuid) -> Option<String> {
-        if !self.relays.lock().unwrap().contains_key(&camera_id) {
+    pub fn relay_url(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
+        if !self
+            .relays
+            .lock()
+            .unwrap()
+            .contains_key(&(camera_id, quality))
+        {
             return None;
         }
         let (host, port) = split_bind(&self.bind)?;
@@ -112,16 +193,28 @@ impl RelayServer {
         } else {
             host
         };
-        Some(format!("rtsp://{}:{}/{}", effective_host, port, camera_id.as_simple()))
+        Some(format!(
+            "rtsp://{}:{}{}",
+            effective_host,
+            port,
+            relay_path(camera_id, quality)
+        ))
     }
 
-    pub fn is_relaying(&self, camera_id: Uuid) -> bool {
-        self.relays.lock().unwrap().contains_key(&camera_id)
+    pub fn is_relaying(&self, camera_id: Uuid, quality: RelayQuality) -> bool {
+        self.relays
+            .lock()
+            .unwrap()
+            .contains_key(&(camera_id, quality))
     }
 
     /// Return the cached codec for a running relay, if any.
-    pub fn codec(&self, camera_id: Uuid) -> Option<String> {
-        self.relays.lock().unwrap().get(&camera_id).cloned()
+    pub fn codec(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
+        self.relays
+            .lock()
+            .unwrap()
+            .get(&(camera_id, quality))
+            .map(|e| e.codec.clone())
     }
 }
 
@@ -130,6 +223,11 @@ impl RelayServer {
 /// Connect briefly to an RTSP source and return the RTP encoding name
 /// ("H264", "H265", "JPEG", "AV1"). Runs the GStreamer probe on a
 /// `spawn_blocking` thread so it does not block the async runtime.
+///
+/// Used only for one-time codec detection (then cached to the camera's DB
+/// row) — a short-lived probe connection, not a persistent one, so it
+/// doesn't compete with the two persistent sessions (main, sub) a camera's
+/// connection budget is otherwise spent on.
 pub async fn probe_codec(url: &str) -> Result<String, VmsError> {
     let url = url.to_owned();
     tokio::task::spawn_blocking(move || probe_codec_blocking(&url))
@@ -183,7 +281,9 @@ fn probe_codec_blocking(url: &str) -> Result<String, VmsError> {
 
     let result = rx
         .recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| VmsError::Media("codec probe timed out — camera did not respond in 10 s".into()));
+        .map_err(|_| {
+            VmsError::Media("codec probe timed out — camera did not respond in 10 s".into())
+        });
 
     pipeline.set_state(gstreamer::State::Null).ok();
 
@@ -192,65 +292,8 @@ fn probe_codec_blocking(url: &str) -> Result<String, VmsError> {
 
 // -- Helpers --
 
-/// Reject URLs that could inject elements into the GStreamer launch string.
-///
-/// A valid relay URL must:
-/// - Start with `rtsp://` or `rtsps://`
-/// - Contain no ASCII whitespace (spaces, tabs, newlines)
-/// - Contain neither `!` nor `;` (GStreamer pipeline delimiters)
-fn validate_relay_url(url: &str) -> Result<(), VmsError> {
-    if !url.starts_with("rtsp://") && !url.starts_with("rtsps://") {
-        return Err(VmsError::Media(format!(
-            "invalid relay source URL — must start with rtsp:// or rtsps://: {url}"
-        )));
-    }
-    if url.chars().any(|c| c.is_ascii_whitespace()) {
-        return Err(VmsError::Media(format!(
-            "invalid relay source URL — must not contain whitespace: {url}"
-        )));
-    }
-    if url.contains('!') || url.contains(';') {
-        return Err(VmsError::Media(format!(
-            "invalid relay source URL — must not contain '!' or ';': {url}"
-        )));
-    }
-    Ok(())
-}
-
-fn relay_path(camera_id: Uuid) -> String {
-    format!("/{}", camera_id.as_simple())
-}
-
-/// Build the gst-launch pipeline string for the relay factory.
-///
-/// The pipeline uses passthrough (depay -> parse -> pay) — no transcode.
-/// The `set_shared(true)` flag on the factory means a single upstream
-/// connection is shared across all clients watching the same camera.
-fn relay_launch_str(url: &str, codec: &str) -> Option<String> {
-    let s = match codec.to_uppercase().as_str() {
-        "H264" => format!(
-            "( rtspsrc location={url} latency=100 protocols=tcp \
-             ! rtph264depay ! h264parse config-interval=-1 \
-             ! rtph264pay name=pay0 pt=96 )"
-        ),
-        "H265" | "HEVC" => format!(
-            "( rtspsrc location={url} latency=100 protocols=tcp \
-             ! rtph265depay ! h265parse config-interval=-1 \
-             ! rtph265pay name=pay0 pt=96 )"
-        ),
-        "JPEG" => format!(
-            "( rtspsrc location={url} latency=100 protocols=tcp \
-             ! rtpjpegdepay ! jpegparse \
-             ! rtpjpegpay name=pay0 pt=26 )"
-        ),
-        "AV1" => format!(
-            "( rtspsrc location={url} latency=100 protocols=tcp \
-             ! rtpav1depay ! av1parse \
-             ! rtpav1pay name=pay0 pt=96 )"
-        ),
-        _ => return None,
-    };
-    Some(s)
+fn relay_path(camera_id: Uuid, quality: RelayQuality) -> String {
+    format!("/{}{}", camera_id.as_simple(), quality.path_suffix())
 }
 
 /// Split "host:port" into ("host", "port"). Returns None for malformed input.

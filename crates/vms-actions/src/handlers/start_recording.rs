@@ -65,11 +65,12 @@ pub async fn execute(
     // `ctx.camera_rtsp_urls` only carries the main stream (populated from
     // `MediaManager::rtsp_urls()`, not a DB lookup) — this handler has no way
     // to resolve `sub_rtsp_url` the way the REST/ResourceManager start paths
-    // do, so motion detection decodes the main stream here rather than a
-    // sub-stream. A pipeline-triggered recording start is a rarer path than
+    // do, so no sub-stream pipeline is requested here; motion detection
+    // falls back to the main stream's tee automatically. A
+    // pipeline-triggered recording start is a rarer path than
     // manual/pipeline-referenced start, so this is an acceptable trade-off
     // rather than plumbing DB access into the action-handler layer for it.
-    match media.start_camera(camera_id, rtsp_url, rtsp_url).await {
+    match media.start_camera(camera_id, rtsp_url, None).await {
         Ok(()) => {
             tracing::info!(
                 node_id = %node_id,
