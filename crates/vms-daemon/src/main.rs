@@ -14,7 +14,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use vms_api::{auth::LocalJwtAuthProvider, routes::build_router, state::AppState};
 use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, ExportJobRepo,
-    Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo, UserRepo,
+    Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, RetentionConfig,
@@ -34,7 +34,10 @@ async fn main() -> anyhow::Result<()> {
     let _otel_guard = init_tracing();
 
     // -- Config --
-    let cfg = config::load().map_err(|e| {
+    // `mut`: dynamic settings resolution (below, once the DB is up) patches
+    // this in place with any DB-stored override before anything downstream
+    // — including the auth provider — is built from it.
+    let mut cfg = config::load().map_err(|e| {
         tracing::error!(error = %e, "Failed to load configuration");
         anyhow::anyhow!(e)
     })?;
@@ -53,29 +56,6 @@ async fn main() -> anyhow::Result<()> {
         );
         return Err(anyhow::anyhow!("missing encryption key"));
     }
-
-    // -- Auth config --
-    if cfg.auth.mode != "local" {
-        tracing::error!(
-            mode = %cfg.auth.mode,
-            "Unsupported [auth] mode — only 'local' is available in the community build \
-             ('oidc' requires the vms-ent-auth enterprise crate)"
-        );
-        return Err(anyhow::anyhow!("unsupported auth mode: {}", cfg.auth.mode));
-    }
-    if cfg.auth.jwt_secret.is_empty() {
-        tracing::error!(
-            "VMS_AUTH__JWT_SECRET is not set. \
-             Generate one with: openssl rand -base64 32"
-        );
-        return Err(anyhow::anyhow!("missing JWT secret"));
-    }
-    let auth_provider = LocalJwtAuthProvider::new(
-        cfg.auth.jwt_secret.clone(),
-        cfg.auth.access_token_ttl_secs,
-        cfg.auth.refresh_token_ttl_secs,
-    );
-    tracing::info!("Auth provider ready (local JWT)");
 
     // -- Database --
     tracing::info!(db = db_kind(&cfg.database.url), "Connecting to database");
@@ -103,6 +83,48 @@ async fn main() -> anyhow::Result<()> {
         })?;
         tracing::info!(count = pending.len(), "Migrations applied");
     }
+
+    // -- Dynamic settings --
+    // Must run before anything below is constructed from `cfg` — this is
+    // the `defaults < file < env < DB` precedence step: a DB-stored
+    // override (from a prior `PATCH /system/settings` or config-file
+    // upload) wins over whatever was just loaded from the file/env, and a
+    // key with no override yet gets seeded from that resolved value.
+    let settings_repo = SettingsRepo::new(db.clone());
+    config::resolve_dynamic_settings(&mut cfg, &settings_repo)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to resolve dynamic settings");
+            anyhow::anyhow!(e)
+        })?;
+    tracing::info!(
+        retention_days = cfg.recordings.retention_days,
+        retention_disk_threshold_percent = cfg.recordings.retention_disk_threshold_percent,
+        "Dynamic settings resolved",
+    );
+
+    // -- Auth config --
+    if cfg.auth.mode != "local" {
+        tracing::error!(
+            mode = %cfg.auth.mode,
+            "Unsupported [auth] mode — only 'local' is available in the community build \
+             ('oidc' requires the vms-ent-auth enterprise crate)"
+        );
+        return Err(anyhow::anyhow!("unsupported auth mode: {}", cfg.auth.mode));
+    }
+    if cfg.auth.jwt_secret.is_empty() {
+        tracing::error!(
+            "VMS_AUTH__JWT_SECRET is not set. \
+             Generate one with: openssl rand -base64 32"
+        );
+        return Err(anyhow::anyhow!("missing JWT secret"));
+    }
+    let auth_provider = LocalJwtAuthProvider::new(
+        cfg.auth.jwt_secret.clone(),
+        cfg.auth.access_token_ttl_secs,
+        cfg.auth.refresh_token_ttl_secs,
+    );
+    tracing::info!("Auth provider ready (local JWT)");
 
     // -- Crypto --
     let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {

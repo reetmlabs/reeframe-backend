@@ -187,3 +187,124 @@ pub fn load() -> Result<AppConfig, figment::Error> {
         .merge(Env::prefixed("VMS_").split("__"))
         .extract()
 }
+
+// -- Dynamic settings mapping --
+//
+// Explicit, hand-written mapping between `vms_core::KNOWN_SETTINGS` keys and
+// `AppConfig` fields — deliberately not a generic/reflective mechanism,
+// since the set of dynamic settings is small and fixed. Kept here (not in
+// `vms-core`) because only this crate's `AppConfig` type is involved;
+// `vms-api`'s settings routes only ever talk to the `settings` DB table,
+// never to this function directly.
+
+/// Read the current value of a known setting off `cfg`, as JSON — used to
+/// seed the `settings` table the first time a key is seen (i.e. it's never
+/// been explicitly overridden via the API), so `GET /system/settings` has
+/// an authoritative answer without ever re-reading the config file again
+/// after boot.
+///
+/// Returns `None` for a key `vms_core::setting_meta` doesn't recognize —
+/// callers should already have checked that.
+pub fn get_setting_value(cfg: &AppConfig, key: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    Some(match key {
+        "recordings.retention_days" => json!(cfg.recordings.retention_days),
+        "recordings.retention_disk_threshold_percent" => {
+            json!(cfg.recordings.retention_disk_threshold_percent)
+        }
+        "media.chunk_duration_secs" => json!(cfg.media.chunk_duration_secs),
+        "media.recording_dir" => json!(cfg.media.recording_dir.to_string_lossy()),
+        "auth.mode" => json!(cfg.auth.mode),
+        "auth.jwt_secret" => json!(cfg.auth.jwt_secret),
+        "auth.access_token_ttl_secs" => json!(cfg.auth.access_token_ttl_secs),
+        "auth.refresh_token_ttl_secs" => json!(cfg.auth.refresh_token_ttl_secs),
+        "rtsp.bind" => json!(cfg.rtsp.bind),
+        "api.bind" => json!(cfg.api.bind),
+        "log_level" => json!(cfg.log_level),
+        _ => return None,
+    })
+}
+
+/// Patch `cfg` in place from a DB-stored override value — the DB-wins step
+/// of the `defaults < file < env < DB` precedence chain, applied once at
+/// startup for every key that has an override row.
+pub fn apply_setting_value(
+    cfg: &mut AppConfig,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    fn as_str(v: &serde_json::Value, key: &str) -> Result<String, String> {
+        v.as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("setting '{key}': expected a string"))
+    }
+    fn as_u64(v: &serde_json::Value, key: &str) -> Result<u64, String> {
+        v.as_u64()
+            .ok_or_else(|| format!("setting '{key}': expected a non-negative integer"))
+    }
+    fn as_u32(v: &serde_json::Value, key: &str) -> Result<u32, String> {
+        as_u64(v, key)?
+            .try_into()
+            .map_err(|_| format!("setting '{key}': value out of range for u32"))
+    }
+    fn as_i64(v: &serde_json::Value, key: &str) -> Result<i64, String> {
+        v.as_i64()
+            .ok_or_else(|| format!("setting '{key}': expected an integer"))
+    }
+    fn as_f64(v: &serde_json::Value, key: &str) -> Result<f64, String> {
+        v.as_f64()
+            .ok_or_else(|| format!("setting '{key}': expected a number"))
+    }
+
+    match key {
+        "recordings.retention_days" => cfg.recordings.retention_days = as_u32(value, key)?,
+        "recordings.retention_disk_threshold_percent" => {
+            cfg.recordings.retention_disk_threshold_percent = as_f64(value, key)?
+        }
+        "media.chunk_duration_secs" => cfg.media.chunk_duration_secs = as_u64(value, key)?,
+        "media.recording_dir" => cfg.media.recording_dir = PathBuf::from(as_str(value, key)?),
+        "auth.mode" => cfg.auth.mode = as_str(value, key)?,
+        "auth.jwt_secret" => cfg.auth.jwt_secret = as_str(value, key)?,
+        "auth.access_token_ttl_secs" => cfg.auth.access_token_ttl_secs = as_i64(value, key)?,
+        "auth.refresh_token_ttl_secs" => cfg.auth.refresh_token_ttl_secs = as_i64(value, key)?,
+        "rtsp.bind" => cfg.rtsp.bind = as_str(value, key)?,
+        "api.bind" => cfg.api.bind = as_str(value, key)?,
+        "log_level" => cfg.log_level = as_str(value, key)?,
+        _ => return Err(format!("setting '{key}': not a known dynamic setting")),
+    }
+    Ok(())
+}
+
+/// Resolve dynamic settings against the `settings` table: for each known
+/// key, a DB override (if present) wins over whatever `cfg` was just loaded
+/// with from the config file/env, and its `pending_restart` flag is cleared
+/// (it's applied now); a key with no override yet is seeded from `cfg`'s
+/// current value so future `GET /system/settings` calls have something
+/// authoritative to report. Called once at startup, after migrations run
+/// and before anything downstream is constructed from `cfg`.
+pub async fn resolve_dynamic_settings(
+    cfg: &mut AppConfig,
+    settings_repo: &vms_db::SettingsRepo,
+) -> Result<(), vms_core::VmsError> {
+    for meta in vms_core::KNOWN_SETTINGS {
+        match settings_repo.get(meta.key).await? {
+            Some(row) => {
+                let value: serde_json::Value = serde_json::from_str(&row.value)?;
+                if let Err(e) = apply_setting_value(cfg, meta.key, &value) {
+                    tracing::warn!(key = meta.key, error = %e, "Stored setting value is invalid — keeping the config-file/env value instead");
+                    continue;
+                }
+                if row.pending_restart {
+                    settings_repo.clear_pending(meta.key).await?;
+                    tracing::info!(key = meta.key, "Applied pending setting change on startup");
+                }
+            }
+            None => {
+                if let Some(current) = get_setting_value(cfg, meta.key) {
+                    settings_repo.upsert(meta.key, current, false).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
