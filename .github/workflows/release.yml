@@ -12,9 +12,21 @@ env:
 
 jobs:
   # ── Job 1: compile the release binary ────────────────────────────────────────
+  # Matrixed over arch, each on a *native* runner (amd64 or arm64 hardware) —
+  # no cross-compiler/sysroot juggling for the GStreamer dev libs, and no QEMU
+  # emulation slowing the build down. `ubuntu-22.04-arm` is GitHub's standard
+  # arm64-hosted runner (GA for private repos since 2026-01-29), billed against
+  # the same per-account Actions minutes as the amd64 runners.
   build:
-    name: Build binary (linux/amd64)
-    runs-on: ubuntu-22.04
+    name: Build binary (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +44,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # Cache the Cargo registry and compiled dependencies between runs.
+      # Keyed by arch too — amd64 and arm64 artifacts are never compatible.
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -39,8 +52,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.arch }}-cargo-
 
       - name: Build release binary
         run: cargo build --release --bin vms-daemon
@@ -48,15 +61,20 @@ jobs:
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vms-daemon-linux-amd64
+          name: vms-daemon-linux-${{ matrix.arch }}
           path: target/release/vms-daemon
           retention-days: 1
 
   # ── Job 2: assemble .tar.gz and .deb ─────────────────────────────────────────
+  # Pure packaging of an already-built binary — runs on a plain amd64 runner
+  # for both arches, no native/arm hardware needed here.
   package:
-    name: Package (.tar.gz + .deb)
+    name: Package (.tar.gz + .deb) [linux/${{ matrix.arch }}]
     runs-on: ubuntu-22.04
     needs: build
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
 
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +82,7 @@ jobs:
       - name: Download binary
         uses: actions/download-artifact@v4
         with:
-          name: vms-daemon-linux-amd64
+          name: vms-daemon-linux-${{ matrix.arch }}
           path: artifacts/
 
       - name: Set release version
@@ -73,7 +91,7 @@ jobs:
       # ── .tar.gz ──────────────────────────────────────────────────────────────
       - name: Assemble tar archive
         run: |
-          STAGING="reeframe-backend-${VERSION}-linux-amd64"
+          STAGING="reeframe-backend-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "$STAGING/bin" "$STAGING/systemd"
 
           install -m 0755 artifacts/vms-daemon         "$STAGING/bin/vms-daemon"
@@ -95,12 +113,12 @@ jobs:
             sudo chmod 600 /etc/reeframe/env
           EOF
 
-          tar -czf "reeframe-backend-${VERSION}-linux-amd64.tar.gz" "$STAGING"
+          tar -czf "reeframe-backend-${VERSION}-linux-${{ matrix.arch }}.tar.gz" "$STAGING"
 
       # ── .deb ─────────────────────────────────────────────────────────────────
       - name: Assemble .deb package
         run: |
-          PKG="reeframe-backend_${VERSION}_amd64"
+          PKG="reeframe-backend_${VERSION}_${{ matrix.arch }}"
           mkdir -p \
             "$PKG/DEBIAN" \
             "$PKG/usr/local/bin" \
@@ -110,8 +128,11 @@ jobs:
           install -m 0755 dist/debian/postinst "$PKG/DEBIAN/postinst"
           install -m 0755 dist/debian/postrm   "$PKG/DEBIAN/postrm"
 
-          # Inject the real version into the control file
-          sed "s/^Version:.*/Version: ${VERSION}/" dist/debian/control > "$PKG/DEBIAN/control"
+          # Inject the real version and this matrix leg's arch into the control file
+          sed \
+            -e "s/^Version:.*/Version: ${VERSION}/" \
+            -e "s/^Architecture:.*/Architecture: ${{ matrix.arch }}/" \
+            dist/debian/control > "$PKG/DEBIAN/control"
 
           # Payload files
           install -m 0755 artifacts/vms-daemon  "$PKG/usr/local/bin/vms-daemon"
@@ -122,23 +143,86 @@ jobs:
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: packages
+          name: packages-${{ matrix.arch }}
           path: |
             reeframe-backend-*.tar.gz
             reeframe-backend_*.deb
           retention-days: 1
 
-  # ── Job 3: build and push Docker image ───────────────────────────────────────
-  docker:
-    name: Docker image (ghcr.io)
-    runs-on: ubuntu-22.04
-    needs: build
+  # ── Job 3: build and push a per-arch Docker image, by digest only ───────────
+  # Each leg builds natively on its own arch's runner (again, no QEMU) and
+  # pushes an untagged image identified only by digest; the digests are then
+  # merged into the real multi-arch tags by the `docker-manifest` job below —
+  # this is Docker's documented pattern for spreading a multi-platform build
+  # across multiple native runners instead of emulating the non-native one.
+  docker-build:
+    name: Docker build (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
     permissions:
       contents: read
       packages: write
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # ── Job 4: merge the per-arch digests into the real multi-arch tags ─────────
+  docker-manifest:
+    name: Docker manifest (multi-arch)
+    runs-on: ubuntu-22.04
+    needs: docker-build
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -160,21 +244,24 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          # Word-splitting below is the point: each $(...) expands into
+          # multiple separate `-t`/image-ref arguments.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE }}@sha256:%s ' *)
 
-  # ── Job 4: create GitHub Release and attach artifacts ────────────────────────
+      - name: Inspect merged image
+        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+
+  # ── Job 5: create GitHub Release and attach artifacts ────────────────────────
   release:
     name: GitHub Release
     runs-on: ubuntu-22.04
-    needs: [package, docker]
+    needs: [package, docker-manifest]
     permissions:
       contents: write
 
@@ -224,7 +311,7 @@ jobs:
             echo ""
             echo "**Debian / Ubuntu (.deb)**"
             echo '```bash'
-            echo "sudo dpkg -i reeframe-backend_*_amd64.deb"
+            echo "sudo dpkg -i reeframe-backend_*_\$(dpkg --print-architecture).deb"
             echo "sudo sh -c 'echo VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32) >> /etc/reeframe/env'"
             echo "sudo systemctl start reeframe.service"
             echo '```'
@@ -242,8 +329,9 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          name: packages
           path: release-assets/
+          pattern: packages-*
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
