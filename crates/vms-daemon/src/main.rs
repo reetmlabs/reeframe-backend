@@ -1,5 +1,6 @@
 mod config;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use opentelemetry::trace::TracerProvider as _;
@@ -408,6 +409,8 @@ async fn main() -> anyhow::Result<()> {
         export_job_repo,
         settings_repo,
         media_recording_dir: cfg.media.recording_dir.clone(),
+        config_file_path: PathBuf::from(config::CONFIG_FILE_PATH),
+        config_parser: Arc::new(config::parse_uploaded_config),
         user_repo,
         api_key_repo,
         auth_provider,

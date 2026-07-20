@@ -220,11 +220,13 @@ fn protected_routes() -> Router {
             ),
         )
         .push(
-            Router::with_path("system").push(
-                Router::with_path("settings")
-                    .get(settings::list_settings)
-                    .patch(settings::update_settings),
-            ),
+            Router::with_path("system")
+                .push(
+                    Router::with_path("settings")
+                        .get(settings::list_settings)
+                        .patch(settings::update_settings),
+                )
+                .push(Router::with_path("config-file").post(settings::upload_config_file)),
         )
 }
 

@@ -13,6 +13,16 @@ use vms_media::{MediaManager, RingBufferManager};
 
 use crate::auth::LocalJwtAuthProvider;
 
+/// Parses raw uploaded config-file bytes (`POST /system/config-file`) into
+/// `(key, value)` pairs for every known dynamic setting, or an error message
+/// if the upload doesn't deserialize onto `AppConfig`. Implemented in
+/// `vms-daemon` (which owns `AppConfig`) and injected here as a plain
+/// function so `vms-api` never needs a dependency on `vms-daemon` — the
+/// dependency already runs the other way (`vms-daemon` depends on `vms-api`
+/// to build the router).
+pub type ConfigFileParser =
+    dyn Fn(&[u8]) -> Result<Vec<(&'static str, serde_json::Value)>, String> + Send + Sync;
+
 /// Shared application state injected into every Salvo handler via `affix-state`.
 ///
 /// Constructed once in `main.rs` and cloned into the router. All inner types
@@ -40,6 +50,10 @@ pub struct AppState {
     /// restart is needed to actually move where new chunks land), so
     /// caching it once here is always correct for the process lifetime.
     pub media_recording_dir: PathBuf,
+    /// On-disk path of the config file `POST /system/config-file` backs up
+    /// and replaces — must match `vms_daemon::config::CONFIG_FILE_PATH`.
+    pub config_file_path: PathBuf,
+    pub config_parser: Arc<ConfigFileParser>,
     pub user_repo: UserRepo,
     pub api_key_repo: ApiKeyRepo,
     pub auth_provider: LocalJwtAuthProvider,

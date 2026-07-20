@@ -46,6 +46,15 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    pub fn internal(msg: impl Into<String>) -> Self {
+        let message = msg.into();
+        tracing::error!(error = %message, "internal server error");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        }
+    }
 }
 
 #[async_trait]

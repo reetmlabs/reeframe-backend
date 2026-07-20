@@ -157,6 +157,11 @@ impl Default for AppConfig {
 
 // -- Loader --
 
+/// Relative path of the local config-file override — the same literal
+/// `load()` merges below, and what `POST /system/config-file` backs up and
+/// replaces on disk (see `AppState::config_file_path`).
+pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
+
 /// Load `AppConfig` from a layered set of sources (lowest -> highest priority):
 ///
 /// 1. Built-in defaults (`AppConfig::default()`)
@@ -183,7 +188,7 @@ pub fn load() -> Result<AppConfig, figment::Error> {
     Figment::new()
         .merge(Serialized::defaults(AppConfig::default()))
         .merge(Toml::file("/etc/reeframe/config.toml"))
-        .merge(Toml::file("reeframe.toml"))
+        .merge(Toml::file(CONFIG_FILE_PATH))
         .merge(Env::prefixed("VMS_").split("__"))
         .extract()
 }
@@ -307,4 +312,31 @@ pub async fn resolve_dynamic_settings(
         }
     }
     Ok(())
+}
+
+/// Validate an uploaded `POST /system/config-file` body by parsing it onto
+/// `AppConfig` — the same shape `reeframe.toml` itself must satisfy, so a
+/// partial/malformed upload is rejected here before anything on disk or in
+/// the DB is touched. On success, returns the resolved value of every known
+/// dynamic setting so the caller can sync it into the `settings` table
+/// through the same upsert-and-hot-apply-or-flag path `PATCH
+/// /system/settings` uses. Every key is present in the result because a file
+/// missing a section would already have failed to deserialize above.
+///
+/// Exposed to `vms-api` as a plain function value (`AppState::config_parser`)
+/// rather than a type it imports directly — `vms-daemon` depends on
+/// `vms-api`, not the other way around, so `AppConfig` can't cross that
+/// boundary as a type without creating a cycle.
+pub fn parse_uploaded_config(
+    bytes: &[u8],
+) -> Result<Vec<(&'static str, serde_json::Value)>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let cfg: AppConfig = Figment::new()
+        .merge(Toml::string(text))
+        .extract()
+        .map_err(|e| e.to_string())?;
+    Ok(vms_core::KNOWN_SETTINGS
+        .iter()
+        .filter_map(|meta| get_setting_value(&cfg, meta.key).map(|v| (meta.key, v)))
+        .collect())
 }
