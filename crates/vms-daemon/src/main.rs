@@ -406,6 +406,8 @@ async fn main() -> anyhow::Result<()> {
         pipeline_run_repo,
         recording_repo,
         export_job_repo,
+        settings_repo,
+        media_recording_dir: cfg.media.recording_dir.clone(),
         user_repo,
         api_key_repo,
         auth_provider,

@@ -11,6 +11,7 @@ mod pipeline_nodes;
 mod pipeline_triggers;
 mod pipelines;
 mod recordings;
+mod settings;
 mod sources;
 mod users;
 mod webhooks;
@@ -26,6 +27,7 @@ pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
 pub use pipeline_triggers::{CreateTriggerBody, UpdateTriggerBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use recordings::{PlaybackDto, RecordingDto};
+pub use settings::SettingDto;
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
 pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
 
@@ -215,6 +217,13 @@ fn protected_routes() -> Router {
                 Router::with_path("{id}")
                     .get(export_jobs::get_export_job)
                     .push(Router::with_path("download").get(export_jobs::download_export)),
+            ),
+        )
+        .push(
+            Router::with_path("system").push(
+                Router::with_path("settings")
+                    .get(settings::list_settings)
+                    .patch(settings::update_settings),
             ),
         )
 }

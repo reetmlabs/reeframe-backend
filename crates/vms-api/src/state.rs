@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sea_orm::DatabaseConnection;
 use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DestinationRepo, ExportJobRepo,
-    PipelineRepo, PipelineRunRepo, RecordingRepo, SourceRepo, UserRepo,
+    PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
@@ -32,6 +33,13 @@ pub struct AppState {
     pub pipeline_run_repo: PipelineRunRepo,
     pub recording_repo: RecordingRepo,
     pub export_job_repo: ExportJobRepo,
+    pub settings_repo: SettingsRepo,
+    /// Resolved `media.recording_dir` as of this boot — settings handlers
+    /// need it for the retention disk-threshold check when rebuilding a
+    /// `RetentionConfig` after a hot retention update; it's cold (a
+    /// restart is needed to actually move where new chunks land), so
+    /// caching it once here is always correct for the process lifetime.
+    pub media_recording_dir: PathBuf,
     pub user_repo: UserRepo,
     pub api_key_repo: ApiKeyRepo,
     pub auth_provider: LocalJwtAuthProvider,
