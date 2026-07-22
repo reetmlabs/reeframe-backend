@@ -9,13 +9,11 @@
 //! way the main pipeline's tee is shared by recording, the ring buffer, and
 //! the main-quality relay.
 
-use std::time::Duration;
-
 use gstreamer::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-use crate::camera_stream::codec_for;
+use crate::camera_stream::{codec_for, ReconnectPolicy, WaitPlan};
 
 /// Build a per-camera sub-stream pipeline: `rtspsrc -> [depay|parse] -> tee`.
 ///
@@ -145,10 +143,11 @@ pub(crate) fn build_sub_stream(
     Ok(gst_pipeline)
 }
 
-/// Reconnect monitor for the sub-stream pipeline. Same backoff shape as
-/// `camera_stream::spawn_monitor`, minus the splitmuxsink-location refresh —
-/// nothing here writes to disk, so there's no chunk-collision concern on
-/// reconnect.
+/// Reconnect monitor for the sub-stream pipeline. Same backoff + circuit
+/// breaker as `camera_stream::spawn_monitor` (see `ReconnectPolicy`), minus
+/// the splitmuxsink rebuild — nothing here writes to disk via splitmuxsink,
+/// so there's no GOP-state-survives-reconnect concern, just a plain
+/// `Null`->`Playing` cycle.
 pub(crate) fn spawn_sub_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,
@@ -160,8 +159,7 @@ pub(crate) fn spawn_sub_monitor(
 
         let bus = gst_pipeline.bus().expect("pipeline bus missing");
         let mut bus_stream = bus.stream();
-        let mut backoff = Duration::from_secs(2);
-        const MAX_BACKOFF: Duration = Duration::from_secs(60);
+        let mut policy = ReconnectPolicy::new();
 
         'outer: loop {
             let needs_reconnect = 'watch: loop {
@@ -202,25 +200,46 @@ pub(crate) fn spawn_sub_monitor(
 
             gst_pipeline.set_state(gstreamer::State::Null).ok();
 
-            tracing::info!(
-                camera_id = %camera_id,
-                backoff_secs = backoff.as_secs(),
-                "Sub-stream reconnecting",
-            );
-
-            tokio::select! {
-                _ = tokio::time::sleep(backoff) => {}
-                _ = &mut shutdown_rx => break,
-            }
-
-            match gst_pipeline.set_state(gstreamer::State::Playing) {
-                Ok(_) => {
-                    tracing::info!(camera_id = %camera_id, "Sub-stream restarted");
-                    backoff = Duration::from_secs(2);
+            'reconnect: loop {
+                let wait_plan = policy.on_failure();
+                match wait_plan {
+                    WaitPlan::Backoff(d) => {
+                        tracing::info!(
+                            camera_id = %camera_id,
+                            backoff_secs = d.as_secs(),
+                            consecutive_failures = policy.consecutive_failures(),
+                            "Sub-stream reconnecting",
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(d) => {}
+                            _ = &mut shutdown_rx => break 'outer,
+                        }
+                    }
+                    WaitPlan::CircuitOpen(cooldown) => {
+                        tracing::error!(
+                            camera_id = %camera_id,
+                            consecutive_failures = policy.consecutive_failures(),
+                            cooldown_secs = cooldown.as_secs(),
+                            "Sub-stream circuit breaker open — too many reconnect failures \
+                             in a row, cooling down before the next attempt",
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(cooldown) => {}
+                            _ = &mut shutdown_rx => break 'outer,
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::error!(camera_id = %camera_id, "Sub-stream restart failed: {e}");
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+
+                match gst_pipeline.set_state(gstreamer::State::Playing) {
+                    Ok(_) => {
+                        tracing::info!(camera_id = %camera_id, "Sub-stream restarted");
+                        policy.record_attempt();
+                        break 'reconnect;
+                    }
+                    Err(e) => {
+                        tracing::error!(camera_id = %camera_id, "Sub-stream restart failed: {e}");
+                        continue 'reconnect;
+                    }
                 }
             }
         }

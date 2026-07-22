@@ -1,4 +1,5 @@
 use std::{
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -128,65 +129,13 @@ pub(crate) fn build_camera_stream(
         .map_err(|e| VmsError::Media(format!("tee: {e}")))?;
 
     // -- Recording branch: queue -> splitmuxsink --
-    let queue = gstreamer::ElementFactory::make("queue")
-        .name(format!("cam_{}_recqueue", camera_id.as_simple()))
-        .property("max-size-time", 10_000_000_000u64) // 10 s jitter buffer
-        .property("max-size-buffers", 0u32)
-        .property("max-size-bytes", 0u32)
-        .build()
-        .map_err(|e| VmsError::Media(format!("queue: {e}")))?;
-
-    let location = recording_location(recording_dir, camera_id);
-    let chunk_ns = chunk_duration_secs * 1_000_000_000;
-
-    // NOTE on faststart: `mp4mux`'s own `faststart=true` property looked
-    // like the cheap way to get progressively-servable chunks (HTTP Range
-    // streaming needs `moov` before `mdat`), but it only takes
-    // effect through `muxer-properties`, which itself only applies when
-    // `async-finalize=true` (confirmed via `gst-inspect-1.0 splitmuxsink`).
-    // Turning that on was tested live and reproducibly broke the *existing*
-    // reconnect path — every reconnect eventually errored with "Queued GOP
-    // time is negative" a couple of minutes later, because async-finalize's
-    // internal GOP queueing doesn't survive this pipeline's Null->Playing
-    // reconnect cycle cleanly. Continuous recording is the one thing that
-    // must never destabilize, so faststart is done as a separate pass on
-    // `fragment-closed` instead (see `remux_faststart`) — more disk I/O per
-    // chunk, but completely decoupled from the live pipeline's own state.
-    let splitmux = gstreamer::ElementFactory::make("splitmuxsink")
-        .name(format!("cam_{}_splitmux", camera_id.as_simple()))
-        .property("location", &location)
-        .property("max-size-time", chunk_ns)
-        .build()
-        .map_err(|e| VmsError::Media(format!("splitmuxsink: {e}")))?;
-
-    // -- Chunk-open naming + indexing --
-    // `format-location-full` fires synchronously right before splitmuxsink
-    // opens each new fragment — the one point that gives the real wall-clock
-    // instant a specific chunk started (deriving it from filenames/chunk-index
-    // arithmetic would drift silently across reconnects). Returning a path
-    // here overrides the `location` property's own `%05d` pattern entirely.
-    {
-        let naming = naming.clone();
-        let tx = chunk_event_tx.clone();
-        let cam_id = camera_id;
-        let recording_dir = recording_dir.to_path_buf();
-        splitmux.connect("format-location-full", false, move |values| {
-            let fragment_id = values[1].get::<u32>().unwrap_or(0);
-            let session_ts = naming.session_ts.lock().unwrap().clone();
-            let codec = naming.codec.lock().unwrap().clone();
-            let file_path = chunk_location(&recording_dir, cam_id, &session_ts, fragment_id);
-
-            let _ = tx.send(RecordingChunkEvent::Opened {
-                camera_id: cam_id,
-                file_path: file_path.clone(),
-                chunk_index: fragment_id as i32,
-                start_time: chrono::Utc::now(),
-                codec,
-            });
-
-            Some(file_path.to_value())
-        });
-    }
+    let (queue, splitmux) = build_recording_branch(
+        camera_id,
+        recording_dir,
+        chunk_duration_secs,
+        &naming,
+        &chunk_event_tx,
+    )?;
 
     // -- Assemble static part of the pipeline --
     // Depayloader + parser are NOT added here — they are created dynamically
@@ -329,15 +278,270 @@ pub(crate) fn build_camera_stream(
     Ok((gst_pipeline, naming))
 }
 
+// -- Recording branch (queue -> splitmuxsink) --
+
+// NOTE on faststart: `mp4mux`'s own `faststart=true` property looked like
+// the cheap way to get progressively-servable chunks (HTTP Range streaming
+// needs `moov` before `mdat`), but it only takes effect through
+// `muxer-properties`, which itself only applies when `async-finalize=true`
+// (confirmed via `gst-inspect-1.0 splitmuxsink`). Turning that on was tested
+// live and reproducibly broke the reconnect path — every reconnect
+// eventually errored with "Queued GOP time is negative" a couple of minutes
+// later, because async-finalize's internal GOP queueing doesn't survive
+// this pipeline's Null->Playing reconnect cycle cleanly. Continuous
+// recording is the one thing that must never destabilize, so faststart is
+// done as a separate pass on `fragment-closed` instead (see
+// `remux_faststart`) — more disk I/O per chunk, but completely decoupled
+// from the live pipeline's own state.
+
+/// Build the recording branch — `queue -> splitmuxsink`, with
+/// `format-location-full` wired to the naming/chunk-event machinery — as a
+/// standalone, unattached pair of elements. Used both for the initial
+/// pipeline construction (`build_camera_stream`) and to build a fresh
+/// replacement on every reconnect (`rebuild_recording_branch`) — the caller
+/// adds the returned elements to the pipeline and links them to `tee`.
+fn build_recording_branch(
+    camera_id: Uuid,
+    recording_dir: &Path,
+    chunk_duration_secs: u64,
+    naming: &Arc<ChunkNaming>,
+    chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
+) -> Result<(gstreamer::Element, gstreamer::Element), VmsError> {
+    let queue = gstreamer::ElementFactory::make("queue")
+        .name(format!("cam_{}_recqueue", camera_id.as_simple()))
+        .property("max-size-time", 10_000_000_000u64) // 10 s jitter buffer
+        .property("max-size-buffers", 0u32)
+        .property("max-size-bytes", 0u32)
+        .build()
+        .map_err(|e| VmsError::Media(format!("queue: {e}")))?;
+
+    let location = recording_location(recording_dir, camera_id);
+    let chunk_ns = chunk_duration_secs * 1_000_000_000;
+
+    let splitmux = gstreamer::ElementFactory::make("splitmuxsink")
+        .name(format!("cam_{}_splitmux", camera_id.as_simple()))
+        .property("location", &location)
+        .property("max-size-time", chunk_ns)
+        .build()
+        .map_err(|e| VmsError::Media(format!("splitmuxsink: {e}")))?;
+
+    // -- Chunk-open naming + indexing --
+    // `format-location-full` fires synchronously right before splitmuxsink
+    // opens each new fragment — the one point that gives the real wall-clock
+    // instant a specific chunk started (deriving it from filenames/chunk-index
+    // arithmetic would drift silently across reconnects). Returning a path
+    // here overrides the `location` property's own `%05d` pattern entirely.
+    {
+        let naming = naming.clone();
+        let tx = chunk_event_tx.clone();
+        let cam_id = camera_id;
+        let recording_dir = recording_dir.to_path_buf();
+        splitmux.connect("format-location-full", false, move |values| {
+            let fragment_id = values[1].get::<u32>().unwrap_or(0);
+            let session_ts = naming.session_ts.lock().unwrap().clone();
+            let codec = naming.codec.lock().unwrap().clone();
+            let file_path = chunk_location(&recording_dir, cam_id, &session_ts, fragment_id);
+
+            let _ = tx.send(RecordingChunkEvent::Opened {
+                camera_id: cam_id,
+                file_path: file_path.clone(),
+                chunk_index: fragment_id as i32,
+                start_time: chrono::Utc::now(),
+                codec,
+            });
+
+            Some(file_path.to_value())
+        });
+    }
+
+    Ok((queue, splitmux))
+}
+
+/// Tear down and rebuild the recording branch (`queue` + `splitmuxsink`)
+/// fresh on every reconnect, instead of reusing the same `splitmuxsink`
+/// instance indefinitely.
+///
+/// Fixes a reproduced bug: reused across a bare `Null`->`Playing` reconnect
+/// cycle, `splitmuxsink`'s internal GOP-collection state does not reset
+/// cleanly — roughly 100s after any reconnect, newly-arriving buffers'
+/// timestamps appear (from `splitmuxsink`'s perspective) to precede GOP
+/// data it's still holding from before the reconnect, and
+/// `gstsplitmuxsink.c`'s `handle_gathered_gop()` errors with "Queued GOP
+/// time is negative" — which triggers another reconnect, forever. A fresh
+/// `splitmuxsink` instance has no leftover GOP state to get confused by.
+///
+/// `tee`'s other consumers (relay, ring buffer, motion detection — see
+/// `manager.rs`) are untouched: only the recording branch's own request pad
+/// on `tee` is released and re-requested, nothing about `tee` itself or any
+/// other branch hanging off it changes.
+///
+/// Must be called while `gst_pipeline` is in (or transitioning to) `Null` —
+/// `Bin::remove` requires an element to already be in `Null` state.
+fn rebuild_recording_branch(
+    camera_id: Uuid,
+    gst_pipeline: &gstreamer::Pipeline,
+    naming: &Arc<ChunkNaming>,
+    chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
+    recording_dir: &Path,
+    chunk_duration_secs: u64,
+) -> Result<(), VmsError> {
+    let tee_name = format!("cam_{}_tee", camera_id.as_simple());
+    let queue_name = format!("cam_{}_recqueue", camera_id.as_simple());
+    let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
+
+    let tee = gst_pipeline
+        .by_name(&tee_name)
+        .ok_or_else(|| VmsError::Media("rebuild recording branch: tee not found".into()))?;
+    let old_queue = gst_pipeline
+        .by_name(&queue_name)
+        .ok_or_else(|| VmsError::Media("rebuild recording branch: recqueue not found".into()))?;
+    let old_splitmux = gst_pipeline
+        .by_name(&splitmux_name)
+        .ok_or_else(|| VmsError::Media("rebuild recording branch: splitmux not found".into()))?;
+
+    // Unlink and release the tee's request pad feeding the old queue, then
+    // remove the old elements.
+    let old_queue_sink = old_queue.static_pad("sink").ok_or_else(|| {
+        VmsError::Media("rebuild recording branch: old queue has no sink pad".into())
+    })?;
+    if let Some(tee_src) = old_queue_sink.peer() {
+        tee_src.unlink(&old_queue_sink).ok();
+        tee.release_request_pad(&tee_src);
+    }
+    gst_pipeline
+        .remove_many([&old_queue, &old_splitmux])
+        .map_err(|e| VmsError::Media(format!("rebuild recording branch: remove_many: {e}")))?;
+
+    let (queue, splitmux) = build_recording_branch(
+        camera_id,
+        recording_dir,
+        chunk_duration_secs,
+        naming,
+        chunk_event_tx,
+    )?;
+
+    gst_pipeline
+        .add_many([&queue, &splitmux])
+        .map_err(|e| VmsError::Media(format!("rebuild recording branch: add_many: {e}")))?;
+
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media("rebuild recording branch: tee has no src_%u pad template".into())
+    })?;
+    let queue_sink = queue.static_pad("sink").ok_or_else(|| {
+        VmsError::Media("rebuild recording branch: new queue has no sink pad".into())
+    })?;
+    tee_src
+        .link(&queue_sink)
+        .map_err(|e| VmsError::Media(format!("rebuild recording branch: link tee->queue: {e}")))?;
+    queue.link(&splitmux).map_err(|e| {
+        VmsError::Media(format!(
+            "rebuild recording branch: link queue->splitmux: {e}"
+        ))
+    })?;
+
+    for el in [&queue, &splitmux] {
+        el.sync_state_with_parent().map_err(|e| {
+            VmsError::Media(format!(
+                "rebuild recording branch: sync_state_with_parent: {e}"
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+// -- Reconnect backoff + circuit breaker --
+
+/// What the reconnect monitor should do before its next reconnect attempt.
+pub(crate) enum WaitPlan {
+    /// Below the circuit-breaker threshold — normal exponential backoff.
+    Backoff(Duration),
+    /// At or above the circuit-breaker threshold — a persistently failing
+    /// camera stops being retried at the tight backoff cap and instead gets
+    /// one "probe" attempt per long cooldown.
+    CircuitOpen(Duration),
+}
+
+/// Shared reconnect backoff + circuit-breaker policy for both the main
+/// (`spawn_monitor`) and sub-stream (`sub_stream::spawn_sub_monitor`)
+/// reconnect monitors.
+///
+/// A `set_state(Playing)` call returning `Ok` says nothing about whether the
+/// RTSP connection actually re-established — the connection attempt happens
+/// asynchronously downstream, so a camera that's persistently unreachable
+/// will still get a bus `Error` shortly after. Resetting backoff on every
+/// `Ok` from `set_state` (the previous behavior) therefore let a dead camera
+/// hot-loop reconnects at the base backoff forever. Only staying up for
+/// [`Self::STABLE_UPTIME`] before the *next* failure counts as real
+/// recovery — that's what resets `backoff`/`consecutive_failures` back to
+/// their base values, in [`Self::on_failure`].
+pub(crate) struct ReconnectPolicy {
+    connected_at: tokio::time::Instant,
+    backoff: Duration,
+    consecutive_failures: u32,
+}
+
+impl ReconnectPolicy {
+    const BASE_BACKOFF: Duration = Duration::from_secs(2);
+    const MAX_BACKOFF: Duration = Duration::from_secs(60);
+    /// A reconnect attempt must stay up at least this long before the next
+    /// failure is treated as the start of a fresh failure streak rather than
+    /// a continuation of the current one.
+    const STABLE_UPTIME: Duration = Duration::from_secs(30);
+    /// Failures in a row (within one streak) before the circuit opens.
+    const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+    /// How long the circuit stays open between single probe attempts.
+    const CIRCUIT_OPEN_COOLDOWN: Duration = Duration::from_secs(300);
+
+    pub(crate) fn new() -> Self {
+        Self {
+            connected_at: tokio::time::Instant::now(),
+            backoff: Self::BASE_BACKOFF,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// Call once per failure (a bus `Error`/`Eos`, a failed pipeline
+    /// rebuild, or a failed `set_state(Playing)` call) to get the wait
+    /// policy for the next attempt.
+    pub(crate) fn on_failure(&mut self) -> WaitPlan {
+        if self.connected_at.elapsed() >= Self::STABLE_UPTIME {
+            self.consecutive_failures = 0;
+            self.backoff = Self::BASE_BACKOFF;
+        }
+        self.consecutive_failures += 1;
+
+        if self.consecutive_failures > Self::CIRCUIT_BREAKER_THRESHOLD {
+            WaitPlan::CircuitOpen(Self::CIRCUIT_OPEN_COOLDOWN)
+        } else {
+            let backoff = self.backoff;
+            self.backoff = (self.backoff * 2).min(Self::MAX_BACKOFF);
+            WaitPlan::Backoff(backoff)
+        }
+    }
+
+    /// Call right after `set_state(Playing)` itself returns `Ok` — starts
+    /// the uptime clock [`Self::on_failure`] checks against. Deliberately
+    /// does *not* reset `backoff`/`consecutive_failures`; see the type-level
+    /// doc comment.
+    pub(crate) fn record_attempt(&mut self) {
+        self.connected_at = tokio::time::Instant::now();
+    }
+
+    pub(crate) fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
 // -- Reconnect monitor task --
 
 /// Spawn a tokio task that watches the GStreamer bus and reconnects on error/EOS.
 ///
-/// Backoff: 2 s -> 4 s -> … -> 60 s cap, reset to 2 s after a successful restart.
-/// On each reconnect `naming`'s session timestamp is refreshed so chunks from
-/// different sessions never collide on disk — chunk naming is driven by
-/// `format-location-full`, not the `location` property, so this is the one
-/// place that needs updating instead of the splitmuxsink element.
+/// Backoff and circuit breaker: see [`ReconnectPolicy`]. On each reconnect
+/// `naming`'s session timestamp is refreshed so chunks from different
+/// sessions never collide on disk, and the recording branch (`queue` +
+/// `splitmuxsink`) is torn down and rebuilt fresh — see
+/// `rebuild_recording_branch` for why.
 ///
 /// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
 /// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
@@ -346,6 +550,8 @@ pub(crate) fn spawn_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,
     naming: Arc<ChunkNaming>,
+    recording_dir: PathBuf,
+    chunk_duration_secs: u64,
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
@@ -355,8 +561,7 @@ pub(crate) fn spawn_monitor(
 
         let bus = gst_pipeline.bus().expect("pipeline bus missing");
         let mut bus_stream = bus.stream();
-        let mut backoff = Duration::from_secs(2);
-        const MAX_BACKOFF: Duration = Duration::from_secs(60);
+        let mut policy = ReconnectPolicy::new();
 
         'outer: loop {
             // -- Watch bus until Error/EOS or shutdown --
@@ -404,25 +609,70 @@ pub(crate) fn spawn_monitor(
             // Fresh timestamp prefix -> no chunk filename collisions
             naming.refresh_session();
 
-            tracing::info!(
-                camera_id = %camera_id,
-                backoff_secs = backoff.as_secs(),
-                "Reconnecting",
-            );
-
-            tokio::select! {
-                _ = tokio::time::sleep(backoff) => {}
-                _ = &mut shutdown_rx => break,
-            }
-
-            match gst_pipeline.set_state(gstreamer::State::Playing) {
-                Ok(_) => {
-                    tracing::info!(camera_id = %camera_id, "Camera stream restarted");
-                    backoff = Duration::from_secs(2);
+            // -- Retry until Playing genuinely starts, or shutdown --
+            // Handles pipeline tear-down/rebuild failures and a failed
+            // `set_state(Playing)` call directly, without waiting on a bus
+            // message that would never arrive since the pipeline never
+            // reached Playing in the first place. A failure *after*
+            // Playing starts (e.g. the RTSP connection itself failing) is
+            // instead caught by the bus watch above, on the next lap of
+            // 'outer.
+            'reconnect: loop {
+                let wait_plan = policy.on_failure();
+                match wait_plan {
+                    WaitPlan::Backoff(d) => {
+                        tracing::info!(
+                            camera_id = %camera_id,
+                            backoff_secs = d.as_secs(),
+                            consecutive_failures = policy.consecutive_failures(),
+                            "Reconnecting",
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(d) => {}
+                            _ = &mut shutdown_rx => break 'outer,
+                        }
+                    }
+                    WaitPlan::CircuitOpen(cooldown) => {
+                        tracing::error!(
+                            camera_id = %camera_id,
+                            consecutive_failures = policy.consecutive_failures(),
+                            cooldown_secs = cooldown.as_secs(),
+                            "Circuit breaker open — too many reconnect failures in a row, \
+                             cooling down before the next attempt",
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(cooldown) => {}
+                            _ = &mut shutdown_rx => break 'outer,
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::error!(camera_id = %camera_id, "Restart failed: {e}");
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+
+                if let Err(e) = rebuild_recording_branch(
+                    camera_id,
+                    &gst_pipeline,
+                    &naming,
+                    &chunk_event_tx,
+                    &recording_dir,
+                    chunk_duration_secs,
+                ) {
+                    tracing::error!(
+                        camera_id = %camera_id,
+                        error = %e,
+                        "Failed to rebuild recording branch — will retry",
+                    );
+                    continue 'reconnect;
+                }
+
+                match gst_pipeline.set_state(gstreamer::State::Playing) {
+                    Ok(_) => {
+                        tracing::info!(camera_id = %camera_id, "Camera stream restarted");
+                        policy.record_attempt();
+                        break 'reconnect;
+                    }
+                    Err(e) => {
+                        tracing::error!(camera_id = %camera_id, "Restart failed: {e}");
+                        continue 'reconnect;
+                    }
                 }
             }
         }
@@ -645,4 +895,92 @@ fn chunk_location(
         ))
         .to_string_lossy()
         .to_string()
+}
+
+// -- Tests --
+
+#[cfg(test)]
+mod reconnect_policy_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn first_failure_uses_base_backoff() {
+        let mut policy = ReconnectPolicy::new();
+        match policy.on_failure() {
+            WaitPlan::Backoff(d) => assert_eq!(d, ReconnectPolicy::BASE_BACKOFF),
+            WaitPlan::CircuitOpen(_) => panic!("expected Backoff on the first failure"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_quick_failures_escalate_and_cap_backoff() {
+        let mut policy = ReconnectPolicy::new();
+        let expected = [2u64, 4, 8, 16, 32];
+        for expected_secs in expected {
+            match policy.on_failure() {
+                WaitPlan::Backoff(d) => assert_eq!(d.as_secs(), expected_secs),
+                WaitPlan::CircuitOpen(_) => panic!("should still be below the circuit threshold"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn circuit_opens_after_threshold_failures_in_a_row() {
+        let mut policy = ReconnectPolicy::new();
+        for _ in 0..ReconnectPolicy::CIRCUIT_BREAKER_THRESHOLD {
+            match policy.on_failure() {
+                WaitPlan::Backoff(_) => {}
+                WaitPlan::CircuitOpen(_) => panic!("circuit should still be closed"),
+            }
+        }
+        match policy.on_failure() {
+            WaitPlan::CircuitOpen(d) => assert_eq!(d, ReconnectPolicy::CIRCUIT_OPEN_COOLDOWN),
+            WaitPlan::Backoff(_) => panic!("circuit should have opened by now"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn circuit_stays_open_on_repeated_quick_failures() {
+        let mut policy = ReconnectPolicy::new();
+        for _ in 0..=ReconnectPolicy::CIRCUIT_BREAKER_THRESHOLD {
+            policy.on_failure();
+        }
+        // A probe attempt that fails again immediately (no stable uptime in
+        // between) must not close the circuit.
+        match policy.on_failure() {
+            WaitPlan::CircuitOpen(_) => {}
+            WaitPlan::Backoff(_) => panic!("circuit should stay open on a quick repeat failure"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stable_uptime_resets_backoff_and_failure_count() {
+        let mut policy = ReconnectPolicy::new();
+        policy.on_failure();
+        policy.on_failure();
+        policy.on_failure(); // backoff now escalated past base
+
+        policy.record_attempt();
+        tokio::time::advance(ReconnectPolicy::STABLE_UPTIME + Duration::from_secs(1)).await;
+
+        match policy.on_failure() {
+            WaitPlan::Backoff(d) => assert_eq!(d, ReconnectPolicy::BASE_BACKOFF),
+            WaitPlan::CircuitOpen(_) => panic!("a stable run should have reset the circuit too"),
+        }
+        assert_eq!(policy.consecutive_failures(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn short_uptime_does_not_reset_backoff() {
+        let mut policy = ReconnectPolicy::new();
+        policy.on_failure(); // backoff -> 2s returned, escalates to 4s internally
+
+        policy.record_attempt();
+        tokio::time::advance(ReconnectPolicy::STABLE_UPTIME / 2).await;
+
+        match policy.on_failure() {
+            WaitPlan::Backoff(d) => assert_eq!(d.as_secs(), 4),
+            WaitPlan::CircuitOpen(_) => panic!("should still be below the circuit threshold"),
+        }
+    }
 }

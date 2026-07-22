@@ -185,6 +185,8 @@ impl MediaManager {
             camera_id,
             pipeline.clone(),
             naming.clone(),
+            self.config.recording_dir.clone(),
+            self.config.chunk_duration_secs,
             self.chunk_event_tx.clone(),
             shutdown_rx,
         );
