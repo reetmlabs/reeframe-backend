@@ -3,6 +3,7 @@ mod cameras;
 mod contact_lists;
 mod contacts;
 mod destinations;
+mod discovery;
 mod export_jobs;
 mod health;
 mod metrics;
@@ -21,6 +22,7 @@ pub use cameras::{CameraDto, CreateCameraBody, UpdateCameraBody};
 pub use contact_lists::{ContactListDto, CreateContactListBody, UpdateContactListBody};
 pub use contacts::{ContactDto, CreateContactBody, UpdateContactBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
+pub use discovery::{DiscoveredDeviceDto, ResolvedStreamsDto};
 pub use export_jobs::{CreateExportBody, ExportJobDto};
 pub use pipeline_edges::{CreateEdgeBody, UpdateEdgeBody};
 pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
@@ -227,6 +229,13 @@ fn protected_routes() -> Router {
                         .patch(settings::update_settings),
                 )
                 .push(Router::with_path("config-file").post(settings::upload_config_file)),
+        )
+        .push(
+            Router::with_path("discovery").push(
+                Router::with_path("onvif")
+                    .push(Router::with_path("probe").post(discovery::probe))
+                    .push(Router::with_path("resolve").post(discovery::resolve)),
+            ),
         )
 }
 
