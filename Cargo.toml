@@ -99,6 +99,9 @@ tracing-opentelemetry          = "0.33"
 # Config
 figment = { version = "0.10", features = ["toml", "env"] }
 
+# CLI (vms-daemon subcommands, e.g. `token generate`)
+clap = { version = "4", features = ["derive"] }
+
 # Security
 aes-gcm      = "0.10"
 jsonwebtoken = "9"

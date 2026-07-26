@@ -6434,6 +6434,7 @@ name = "vms-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "figment",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -6448,6 +6449,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
  "vms-api",
  "vms-core",
  "vms-db",

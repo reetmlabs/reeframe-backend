@@ -85,6 +85,21 @@ impl ApiKeyRepo {
         Ok(())
     }
 
+    /// Revoke a key by id alone, without checking which user owns it. Only
+    /// for trusted-operator contexts (the `vms-daemon token revoke` CLI) —
+    /// anyone who can call this already has shell/DB access to the host, so
+    /// the per-user ownership check `delete` enforces for the HTTP API
+    /// doesn't add any real protection here.
+    pub async fn delete_by_id(&self, key_id: Uuid) -> Result<(), VmsError> {
+        let key = api_key::Entity::find_by_id(key_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .ok_or(VmsError::ApiKeyNotFound(key_id))?;
+        key.delete(&self.db).await.map_err(db_err)?;
+        Ok(())
+    }
+
     /// Resolve a raw key to the user it belongs to, bumping `last_used` on a
     /// match. Returns `Ok(None)` for an unknown or already-revoked key —
     /// this is an expected outcome for a bad credential, not an error.

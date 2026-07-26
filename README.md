@@ -142,17 +142,29 @@ MP4 chunks appear in `/var/lib/reeframe/recordings/`.
 
 ---
 
-## Features — v0.1.0
+## Features
+
+### Pipeline engine
+- Pipeline DAG — schedule, event, system, manual, and stat-threshold triggers; all action nodes (transcode, extract_clip, snapshot, merge_clips, compress, encrypt, watermark, render_notification, delay, condition, fork, PTZ, start/stop recording); all transport adapters (local, S3, SFTP, SMB, Telegram, email, Slack, SMS, webhook)
+- Ring buffer (pre-event footage) — memory or disk backed
+- Motion, scene-change, and tamper/signal-lost detection — frame-diff based
 
 ### Recording & media
-- Continuous chunked MP4 recording via GStreamer `splitmuxsink`
+- Continuous chunked MP4 recording via GStreamer `splitmuxsink`, with `moov`-front remuxing for progressively Range-streamable chunks
 - H.264, H.265, MJPEG, and AV1 codec support
-- Automatic RTSP reconnection with exponential backoff (2 s → 60 s cap)
-- Per-camera start / stop via REST API
+- Dual main/sub-stream pipelines per camera — full-res recording, low-res tile/relay
+- Automatic RTSP reconnection with exponential backoff (2 s → 60 s cap) and a circuit breaker for persistently unreachable cameras
+- Recordings index + playback API — list by camera/time range, seek-by-datetime, Range-enabled streaming, clip export
+- Age- and disk-threshold-based retention sweeps
+- ONVIF device discovery and automatic main/sub stream resolution (see [`docs/README.md`](docs/README.md#onvif-discovery))
+
+### Runtime settings
+- `GET`/`PATCH /system/settings` — change a subset of daemon settings (recording retention, auth, network binds) without restarting for the ones that support it live; `POST /system/config-file` to upload a full replacement config (see [`docs/README.md`](docs/README.md#settings-api))
 
 ### Security
 - AES-256-GCM credential encryption at rest (RTSP passwords, API keys, S3 secrets)
 - 12-byte random nonce per field per write — same plaintext never produces the same ciphertext
+- JWT authentication (local HS256, single admin user + API keys) — pluggable via the `AuthProvider` seam (see [`docs/plugin-sdk.md`](docs/plugin-sdk.md))
 - Systemd unit with `NoNewPrivileges`, `ProtectSystem=strict`, capability bounding set cleared
 
 ### Database
@@ -160,14 +172,12 @@ MP4 chunks appear in `/var/lib/reeframe/recordings/`.
 - Auto-migration on startup — no manual `migrate` command needed
 
 ### API
-- Full REST API over Salvo (Rust)
-- Camera, source, and destination CRUD
-- `POST /cameras/{id}/recording/start|stop`
-- `GET /health`
+- Full REST API over Salvo (Rust): camera/source/destination/pipeline/contact CRUD, recording lifecycle, playback/export, dynamic settings, ONVIF discovery
+- `GET /health`, Prometheus metrics, OTLP-compatible structured tracing
 
 ### Deployment
-- Single static binary
-- Multi-stage Docker image (GStreamer runtime, non-root user, healthcheck)
+- Single static binary — Linux `amd64` and `arm64`/`aarch64`
+- Multi-stage Docker image (GStreamer runtime, non-root user, healthcheck), published as a multi-arch manifest
 - `.deb` package with systemd integration and postinst hardening
 - `.tar.gz` archive for manual installs
 
@@ -199,16 +209,19 @@ VMS_* env vars            — highest priority
 
 ## Roadmap
 
-| Release | What ships                                                                           |
-|---|--------------------------------------------------------------------------------------|
-| **v0.1.0** ✓ | Camera CRUD, continuous RTSP recording, REST API, Docker, .deb                       |
-| **v0.2.0** | Pipeline DAG engine — schedule & manual triggers, ring buffer, executor              |
-| **v0.3.0** | All 14 action nodes, all 10 transport adapters                                       |
-| **v0.4.0** | External event sources — MQTT, Home Assistant, HTTP webhook, file watcher            |
-| **v0.5.0** | Full authenticated API, Prometheus metrics, OTLP tracing/logs, ONNX object detection |
-| **v1.0.0** | ONVIF discovery, arm64 builds, community documentation                               |
+| Release | What ships |
+|---|---|
+| **v0.1.0** ✓ | Camera CRUD, continuous RTSP recording, REST API, Docker, .deb |
+| **v0.2.0** ✓ | Pipeline DAG engine — schedule & manual triggers, ring buffer, executor |
+| **v0.3.0** ✓ | All 14 action nodes, all 10 transport adapters |
+| **v0.4.0** ✓ | External event sources — MQTT, Home Assistant, HTTP webhook, file watcher |
+| **v0.5.0** ✓ | Full authenticated API, Prometheus metrics, OTLP tracing/logs, motion/tamper detection |
+| **v0.6.0** ✓ | Recordings index, seek-by-datetime playback, Range streaming, clip export |
+| **v0.9.0** ✓ | Dynamic settings API — DB-backed override layer (hot/cold reload), config-file upload |
+| **v1.0.0** ✓ | Docker multi-arch (`amd64`/`arm64`), ONVIF discovery + sub-stream support, reconnect hardening, community docs |
+| **v1.x** | WebRTC live view, multi-user, hardware-accelerated inference |
 
-Enterprise features (SSO, RBAC, facial recognition, HA clustering, tiered storage) are built on top of the same community engine in a separate private repository. The pipeline DAG, all action nodes, and all transport adapters stay open source forever.
+Enterprise features (SSO, RBAC, facial recognition, HA clustering, tiered storage) are built on top of the same community engine in a separate private repository. The pipeline DAG, all action nodes, and all transport adapters stay open source forever — see [`docs/plugin-sdk.md`](docs/plugin-sdk.md) for exactly where that boundary is drawn.
 
 ---
 
@@ -240,6 +253,13 @@ cargo build --release --bin vms-daemon
 VMS_ENCRYPTION_KEY=$(openssl rand -base64 32) \
   ./target/release/vms-daemon
 ```
+
+---
+
+## Documentation
+
+- [`docs/README.md`](docs/README.md) — Settings API, ONVIF discovery
+- [`docs/plugin-sdk.md`](docs/plugin-sdk.md) — implementing `AuthProvider`, `AnalyticsProvider`, `AuditSink`, or `ClusterCoordinator`
 
 ---
 

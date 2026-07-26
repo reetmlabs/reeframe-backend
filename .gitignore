@@ -3,3 +3,4 @@
 *.db
 design-notes
 .env
+.venv

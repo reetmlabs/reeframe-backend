@@ -1,8 +1,10 @@
+mod cli;
 mod config;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::Parser;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::{logs::SdkLoggerProvider, trace::SdkTracerProvider, Resource};
@@ -26,6 +28,14 @@ use vms_sources::SourceManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // A subcommand (currently only `token ...`) runs a lightweight one-shot
+    // path — connect to the DB, do one thing, exit — instead of starting the
+    // full daemon below. No subcommand preserves the exact pre-existing
+    // behavior (systemd/docker invoke the binary with no arguments).
+    if let Some(command) = cli::Cli::parse().command {
+        return cli::run(command).await;
+    }
+
     eprintln!(
         "Reeframe VMS daemon v{} — starting",
         env!("CARGO_PKG_VERSION")
