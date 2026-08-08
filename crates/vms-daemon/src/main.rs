@@ -14,7 +14,10 @@ use salvo::Listener;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
-use vms_api::{auth::LocalJwtAuthProvider, routes::build_router, state::AppState};
+use vms_api::{
+    auth::LocalJwtAuthProvider, coordinator_auth::CoordinatorJwksAuthProvider,
+    routes::build_router, state::AppState,
+};
 use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, ExportJobRepo,
     Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo, UserRepo,
@@ -115,11 +118,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // -- Auth config --
-    if cfg.auth.mode != "local" {
+    if cfg.auth.mode != "local" && cfg.auth.mode != "oidc" {
         tracing::error!(
             mode = %cfg.auth.mode,
-            "Unsupported [auth] mode — only 'local' is available in the community build \
-             ('oidc' requires the vms-ent-auth enterprise crate)"
+            "Unsupported [auth] mode — must be 'local' or 'oidc'"
         );
         return Err(anyhow::anyhow!("unsupported auth mode: {}", cfg.auth.mode));
     }
@@ -136,6 +138,28 @@ async fn main() -> anyhow::Result<()> {
         cfg.auth.refresh_token_ttl_secs,
     );
     tracing::info!("Auth provider ready (local JWT)");
+
+    // Local auth above is always active regardless of `mode` — Coordinator
+    // trust is additive, never a replacement (Step 14d: the BE stays fully
+    // autonomous with no `jwks_url` configured at all).
+    let coordinator_auth_provider = if cfg.auth.mode == "oidc" {
+        let jwks_url = cfg.auth.jwks_url.clone().ok_or_else(|| {
+            tracing::error!("[auth] mode = \"oidc\" requires [auth] jwks_url to be set");
+            anyhow::anyhow!("missing jwks_url for oidc auth mode")
+        })?;
+        let provider = CoordinatorJwksAuthProvider::new(
+            jwks_url.clone(),
+            std::time::Duration::from_secs(cfg.auth.jwks_refresh_interval_secs),
+        );
+        provider.prefetch().await.map_err(|e| {
+            tracing::error!(jwks_url = %jwks_url, error = %e, "Failed to fetch Coordinator JWKS");
+            anyhow::anyhow!(e)
+        })?;
+        tracing::info!(jwks_url = %jwks_url, "Coordinator JWKS provider ready");
+        Some(Arc::new(provider))
+    } else {
+        None
+    };
 
     // -- Crypto --
     let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {
@@ -424,6 +448,7 @@ async fn main() -> anyhow::Result<()> {
         user_repo,
         api_key_repo,
         auth_provider,
+        coordinator_auth_provider,
         media_manager: media_manager.clone(),
         ring_buffer_manager,
         event_bus,

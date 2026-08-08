@@ -12,6 +12,7 @@ use vms_engine::{
 use vms_media::{MediaManager, RingBufferManager};
 
 use crate::auth::LocalJwtAuthProvider;
+use crate::coordinator_auth::CoordinatorJwksAuthProvider;
 
 /// Parses raw uploaded config-file bytes (`POST /system/config-file`) into
 /// `(key, value)` pairs for every known dynamic setting, or an error message
@@ -57,6 +58,10 @@ pub struct AppState {
     pub user_repo: UserRepo,
     pub api_key_repo: ApiKeyRepo,
     pub auth_provider: LocalJwtAuthProvider,
+    /// `None` unless `[auth] mode = "oidc"` — set once at boot (Step 14a).
+    /// Not yet consumed by `AuthMiddleware`; wiring the second accepted
+    /// credential path into request handling is Step 14c.
+    pub coordinator_auth_provider: Option<Arc<CoordinatorJwksAuthProvider>>,
     pub media_manager: Arc<MediaManager>,
     pub ring_buffer_manager: Arc<RingBufferManager>,
     pub event_bus: Arc<EventBus>,

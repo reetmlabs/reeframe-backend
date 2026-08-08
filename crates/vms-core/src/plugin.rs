@@ -6,7 +6,7 @@
 //!
 //! | Trait | Community impl | Enterprise impl |
 //! |-------|----------------|-----------------|
-//! | [`AuthProvider`] | Local JWT validation | SAML 2.0, OIDC, LDAP/AD, SCIM |
+//! | [`AuthProvider`] | Local JWT validation + Coordinator-issued JWT trust (JWKS) | SAML 2.0, LDAP/AD, SCIM, MFA |
 //! | [`AnalyticsProvider`] | ONNX Runtime object detection | Facial recognition, LPR, crowd analytics, custom models |
 //! | [`AuditSink`] | Structured `tracing` output | Tamper-proof append-only store (GDPR/SOC2/HIPAA) |
 //! | [`ClusterCoordinator`] | No-op (single-host) | Raft consensus, active-active failover, multi-site |
@@ -24,9 +24,11 @@ use crate::error::VmsError;
 
 /// Verifies API tokens and manages authenticated sessions.
 ///
-/// The community implementation validates HS256/RS256 JWTs signed by the local
-/// key store.  Enterprise implementations can delegate to an external IdP via
-/// SAML 2.0, OIDC, or LDAP.
+/// The community implementation validates HS256 JWTs signed by the local key
+/// store, plus JWTs issued by a Coordinator instance (verified locally
+/// against its cached JWKS — Coordinator is core infrastructure, not an
+/// enterprise add-on). Enterprise implementations can additionally delegate
+/// to an external IdP via SAML 2.0 or LDAP.
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
     /// Verify `token` and return the claims it carries.

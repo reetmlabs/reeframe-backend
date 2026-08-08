@@ -96,9 +96,10 @@ impl Default for RtspConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthConfig {
     /// `"local"` — the BE issues and validates its own JWTs with `jwt_secret`.
-    /// `"oidc"` — validate IDP-issued tokens via a JWKS endpoint; requires
-    /// the `vms-ent-auth` enterprise crate and is not available in the
-    /// community build.
+    /// `"oidc"` — additionally trust JWTs issued by the Coordinator instance
+    /// at `jwks_url`, verified locally against its cached public keys.
+    /// Community-tier — Coordinator is core infrastructure, not an
+    /// enterprise add-on.
     pub mode: String,
     /// HMAC-SHA256 signing secret for locally issued JWTs. Required when
     /// `mode = "local"`. Set via config file or VMS_AUTH__JWT_SECRET env var.
@@ -108,6 +109,12 @@ pub struct AuthConfig {
     pub access_token_ttl_secs: i64,
     /// Refresh token lifetime, in seconds.
     pub refresh_token_ttl_secs: i64,
+    /// URL of Coordinator's `GET /.well-known/jwks.json` endpoint. Required
+    /// when `mode = "oidc"`; ignored otherwise. Set via config file or
+    /// VMS_AUTH__JWKS_URL env var.
+    pub jwks_url: Option<String>,
+    /// How long a fetched JWKS key set is trusted before being refetched.
+    pub jwks_refresh_interval_secs: u64,
 }
 
 impl Default for AuthConfig {
@@ -117,6 +124,8 @@ impl Default for AuthConfig {
             jwt_secret: String::new(),
             access_token_ttl_secs: 900,        // 15 minutes
             refresh_token_ttl_secs: 2_592_000, // 30 days
+            jwks_url: None,
+            jwks_refresh_interval_secs: 300, // 5 minutes
         }
     }
 }
