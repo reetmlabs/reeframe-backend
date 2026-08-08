@@ -20,7 +20,8 @@ use vms_api::{
 };
 use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, ExportJobRepo,
-    Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo, UserRepo,
+    Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo,
+    TileLayoutRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, RetentionConfig,
@@ -181,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
     let export_job_repo = ExportJobRepo::new(db.clone());
     let user_repo = UserRepo::new(db.clone());
     let api_key_repo = ApiKeyRepo::new(db.clone());
+    let tile_layout_repo = TileLayoutRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
     // -- Media Manager --
@@ -442,6 +444,7 @@ async fn main() -> anyhow::Result<()> {
         recording_repo,
         export_job_repo,
         settings_repo,
+        tile_layout_repo,
         media_recording_dir: cfg.media.recording_dir.clone(),
         config_file_path: PathBuf::from(config::CONFIG_FILE_PATH),
         config_parser: Arc::new(config::parse_uploaded_config),

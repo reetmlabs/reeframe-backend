@@ -21,6 +21,10 @@ mod m20260101_000018_create_api_keys;
 mod m20260101_000019_create_recordings;
 mod m20260101_000020_create_export_jobs;
 mod m20260101_000021_create_settings;
+mod m20260101_000022_create_tile_profiles;
+mod m20260101_000023_create_tile_formations;
+mod m20260101_000024_create_tile_camera_bindings;
+mod m20260101_000025_create_profile_site_assignments;
 
 pub struct Migrator;
 
@@ -49,6 +53,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000019_create_recordings::Migration),
             Box::new(m20260101_000020_create_export_jobs::Migration),
             Box::new(m20260101_000021_create_settings::Migration),
+            Box::new(m20260101_000022_create_tile_profiles::Migration),
+            Box::new(m20260101_000023_create_tile_formations::Migration),
+            Box::new(m20260101_000024_create_tile_camera_bindings::Migration),
+            Box::new(m20260101_000025_create_profile_site_assignments::Migration),
         ]
     }
 }

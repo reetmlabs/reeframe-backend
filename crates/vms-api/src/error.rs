@@ -80,6 +80,8 @@ impl From<VmsError> for ApiError {
             | VmsError::ContactNotFound(_)
             | VmsError::ContactListNotFound(_)
             | VmsError::RecordingNotFound(_)
+            | VmsError::TileProfileNotFound(_)
+            | VmsError::TileFormationNotFound(_)
             | VmsError::NotFound(_) => StatusCode::NOT_FOUND,
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,

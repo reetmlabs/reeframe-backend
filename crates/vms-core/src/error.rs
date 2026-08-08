@@ -78,6 +78,15 @@ pub enum VmsError {
     #[error("recording {0} not found")]
     RecordingNotFound(Uuid),
 
+    /// A tile-layout profile with the given ID does not exist.
+    #[error("tile profile {0} not found")]
+    TileProfileNotFound(Uuid),
+
+    /// A tile formation with the given ID does not exist, or does not
+    /// belong to the profile it was requested under.
+    #[error("tile formation {0} not found")]
+    TileFormationNotFound(Uuid),
+
     /// A structural rule was violated when compiling a pipeline DAG.
     ///
     /// The inner string describes the specific rule that failed (e.g. "pipeline

@@ -14,6 +14,7 @@ mod pipelines;
 mod recordings;
 mod settings;
 mod sources;
+mod tile_profiles;
 mod users;
 mod webhooks;
 
@@ -31,6 +32,11 @@ pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use recordings::{PlaybackDto, RecordingDto};
 pub use settings::SettingDto;
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
+pub use tile_profiles::{
+    AssignSiteBody, CreateTileFormationBody, CreateTileProfileBody, SetBindingBody,
+    TileCameraBindingDto, TileFormationDto, TileProfileDto, UpdateTileFormationBody,
+    UpdateTileProfileBody,
+};
 pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
 
 use salvo::prelude::*;
@@ -110,6 +116,40 @@ fn protected_routes() -> Router {
                         .get(sources::get_source)
                         .patch(sources::update_source)
                         .delete(sources::delete_source),
+                ),
+        )
+        .push(
+            Router::with_path("tile-profiles")
+                .get(tile_profiles::list_profiles)
+                .post(tile_profiles::create_profile)
+                .push(
+                    Router::with_path("{id}")
+                        .get(tile_profiles::get_profile)
+                        .patch(tile_profiles::rename_profile)
+                        .delete(tile_profiles::delete_profile)
+                        .push(
+                            Router::with_path("site-assignments")
+                                .post(tile_profiles::assign_to_site),
+                        )
+                        .push(Router::with_path("bindings").get(tile_profiles::list_bindings))
+                        .push(
+                            Router::with_path("tiles")
+                                .get(tile_profiles::list_tiles)
+                                .post(tile_profiles::create_tile)
+                                .push(
+                                    Router::with_path("{tile_id}")
+                                        .get(tile_profiles::get_tile)
+                                        .patch(tile_profiles::update_tile)
+                                        .delete(tile_profiles::delete_tile)
+                                        .push(
+                                            Router::with_path("bindings").push(
+                                                Router::with_path("{site_id}")
+                                                    .put(tile_profiles::set_binding)
+                                                    .delete(tile_profiles::clear_binding),
+                                            ),
+                                        ),
+                                ),
+                        ),
                 ),
         )
         .push(

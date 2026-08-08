@@ -9,6 +9,7 @@ pub mod pipeline_run;
 pub mod recording;
 pub mod setting;
 pub mod source;
+pub mod tile_layout;
 pub mod user;
 
 pub use api_key::ApiKeyRepo;
@@ -22,6 +23,7 @@ pub use pipeline_run::PipelineRunRepo;
 pub use recording::RecordingRepo;
 pub use setting::SettingsRepo;
 pub use source::SourceRepo;
+pub use tile_layout::TileLayoutRepo;
 pub use user::UserRepo;
 
 use crate::crypto::Crypto;
