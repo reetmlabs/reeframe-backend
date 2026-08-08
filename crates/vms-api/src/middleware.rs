@@ -14,10 +14,17 @@ use crate::{error::ApiError, state::AppState};
 const API_KEY_HEADER: &str = "x-api-key";
 
 /// Gates every route it's applied to behind either a valid `Authorization:
-/// Bearer <access_token>` header (verified via `AppState::auth_provider`) or
-/// an `X-API-Key` header (verified via `AppState::api_key_repo`). On
-/// success, injects the resulting [`AuthClaims`] into the [`Depot`] for
-/// downstream handlers (e.g. `GET /auth/me`) to read.
+/// Bearer <access_token>` header or an `X-API-Key` header (verified via
+/// `AppState::api_key_repo`). On success, injects the resulting
+/// [`AuthClaims`] into the [`Depot`] for downstream handlers (e.g. `GET
+/// /auth/me`) to read.
+///
+/// A bearer token is checked against `AppState::auth_provider` (local JWT)
+/// first, and only if that fails against `AppState::coordinator_auth_provider`
+/// (Coordinator-issued JWT, Step 14a) when one is configured — the two are
+/// independent, additive credential paths, not a replacement of one by the
+/// other (Step 14d: local auth keeps working with zero Coordinator
+/// dependency).
 ///
 /// Mounted on every route except `GET /health`, `POST /webhooks/{id}`
 /// (external callers can't present either credential — the webhook
@@ -38,7 +45,7 @@ impl Handler for AuthMiddleware {
         let state = depot.obtain::<AppState>().expect("AppState not in depot");
 
         let claims = if let Some(token) = extract_bearer_token(req) {
-            state.auth_provider.verify_token(token).await
+            verify_bearer_token(state, token).await
         } else if let Some(key) = extract_api_key(req) {
             verify_api_key(state, key).await
         } else {
@@ -60,6 +67,35 @@ impl Handler for AuthMiddleware {
                 ctrl.skip_rest();
             }
         }
+    }
+}
+
+async fn verify_bearer_token(state: &AppState, token: &str) -> Result<AuthClaims, VmsError> {
+    let coordinator = state
+        .coordinator_auth_provider
+        .as_deref()
+        .map(|p| p as &dyn AuthProvider);
+    verify_bearer_token_with(&state.auth_provider, coordinator, token).await
+}
+
+/// Tries `local` first; only falls back to `coordinator` (if configured)
+/// when local verification fails — a local token and a Coordinator token are
+/// never mistaken for each other (different signing algorithms), so this
+/// never masks a genuine local-auth failure with a misleading Coordinator
+/// error unless Coordinator trust is actually enabled. Generic over
+/// `&dyn AuthProvider` (rather than taking `&AppState` directly) so the
+/// routing logic is testable without constructing a full `AppState`.
+async fn verify_bearer_token_with(
+    local: &dyn AuthProvider,
+    coordinator: Option<&dyn AuthProvider>,
+    token: &str,
+) -> Result<AuthClaims, VmsError> {
+    match local.verify_token(token).await {
+        Ok(claims) => Ok(claims),
+        Err(local_err) => match coordinator {
+            Some(c) => c.verify_token(token).await,
+            None => Err(local_err),
+        },
     }
 }
 
@@ -187,5 +223,90 @@ mod tests {
     fn missing_api_key_header_returns_none() {
         let req = Request::default();
         assert_eq!(extract_api_key(&req), None);
+    }
+
+    // -- Dual-issuer bearer token verification (Step 14c) --
+    //
+    // Exercised with two `LocalJwtAuthProvider`s standing in for "local" and
+    // "coordinator" — the routing logic in `verify_bearer_token_with` is
+    // generic over any `AuthProvider`, so it doesn't need a real
+    // `CoordinatorJwksAuthProvider` (already covered by its own tests) to
+    // verify the fallback behavior itself.
+
+    use chrono::{FixedOffset, Utc};
+    use vms_db::entities::user::{self, UserRole};
+
+    use crate::auth::LocalJwtAuthProvider;
+
+    fn test_user() -> user::Model {
+        user::Model {
+            id: uuid::Uuid::new_v4(),
+            username: "alice".into(),
+            password_hash: "unused".into(),
+            role: UserRole::Admin,
+            enabled: true,
+            created_at: Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap()),
+            updated_at: Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_local_token_succeeds_with_no_coordinator_configured() {
+        let local = LocalJwtAuthProvider::new("local-secret", 900, 2_592_000);
+        let token = local.issue_access_token(&test_user()).unwrap();
+
+        let claims = verify_bearer_token_with(&local, None, &token)
+            .await
+            .unwrap();
+
+        assert_eq!(claims.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn a_valid_local_token_still_succeeds_when_coordinator_is_also_configured() {
+        let local = LocalJwtAuthProvider::new("local-secret", 900, 2_592_000);
+        let coordinator = LocalJwtAuthProvider::new("coordinator-secret", 900, 2_592_000);
+        let token = local.issue_access_token(&test_user()).unwrap();
+
+        let claims = verify_bearer_token_with(&local, Some(&coordinator), &token)
+            .await
+            .unwrap();
+
+        assert_eq!(claims.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn a_token_only_the_coordinator_recognizes_falls_back_and_succeeds() {
+        let local = LocalJwtAuthProvider::new("local-secret", 900, 2_592_000);
+        let coordinator = LocalJwtAuthProvider::new("coordinator-secret", 900, 2_592_000);
+        // Signed by "coordinator", so `local` (different secret) rejects it.
+        let token = coordinator.issue_access_token(&test_user()).unwrap();
+
+        let claims = verify_bearer_token_with(&local, Some(&coordinator), &token)
+            .await
+            .unwrap();
+
+        assert_eq!(claims.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn a_token_neither_provider_recognizes_is_rejected() {
+        let local = LocalJwtAuthProvider::new("local-secret", 900, 2_592_000);
+        let coordinator = LocalJwtAuthProvider::new("coordinator-secret", 900, 2_592_000);
+        let rogue = LocalJwtAuthProvider::new("rogue-secret", 900, 2_592_000);
+        let token = rogue.issue_access_token(&test_user()).unwrap();
+
+        let result = verify_bearer_token_with(&local, Some(&coordinator), &token).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_missing_credential_is_rejected_exactly_as_before_with_no_coordinator() {
+        let local = LocalJwtAuthProvider::new("local-secret", 900, 2_592_000);
+
+        let result = verify_bearer_token_with(&local, None, "not-a-real-token").await;
+
+        assert!(result.is_err());
     }
 }
