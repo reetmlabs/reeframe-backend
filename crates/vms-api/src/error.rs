@@ -84,6 +84,8 @@ impl From<VmsError> for ApiError {
 
             VmsError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
 
+            VmsError::Conflict(_) => StatusCode::CONFLICT,
+
             VmsError::DagValidation(_) | VmsError::ExpressionEval(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }

@@ -145,6 +145,12 @@ pub enum VmsError {
     #[error("{0}")]
     NotFound(String),
 
+    /// The requested change would violate a domain invariant (e.g. deleting
+    /// or disabling the last remaining local admin) — the request is
+    /// well-formed but rejected because of the system's current state.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// JSON serialization or deserialization failed.
     ///
     /// Automatically constructed by the [`From<serde_json::Error>`] impl.

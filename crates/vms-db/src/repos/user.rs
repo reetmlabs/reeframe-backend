@@ -89,6 +89,13 @@ impl UserRepo {
             .map_err(db_err)?
             .ok_or(VmsError::UserNotFound(id))?;
 
+        let is_enabled_admin = u.role == UserRole::Admin && u.enabled;
+        let would_lose_admin_status = input.enabled == Some(false)
+            || matches!(&input.role, Some(role) if *role != UserRole::Admin);
+        if is_enabled_admin && would_lose_admin_status {
+            self.ensure_not_last_enabled_admin().await?;
+        }
+
         let mut active: ActiveModel = u.into();
 
         if let Some(v) = input.username {
@@ -114,7 +121,31 @@ impl UserRepo {
             .await
             .map_err(db_err)?
             .ok_or(VmsError::UserNotFound(id))?;
+        if u.role == UserRole::Admin && u.enabled {
+            self.ensure_not_last_enabled_admin().await?;
+        }
         u.delete(&self.db).await.map_err(db_err)?;
+        Ok(())
+    }
+
+    /// The "local break-glass account" guarantee: at least one enabled local
+    /// admin must always exist, so direct local/offline access keeps working
+    /// unconditionally. Called by [`Self::update`] and [`Self::delete`]
+    /// before applying any change that would take the last enabled admin
+    /// below that floor — enforced here rather than only in a route handler
+    /// so no future caller can accidentally bypass it.
+    async fn ensure_not_last_enabled_admin(&self) -> Result<(), VmsError> {
+        let enabled_admins = user::Entity::find()
+            .filter(user::Column::Role.eq(UserRole::Admin))
+            .filter(user::Column::Enabled.eq(true))
+            .count(&self.db)
+            .await
+            .map_err(db_err)?;
+        if enabled_admins <= 1 {
+            return Err(VmsError::Conflict(
+                "cannot delete or disable the last remaining local admin".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -139,7 +170,10 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use sea_orm_migration::MigratorTrait;
+
     use super::*;
+    use crate::migration::Migrator;
 
     #[test]
     fn verify_password_accepts_matching_password() {
@@ -156,5 +190,115 @@ mod tests {
     #[test]
     fn verify_password_rejects_malformed_hash_instead_of_panicking() {
         assert!(!verify_password("anything", "not-a-bcrypt-hash"));
+    }
+
+    // -- Local-admin guarantee (Step 14b) --
+
+    async fn test_repo() -> UserRepo {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        UserRepo::new(db)
+    }
+
+    async fn create_admin(repo: &UserRepo, username: &str) -> user::Model {
+        repo.create(CreateUser {
+            username: username.into(),
+            password: "irrelevant-password".into(),
+            role: UserRole::Admin,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deleting_the_sole_remaining_admin_is_rejected() {
+        let repo = test_repo().await;
+        let admin = create_admin(&repo, "admin").await;
+
+        let result = repo.delete(admin.id).await;
+
+        assert!(matches!(result, Err(VmsError::Conflict(_))));
+        assert!(repo.get(admin.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn disabling_the_sole_remaining_admin_is_rejected() {
+        let repo = test_repo().await;
+        let admin = create_admin(&repo, "admin").await;
+
+        let result = repo
+            .update(
+                admin.id,
+                UpdateUser {
+                    username: None,
+                    password: None,
+                    role: None,
+                    enabled: Some(false),
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(VmsError::Conflict(_))));
+        assert!(repo.get(admin.id).await.unwrap().unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn demoting_the_sole_remaining_admin_to_viewer_is_rejected() {
+        let repo = test_repo().await;
+        let admin = create_admin(&repo, "admin").await;
+
+        let result = repo
+            .update(
+                admin.id,
+                UpdateUser {
+                    username: None,
+                    password: None,
+                    role: Some(UserRole::Viewer),
+                    enabled: None,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(VmsError::Conflict(_))));
+        assert_eq!(
+            repo.get(admin.id).await.unwrap().unwrap().role,
+            UserRole::Admin
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_an_admin_succeeds_when_another_enabled_admin_remains() {
+        let repo = test_repo().await;
+        let first = create_admin(&repo, "admin-1").await;
+        let _second = create_admin(&repo, "admin-2").await;
+
+        repo.delete(first.id).await.unwrap();
+
+        assert!(repo.get(first.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_an_already_disabled_admin_is_never_blocked() {
+        let repo = test_repo().await;
+        let _first = create_admin(&repo, "admin-1").await;
+        let second = create_admin(&repo, "admin-2").await;
+        repo.update(
+            second.id,
+            UpdateUser {
+                username: None,
+                password: None,
+                role: None,
+                enabled: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+
+        // `second` is disabled and no longer counts toward the floor, so
+        // deleting it must not be blocked even though `first` is the only
+        // *enabled* admin left.
+        repo.delete(second.id).await.unwrap();
+
+        assert!(repo.get(second.id).await.unwrap().is_none());
     }
 }
