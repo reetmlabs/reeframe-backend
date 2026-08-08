@@ -21,10 +21,9 @@ const API_KEY_HEADER: &str = "x-api-key";
 ///
 /// A bearer token is checked against `AppState::auth_provider` (local JWT)
 /// first, and only if that fails against `AppState::coordinator_auth_provider`
-/// (Coordinator-issued JWT, Step 14a) when one is configured — the two are
+/// (Coordinator-issued JWT) when one is configured — the two are
 /// independent, additive credential paths, not a replacement of one by the
-/// other (Step 14d: local auth keeps working with zero Coordinator
-/// dependency).
+/// other; local auth keeps working with zero Coordinator dependency.
 ///
 /// Mounted on every route except `GET /health`, `POST /webhooks/{id}`
 /// (external callers can't present either credential — the webhook
@@ -225,7 +224,7 @@ mod tests {
         assert_eq!(extract_api_key(&req), None);
     }
 
-    // -- Dual-issuer bearer token verification (Step 14c) --
+    // -- Dual-issuer bearer token verification --
     //
     // Exercised with two `LocalJwtAuthProvider`s standing in for "local" and
     // "coordinator" — the routing logic in `verify_bearer_token_with` is

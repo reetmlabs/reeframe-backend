@@ -192,7 +192,7 @@ mod tests {
         assert!(!verify_password("anything", "not-a-bcrypt-hash"));
     }
 
-    // -- Local-admin guarantee (Step 14b) --
+    // -- Local-admin guarantee --
 
     async fn test_repo() -> UserRepo {
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();

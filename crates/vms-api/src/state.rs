@@ -58,9 +58,9 @@ pub struct AppState {
     pub user_repo: UserRepo,
     pub api_key_repo: ApiKeyRepo,
     pub auth_provider: LocalJwtAuthProvider,
-    /// `None` unless `[auth] mode = "oidc"` — set once at boot (Step 14a).
-    /// Not yet consumed by `AuthMiddleware`; wiring the second accepted
-    /// credential path into request handling is Step 14c.
+    /// `None` unless `[auth] mode = "oidc"` — set once at boot. Consumed by
+    /// `AuthMiddleware` as the second accepted credential path, alongside
+    /// (never instead of) `auth_provider`.
     pub coordinator_auth_provider: Option<Arc<CoordinatorJwksAuthProvider>>,
     pub media_manager: Arc<MediaManager>,
     pub ring_buffer_manager: Arc<RingBufferManager>,

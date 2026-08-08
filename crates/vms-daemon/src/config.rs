@@ -349,3 +349,21 @@ pub fn parse_uploaded_config(
         .filter_map(|meta| get_setting_value(&cfg, meta.key).map(|v| (meta.key, v)))
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default `[auth]` config is "local" mode with
+    /// no `jwks_url` at all — a fresh install needs zero Coordinator setup
+    /// to boot and authenticate. `main.rs` only constructs a
+    /// `CoordinatorJwksAuthProvider` when `mode == "oidc"`, so this default
+    /// guarantees the local-only path is what a fresh install actually gets.
+    #[test]
+    fn default_auth_config_requires_no_coordinator_setup() {
+        let auth = AuthConfig::default();
+
+        assert_eq!(auth.mode, "local");
+        assert!(auth.jwks_url.is_none());
+    }
+}

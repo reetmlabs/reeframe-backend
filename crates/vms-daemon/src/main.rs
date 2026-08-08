@@ -140,8 +140,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Auth provider ready (local JWT)");
 
     // Local auth above is always active regardless of `mode` — Coordinator
-    // trust is additive, never a replacement (Step 14d: the BE stays fully
-    // autonomous with no `jwks_url` configured at all).
+    // trust is additive, never a replacement; the BE stays fully autonomous
+    // with no `jwks_url` configured at all.
     let coordinator_auth_provider = if cfg.auth.mode == "oidc" {
         let jwks_url = cfg.auth.jwks_url.clone().ok_or_else(|| {
             tracing::error!("[auth] mode = \"oidc\" requires [auth] jwks_url to be set");

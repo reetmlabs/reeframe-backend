@@ -1,4 +1,4 @@
-//! Coordinator-issued JWT verification via JWKS — Step 14a.
+//! Coordinator-issued JWT verification via JWKS.
 //!
 //! [`CoordinatorJwksAuthProvider`] is the second, independent `AuthProvider`
 //! this BE trusts, alongside [`crate::auth::LocalJwtAuthProvider`]. It fetches

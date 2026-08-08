@@ -183,3 +183,70 @@ fn issue_tokens(state: &AppState, user: user::Model) -> Result<Json<AuthResponse
         user: UserDto::from(user),
     }))
 }
+
+// -- Tests --
+
+#[cfg(test)]
+mod tests {
+    use sea_orm_migration::MigratorTrait;
+    use vms_core::AuthProvider;
+    use vms_db::{Migrator, UserRepo};
+
+    use super::*;
+    use crate::auth::LocalJwtAuthProvider;
+
+    async fn test_user_repo() -> UserRepo {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        UserRepo::new(db)
+    }
+
+    /// The setup -> login -> refresh flow these
+    /// handlers drive works end-to-end through nothing but `UserRepo` and
+    /// `LocalJwtAuthProvider` — no `CoordinatorJwksAuthProvider` and no
+    /// `jwks_url` anywhere in this test. `main.rs` always constructs
+    /// `AppState::auth_provider` regardless of `[auth] mode`, and these
+    /// handlers only ever read `state.auth_provider`, never
+    /// `state.coordinator_auth_provider` — so this exercises exactly the
+    /// same code these routes run in production with Coordinator absent.
+    #[tokio::test]
+    async fn setup_then_login_then_refresh_never_touches_coordinator() {
+        let user_repo = test_user_repo().await;
+        let auth_provider = LocalJwtAuthProvider::new("test-secret", 900, 2_592_000);
+
+        // -- POST /auth/setup --
+        assert_eq!(user_repo.count().await.unwrap(), 0);
+        let admin = user_repo
+            .create(CreateUser {
+                username: "admin".into(),
+                password: "correct horse battery staple".into(),
+                role: UserRole::Admin,
+            })
+            .await
+            .unwrap();
+        let setup_access = auth_provider.issue_access_token(&admin).unwrap();
+        let setup_refresh = auth_provider.issue_refresh_token(&admin).unwrap();
+        auth_provider.verify_token(&setup_access).await.unwrap();
+
+        // -- POST /auth/login --
+        let logged_in = user_repo
+            .get_by_username("admin")
+            .await
+            .unwrap()
+            .filter(|u| u.enabled)
+            .filter(|u| verify_password("correct horse battery staple", &u.password_hash))
+            .unwrap();
+        let login_access = auth_provider.issue_access_token(&logged_in).unwrap();
+        auth_provider.verify_token(&login_access).await.unwrap();
+
+        // -- POST /auth/refresh --
+        let refresh_claims = auth_provider.verify_refresh_token(&setup_refresh).unwrap();
+        let refreshed_user = user_repo
+            .get(refresh_claims.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let new_access = auth_provider.issue_access_token(&refreshed_user).unwrap();
+        auth_provider.verify_token(&new_access).await.unwrap();
+    }
+}
