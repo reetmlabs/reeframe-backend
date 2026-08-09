@@ -20,9 +20,9 @@ use vms_api::{
     routes::build_router, state::AppState,
 };
 use vms_db::{
-    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, ExportJobRepo,
-    Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo,
-    TileLayoutRepo, UserRepo,
+    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, EventsRepo,
+    ExportJobRepo, Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo,
+    SourceRepo, TileLayoutRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, RetentionConfig,
@@ -199,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
     let user_repo = UserRepo::new(db.clone());
     let api_key_repo = ApiKeyRepo::new(db.clone());
     let tile_layout_repo = TileLayoutRepo::new(db.clone());
+    let events_repo = EventsRepo::new(db.clone());
     tracing::info!("Repository layer ready");
 
     // -- Media Manager --
@@ -306,6 +307,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
 
     // -- Source Manager --
+    // Camera-scoped events are also persisted into the `events` table
+    // here, at the same tap point as the topic bridge — `TopicKey::Camera`
+    // has no wildcard, so a separate subscriber can't see every camera.
     let source_manager = SourceManager::new(media_event_tx);
     let bridge_event_bus = event_bus.clone();
     tokio::spawn(async move {
@@ -313,6 +317,17 @@ async fn main() -> anyhow::Result<()> {
             let topic = if let Some(source_id) = event.source_id {
                 vms_core::TopicKey::Source(source_id)
             } else if let Some(camera_id) = event.camera_id {
+                if let Err(e) = events_repo
+                    .record(vms_db::repos::event::CreateEvent {
+                        camera_id,
+                        event_type: event.event_type.clone(),
+                        payload: event.payload.clone(),
+                        occurred_at: event.occurred_at.fixed_offset(),
+                    })
+                    .await
+                {
+                    tracing::error!(camera_id = %camera_id, error = %e, "Failed to record event history");
+                }
                 vms_core::TopicKey::Camera(camera_id)
             } else {
                 continue;

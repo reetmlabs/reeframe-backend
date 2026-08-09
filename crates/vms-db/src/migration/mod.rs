@@ -25,6 +25,7 @@ mod m20260101_000022_create_tile_profiles;
 mod m20260101_000023_create_tile_formations;
 mod m20260101_000024_create_tile_camera_bindings;
 mod m20260101_000025_create_profile_site_assignments;
+mod m20260101_000026_create_events;
 
 pub struct Migrator;
 
@@ -57,6 +58,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000023_create_tile_formations::Migration),
             Box::new(m20260101_000024_create_tile_camera_bindings::Migration),
             Box::new(m20260101_000025_create_profile_site_assignments::Migration),
+            Box::new(m20260101_000026_create_events::Migration),
         ]
     }
 }

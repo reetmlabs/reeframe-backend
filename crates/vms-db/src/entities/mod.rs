@@ -4,6 +4,7 @@ pub mod contact;
 pub mod contact_list;
 pub mod contact_list_member;
 pub mod destination;
+pub mod event;
 pub mod export_job;
 pub mod pipeline;
 pub mod pipeline_camera_ref;
