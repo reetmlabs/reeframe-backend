@@ -41,6 +41,11 @@ pub const KNOWN_SETTINGS: &[SettingMeta] = &[
         sensitive: false,
     },
     SettingMeta {
+        key: "media.thumbnail_interval_secs",
+        hot: false,
+        sensitive: false,
+    },
+    SettingMeta {
         key: "media.recording_dir",
         hot: false,
         sensitive: false,

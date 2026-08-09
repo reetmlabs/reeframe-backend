@@ -32,6 +32,8 @@ pub struct MediaConfig {
     pub recording_dir: PathBuf,
     /// Duration of each recording chunk in seconds.
     pub chunk_duration_secs: u64,
+    /// Minimum spacing between timeline thumbnail captures, in seconds.
+    pub thumbnail_interval_secs: u64,
 }
 
 impl Default for MediaConfig {
@@ -39,6 +41,7 @@ impl Default for MediaConfig {
         Self {
             recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
+            thumbnail_interval_secs: 10,
         }
     }
 }
@@ -244,6 +247,7 @@ pub fn get_setting_value(cfg: &AppConfig, key: &str) -> Option<serde_json::Value
             json!(cfg.recordings.retention_disk_threshold_percent)
         }
         "media.chunk_duration_secs" => json!(cfg.media.chunk_duration_secs),
+        "media.thumbnail_interval_secs" => json!(cfg.media.thumbnail_interval_secs),
         "media.recording_dir" => json!(cfg.media.recording_dir.to_string_lossy()),
         "auth.mode" => json!(cfg.auth.mode),
         "auth.jwt_secret" => json!(cfg.auth.jwt_secret),
@@ -293,6 +297,7 @@ pub fn apply_setting_value(
             cfg.recordings.retention_disk_threshold_percent = as_f64(value, key)?
         }
         "media.chunk_duration_secs" => cfg.media.chunk_duration_secs = as_u64(value, key)?,
+        "media.thumbnail_interval_secs" => cfg.media.thumbnail_interval_secs = as_u64(value, key)?,
         "media.recording_dir" => cfg.media.recording_dir = PathBuf::from(as_str(value, key)?),
         "auth.mode" => cfg.auth.mode = as_str(value, key)?,
         "auth.jwt_secret" => cfg.auth.jwt_secret = as_str(value, key)?,

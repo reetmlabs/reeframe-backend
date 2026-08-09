@@ -17,6 +17,7 @@ use crate::relay::{RelayQuality, RelayServer};
 use crate::ring_buffer::RingBuffer;
 use crate::ring_buffer_branch;
 use crate::sub_stream::{build_sub_stream, spawn_sub_monitor};
+use crate::thumbnail_branch::{self, ThumbnailHandle};
 
 // -- Config --
 
@@ -28,6 +29,9 @@ pub struct MediaConfig {
     pub chunk_duration_secs: u64,
     /// Address and port for the RTSP relay server (e.g. "0.0.0.0:8554").
     pub rtsp_bind: String,
+    /// Minimum spacing between timeline thumbnail captures, in seconds
+    /// (default: 10).
+    pub thumbnail_interval_secs: u64,
 }
 
 impl Default for MediaConfig {
@@ -36,6 +40,7 @@ impl Default for MediaConfig {
             recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
             rtsp_bind: "0.0.0.0:8554".into(),
+            thumbnail_interval_secs: 10,
         }
     }
 }
@@ -106,6 +111,7 @@ pub struct MediaManager {
     /// to turn them into `recordings` rows.
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     motion: Mutex<HashMap<Uuid, MotionHandle>>,
+    thumbnails: Mutex<HashMap<Uuid, ThumbnailHandle>>,
 }
 
 impl MediaManager {
@@ -134,6 +140,7 @@ impl MediaManager {
             event_tx,
             chunk_event_tx,
             motion: Mutex::new(HashMap::new()),
+            thumbnails: Mutex::new(HashMap::new()),
         })
     }
 
@@ -204,15 +211,17 @@ impl MediaManager {
 
         tracing::info!(camera_id = %camera_id, rtsp_url, "Recording pipeline started");
 
-        // Prefer the sub-stream for motion detection; fall back to main.
-        let (motion_pipeline, motion_tee) = match sub_rtsp_url {
+        // Prefer the sub-stream for motion detection and thumbnail capture
+        // (cheaper decode, and neither needs main-resolution frames);
+        // fall back to main.
+        let (low_res_pipeline, low_res_tee) = match sub_rtsp_url {
             Some(sub_url) => match self.start_sub_stream(camera_id, sub_url) {
                 Ok(sub_pipeline) => (sub_pipeline, sub_tee_name(camera_id)),
                 Err(e) => {
                     tracing::warn!(
                         camera_id = %camera_id,
                         error = %e,
-                        "Failed to start sub-stream — motion detection will use the main stream instead",
+                        "Failed to start sub-stream — motion detection and thumbnails will use the main stream instead",
                     );
                     (pipeline, main_tee_name(camera_id))
                 }
@@ -220,8 +229,11 @@ impl MediaManager {
             None => (pipeline, main_tee_name(camera_id)),
         };
 
-        if let Err(e) = self.start_motion_detection(camera_id, &motion_pipeline, &motion_tee) {
+        if let Err(e) = self.start_motion_detection(camera_id, &low_res_pipeline, &low_res_tee) {
             tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
+        }
+        if let Err(e) = self.start_thumbnail_capture(camera_id, &low_res_pipeline, &low_res_tee) {
+            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start thumbnail capture");
         }
 
         Ok(())
@@ -322,6 +334,7 @@ impl MediaManager {
     /// sub-stream pipeline is torn down, then the main one.
     pub async fn stop_camera(&self, camera_id: Uuid) -> Result<(), VmsError> {
         self.stop_motion_detection(camera_id).await;
+        self.stop_thumbnail_capture(camera_id).await;
         self.stop_relay(camera_id, RelayQuality::Main);
         self.stop_relay(camera_id, RelayQuality::Sub);
         self.stop_sub_stream(camera_id).await;
@@ -337,14 +350,22 @@ impl MediaManager {
     }
 
     /// Stop all recording pipelines, all sub-stream pipelines, all
-    /// motion-detection branches, and all relay mounts, wait for
-    /// monitor/analyzer tasks to exit.
+    /// motion-detection and thumbnail-capture branches, and all relay
+    /// mounts, wait for monitor/analyzer tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
         let motion_handles: Vec<MotionHandle> = {
             let mut motion = self.motion.lock().unwrap();
             motion.drain().map(|(_, h)| h).collect()
         };
         for h in motion_handles {
+            h.stop().await;
+        }
+
+        let thumbnail_handles: Vec<ThumbnailHandle> = {
+            let mut thumbnails = self.thumbnails.lock().unwrap();
+            thumbnails.drain().map(|(_, h)| h).collect()
+        };
+        for h in thumbnail_handles {
             h.stop().await;
         }
 
@@ -451,6 +472,40 @@ impl MediaManager {
         if let Some(h) = handle {
             h.stop().await;
             tracing::info!(camera_id = %camera_id, "Motion detection branch stopped");
+        }
+    }
+
+    /// Attach the periodic thumbnail-capture branch to `tee_name`'s tee on
+    /// `pipeline`. No-op if one is already running for this camera.
+    fn start_thumbnail_capture(
+        &self,
+        camera_id: Uuid,
+        pipeline: &gstreamer::Pipeline,
+        tee_name: &str,
+    ) -> Result<(), VmsError> {
+        {
+            let thumbnails = self.thumbnails.lock().unwrap();
+            if thumbnails.contains_key(&camera_id) {
+                return Ok(());
+            }
+        }
+        let handle = thumbnail_branch::attach(
+            pipeline,
+            tee_name,
+            camera_id,
+            self.config.recording_dir.join("thumbnails"),
+            std::time::Duration::from_secs(self.config.thumbnail_interval_secs),
+        )?;
+        self.thumbnails.lock().unwrap().insert(camera_id, handle);
+        Ok(())
+    }
+
+    /// Stop the thumbnail-capture branch for a camera. No-op if none is running.
+    async fn stop_thumbnail_capture(&self, camera_id: Uuid) {
+        let handle = self.thumbnails.lock().unwrap().remove(&camera_id);
+        if let Some(h) = handle {
+            h.stop().await;
+            tracing::info!(camera_id = %camera_id, "Thumbnail capture branch stopped");
         }
     }
 

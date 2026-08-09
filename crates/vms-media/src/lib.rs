@@ -32,6 +32,7 @@ pub(crate) mod relay_bridge;
 pub mod ring_buffer;
 pub(crate) mod ring_buffer_branch;
 pub(crate) mod sub_stream;
+pub(crate) mod thumbnail_branch;
 
 pub use export::{export_range, ExportChunk};
 pub use manager::{MediaConfig, MediaManager};
