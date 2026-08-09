@@ -166,12 +166,19 @@ async fn main() -> anyhow::Result<()> {
     // -- Gateway (Relay/tunnel client for WAPP pairing) --
     // Unset by default — matches Coordinator's own "stays autonomous"
     // guarantee; with no `[gateway] url`, zero connection attempt is made.
-    let gateway_task = cfg.gateway.url.clone().map(|url| {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tracing::info!(url = %url, "Gateway client starting");
-        let join_handle = tokio::spawn(gateway::run(url, shutdown_rx));
-        (shutdown_tx, join_handle)
-    });
+    let gateway_task = match cfg.gateway.url.clone() {
+        Some(url) => {
+            let be_id = gateway::require_be_id(cfg.gateway.be_id).map_err(|e| {
+                tracing::error!(error = %e, "Invalid gateway configuration");
+                anyhow::anyhow!(e)
+            })?;
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            tracing::info!(url = %url, %be_id, "Gateway client starting");
+            let join_handle = tokio::spawn(gateway::run(url, be_id, shutdown_rx));
+            Some((shutdown_tx, join_handle))
+        }
+        None => None,
+    };
 
     // -- Crypto --
     let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {

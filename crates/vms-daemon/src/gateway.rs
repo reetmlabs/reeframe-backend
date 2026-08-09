@@ -1,6 +1,7 @@
 //! Persistent outbound connection to a Relay/gateway server for WAPP
-//! pairing — connection lifecycle only, no registration handshake or wire
-//! protocol yet.
+//! pairing, plus the registration handshake sent once each time it connects.
+//! The wire format below is provisional — nothing on the other end of this
+//! connection exists yet to confirm it against.
 //!
 //! Only runs at all when `[gateway] url` is configured — this BE stays
 //! fully autonomous with zero dependency on any Relay/WAPP being reachable
@@ -9,9 +10,56 @@
 use std::time::Duration;
 
 use rand::Rng;
-use tokio::io::AsyncReadExt;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
+use uuid::Uuid;
+
+/// Sent once, immediately after connecting, so the Relay knows which site
+/// this connection belongs to and how to route requests to it. `be_id` is
+/// the same identifier Coordinator's `sites` table registers this BE under
+/// — trusting that identity is what the JWKS work already established.
+///
+/// Newline-delimited JSON: simplest thing that's both human-debuggable and
+/// trivially frameable over a raw stream, and easy to replace once a real
+/// protocol is designed against an actual Relay implementation.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct RegistrationMessage {
+    be_id: Uuid,
+    /// This daemon's own version — the most concrete "capability info" that
+    /// actually exists today. Extend with real capability flags once the
+    /// Relay side defines what it needs to route on.
+    version: String,
+}
+
+impl RegistrationMessage {
+    fn for_this_daemon(be_id: Uuid) -> Self {
+        Self {
+            be_id,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// NDJSON framing: compact JSON plus a trailing `\n`. Serializing a
+    /// `Uuid` and a `String` can't fail, so this returns the bytes
+    /// directly rather than a `Result` — there is no "malformed" case once
+    /// you already have a `be_id: Uuid` in hand.
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(self).expect("RegistrationMessage always serializes");
+        bytes.push(b'\n');
+        bytes
+    }
+}
+
+/// Rejects a missing `be_id` before any connection is even attempted — a
+/// static configuration gap (`[gateway] url` set without `[gateway]
+/// be_id`), not a transient failure backoff/retry could ever fix. A
+/// malformed `be_id` in the config file is rejected even earlier, by
+/// `Uuid`'s own `Deserialize` impl when the config is first loaded.
+pub(crate) fn require_be_id(be_id: Option<Uuid>) -> Result<Uuid, String> {
+    be_id.ok_or_else(|| "[gateway] be_id must be set when [gateway] url is configured".into())
+}
 
 /// Exponential backoff with jitter, capped at `max`. Mirrors
 /// `vms_media::camera_stream::ReconnectPolicy`'s "a connection must stay up
@@ -70,14 +118,18 @@ fn jittered(delay: Duration) -> Duration {
     Duration::from_secs_f64((delay.as_secs_f64() + jitter).max(0.0))
 }
 
-/// Runs until `shutdown` resolves. Reconnects on any connect failure or
-/// dropped connection, with exponential backoff. A single long-lived task
-/// drives the whole lifecycle — no task or socket is ever spawned per
-/// attempt, so nothing accumulates across however many reconnect cycles
-/// happen.
-pub async fn run(addr: String, shutdown: tokio::sync::oneshot::Receiver<()>) {
+/// Runs until `shutdown` resolves. Reconnects on any connect failure,
+/// registration-send failure, or dropped connection, with exponential
+/// backoff. A single long-lived task drives the whole lifecycle — no task
+/// or socket is ever spawned per attempt, so nothing accumulates across
+/// however many reconnect cycles happen.
+///
+/// `be_id` is required, not `Option<Uuid>` — see `require_be_id`'s doc
+/// comment for why a missing one is rejected before this is ever called.
+pub async fn run(addr: String, be_id: Uuid, shutdown: tokio::sync::oneshot::Receiver<()>) {
     run_with_backoff(
         addr,
+        be_id,
         shutdown,
         Backoff::new(
             Duration::from_secs(1),
@@ -90,22 +142,25 @@ pub async fn run(addr: String, shutdown: tokio::sync::oneshot::Receiver<()>) {
 
 async fn run_with_backoff(
     addr: String,
+    be_id: Uuid,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     mut backoff: Backoff,
 ) {
+    let registration = RegistrationMessage::for_this_daemon(be_id).encode();
+
     loop {
         tokio::select! {
             _ = &mut shutdown => return,
-            result = TcpStream::connect(&addr) => {
+            result = connect_and_register(&addr, &registration) => {
                 match result {
                     Ok(stream) => {
-                        tracing::info!(%addr, "Gateway connection established");
+                        tracing::info!(%addr, %be_id, "Gateway connection established and registered");
                         backoff.record_connected();
                         wait_for_disconnect(stream, &mut shutdown).await;
                         tracing::warn!(%addr, "Gateway connection lost");
                     }
                     Err(error) => {
-                        tracing::warn!(%addr, %error, "Gateway connection attempt failed");
+                        tracing::warn!(%addr, %error, "Gateway connection/registration attempt failed");
                     }
                 }
             }
@@ -117,6 +172,12 @@ async fn run_with_backoff(
             () = tokio::time::sleep(delay) => {}
         }
     }
+}
+
+async fn connect_and_register(addr: &str, registration: &[u8]) -> std::io::Result<TcpStream> {
+    let mut stream = TcpStream::connect(addr).await?;
+    stream.write_all(registration).await?;
+    Ok(stream)
 }
 
 /// Blocks until the connection drops (EOF or a read error) or `shutdown`
@@ -233,7 +294,12 @@ mod tests {
         let (addr, accepted) = spawn_flaky_acceptor().await;
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-        let run_handle = tokio::spawn(run_with_backoff(addr, shutdown_rx, test_backoff()));
+        let run_handle = tokio::spawn(run_with_backoff(
+            addr,
+            Uuid::new_v4(),
+            shutdown_rx,
+            test_backoff(),
+        ));
 
         // Let several reconnect cycles happen. Each cycle is: real (fast,
         // local) TCP connect + immediate drop, then a virtual-time sleep
@@ -257,5 +323,61 @@ mod tests {
             .await
             .expect("run task did not exit promptly after shutdown")
             .unwrap();
+    }
+
+    // -- Registration handshake --
+
+    #[test]
+    fn missing_be_id_is_rejected_before_any_connection_is_attempted() {
+        assert!(require_be_id(None).is_err());
+    }
+
+    #[test]
+    fn present_be_id_is_accepted() {
+        let be_id = Uuid::new_v4();
+        assert_eq!(require_be_id(Some(be_id)).unwrap(), be_id);
+    }
+
+    /// Accepts one connection, reads and parses exactly one NDJSON-framed
+    /// [`RegistrationMessage`] from it, and reports the result back.
+    async fn spawn_registration_acceptor() -> (
+        String,
+        tokio::sync::oneshot::Receiver<std::io::Result<RegistrationMessage>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(socket);
+            let mut line = String::new();
+            let result = match tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line).await {
+                Ok(_) => serde_json::from_str::<RegistrationMessage>(line.trim_end())
+                    .map_err(std::io::Error::other),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(result);
+        });
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn a_mock_acceptor_can_parse_the_be_id_and_version_from_the_registration_message() {
+        let (addr, result_rx) = spawn_registration_acceptor().await;
+        let be_id = Uuid::new_v4();
+
+        let stream =
+            connect_and_register(&addr, &RegistrationMessage::for_this_daemon(be_id).encode())
+                .await
+                .unwrap();
+        drop(stream);
+
+        let parsed = tokio::time::timeout(Duration::from_secs(1), result_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.be_id, be_id);
+        assert_eq!(parsed.version, env!("CARGO_PKG_VERSION"));
     }
 }
