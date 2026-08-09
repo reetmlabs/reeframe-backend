@@ -144,7 +144,12 @@ async fn run_with_backoff(
                     Ok(stream) => {
                         tracing::info!(%addr, %be_id, "Gateway connection established and registered");
                         backoff.record_connected();
-                        wait_for_disconnect(stream, &mut shutdown).await;
+                        // A polled-out oneshot `Receiver` panics if polled
+                        // again, so return here rather than falling through
+                        // to the backoff-sleep `select!` below.
+                        if let ConnectionEnd::ShuttingDown = wait_for_disconnect(stream, &mut shutdown).await {
+                            return;
+                        }
                         tracing::warn!(%addr, "Gateway connection lost");
                     }
                     Err(error) => {
@@ -168,20 +173,27 @@ async fn connect_and_register(addr: &str, registration: &[u8]) -> std::io::Resul
     Ok(stream)
 }
 
+/// Why [`wait_for_disconnect`] returned — the caller must not poll
+/// `shutdown` again if it's already the reason this ended.
+enum ConnectionEnd {
+    Disconnected,
+    ShuttingDown,
+}
+
 /// Blocks until the connection drops (EOF or a read error) or `shutdown`
 /// resolves. No wire protocol exists yet — any bytes received are
 /// discarded; only the connection's liveness matters here.
 async fn wait_for_disconnect(
     mut stream: TcpStream,
     shutdown: &mut tokio::sync::oneshot::Receiver<()>,
-) {
+) -> ConnectionEnd {
     let mut buf = [0u8; 256];
     loop {
         tokio::select! {
-            _ = &mut *shutdown => return,
+            _ = &mut *shutdown => return ConnectionEnd::ShuttingDown,
             result = stream.read(&mut buf) => {
                 match result {
-                    Ok(0) | Err(_) => return,
+                    Ok(0) | Err(_) => return ConnectionEnd::Disconnected,
                     Ok(_) => continue,
                 }
             }
@@ -398,5 +410,82 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.be_id, be_id);
         assert_eq!(parsed.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    // -- Recovery across a simulated network interruption --
+
+    /// Same shape as `spawn_flaky_acceptor`, but also verifies the
+    /// registration content first. No real Relay exists yet to test
+    /// against — this stands in for one.
+    async fn spawn_relay_once(
+        listener: tokio::net::TcpListener,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<RegistrationMessage> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut reader = tokio::io::BufReader::new(socket);
+            let mut line = String::new();
+            if tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+                .await
+                .is_ok()
+            {
+                if let Ok(msg) = serde_json::from_str::<RegistrationMessage>(line.trim_end()) {
+                    let _ = tx.send(msg);
+                }
+            }
+            // Dropping `reader` (and the socket it owns) here closes the
+            // connection — the client's next read returns EOF.
+        });
+        rx
+    }
+
+    /// `relay1` exiting right after registering simulates the path going
+    /// down; rebinding on the same address simulates it coming back. Real
+    /// time, not paused — simpler than driving a paused clock through
+    /// several tasks' worth of interleaved socket I/O.
+    #[tokio::test]
+    async fn stays_connected_and_recovers_after_a_simulated_network_interruption() {
+        let be_id = Uuid::new_v4();
+        let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener1.local_addr().unwrap().to_string();
+        let mut registrations1 = spawn_relay_once(listener1).await;
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let run_handle = tokio::spawn(run_with_backoff(
+            addr.clone(),
+            be_id,
+            shutdown_rx,
+            test_backoff(),
+        ));
+
+        let first = tokio::time::timeout(Duration::from_secs(2), registrations1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.be_id, be_id);
+
+        // Nothing is listening on `addr` for a while — each reconnect
+        // attempt fails immediately (connection refused) and backs off.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Restore the path, on the exact same address.
+        let listener2 = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        let mut registrations2 = spawn_relay_once(listener2).await;
+
+        // No manual intervention on the client side at all — it registers
+        // again on its own once the path is back.
+        let second = tokio::time::timeout(Duration::from_secs(2), registrations2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.be_id, be_id);
+
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), run_handle)
+            .await
+            .expect("run task did not exit promptly after shutdown")
+            .unwrap();
     }
 }
