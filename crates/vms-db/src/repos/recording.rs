@@ -218,6 +218,22 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
+    /// Same as [`Self::list_older_than`], scoped to a single camera — used
+    /// when that camera has its own retention-days override.
+    pub async fn list_older_than_for_camera(
+        &self,
+        camera_id: Uuid,
+        cutoff: DateTimeWithTimeZone,
+    ) -> Result<Vec<recording::Model>, VmsError> {
+        recording::Entity::find()
+            .filter(recording::Column::CameraId.eq(camera_id))
+            .filter(recording::Column::EndTime.is_not_null())
+            .filter(recording::Column::EndTime.lte(cutoff))
+            .all(&self.db)
+            .await
+            .map_err(db_err)
+    }
+
     /// Finalized chunks across every camera, oldest first — the
     /// disk-threshold half of the retention sweep (delete the oldest
     /// chunks first until usage drops back under the configured
@@ -227,6 +243,23 @@ impl RecordingRepo {
         limit: u64,
     ) -> Result<Vec<recording::Model>, VmsError> {
         recording::Entity::find()
+            .filter(recording::Column::EndTime.is_not_null())
+            .order_by(recording::Column::EndTime, Order::Asc)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(db_err)
+    }
+
+    /// Same as [`Self::list_oldest_finalized`], restricted to cameras whose
+    /// own disk-threshold override currently makes them eligible for cleanup.
+    pub async fn list_oldest_finalized_for_cameras(
+        &self,
+        camera_ids: &[Uuid],
+        limit: u64,
+    ) -> Result<Vec<recording::Model>, VmsError> {
+        recording::Entity::find()
+            .filter(recording::Column::CameraId.is_in(camera_ids.iter().copied()))
             .filter(recording::Column::EndTime.is_not_null())
             .order_by(recording::Column::EndTime, Order::Asc)
             .limit(limit)

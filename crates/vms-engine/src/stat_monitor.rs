@@ -6,7 +6,7 @@ use std::time::Duration;
 use sysinfo::{Disks, System};
 use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, StatMetric, TriggerConfig};
-use vms_db::RecordingRepo;
+use vms_db::{CameraRepo, RecordingRepo};
 
 use crate::{pipeline_registry::RegistrySnapshot, PipelineRegistry, TriggerEvaluator};
 
@@ -32,6 +32,7 @@ const RETENTION_BATCH_SIZE: u64 = 10;
 /// call sites that don't care about retention are unaffected).
 pub struct RetentionConfig {
     pub recording_repo: RecordingRepo,
+    pub camera_repo: CameraRepo,
     pub recording_dir: PathBuf,
     pub retention_days: u32,
     pub retention_disk_threshold_percent: f64,
@@ -179,57 +180,88 @@ impl StatMonitor {
     /// Age-based cleanup first (delete what's definitely past its retention
     /// window regardless of disk usage), then disk-threshold cleanup (delete
     /// the oldest remaining chunks first until usage drops back under the
-    /// configured threshold). No-op until [`Self::set_retention`] has been
-    /// called.
+    /// configured threshold). Both passes resolve each camera's effective
+    /// setting as `camera.override.unwrap_or(global_default)`, so a per-camera
+    /// override of `0` disables that half of the sweep for just that camera.
+    /// No-op until [`Self::set_retention`] has been called.
     async fn sweep_retention(&self) {
-        let (recording_repo, recording_dir, retention_days, disk_threshold_percent) = {
+        let (recording_repo, camera_repo, recording_dir, retention_days, disk_threshold_percent) = {
             let guard = self.retention.lock().unwrap();
             let Some(cfg) = guard.as_ref() else {
                 return;
             };
             (
                 cfg.recording_repo.clone(),
+                cfg.camera_repo.clone(),
                 cfg.recording_dir.clone(),
                 cfg.retention_days,
                 cfg.retention_disk_threshold_percent,
             )
         };
 
-        if retention_days > 0 {
+        let cameras = match camera_repo.list().await {
+            Ok(cams) => cams,
+            Err(e) => {
+                tracing::warn!(error = %e, "Retention sweep: failed to list cameras");
+                return;
+            }
+        };
+
+        for camera in &cameras {
+            let effective_days = camera
+                .retention_days
+                .map(|d| d as u32)
+                .unwrap_or(retention_days);
+            if effective_days == 0 {
+                continue;
+            }
             let cutoff =
-                (chrono::Utc::now() - chrono::Duration::days(retention_days as i64)).fixed_offset();
-            match recording_repo.list_older_than(cutoff).await {
+                (chrono::Utc::now() - chrono::Duration::days(effective_days as i64)).fixed_offset();
+            match recording_repo
+                .list_older_than_for_camera(camera.id, cutoff)
+                .await
+            {
                 Ok(rows) => {
                     for row in rows {
                         self.delete_recording_row(&recording_repo, row).await;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Retention sweep: failed to list aged recordings")
-                }
+                Err(e) => tracing::warn!(
+                    camera_id = %camera.id,
+                    error = %e,
+                    "Retention sweep: failed to list aged recordings",
+                ),
             }
         }
 
-        if disk_threshold_percent > 0.0 {
-            if let Some(dir_str) = recording_dir.to_str() {
-                for _ in 0..MAX_RETENTION_BATCHES_PER_TICK {
-                    let Some(pct) = self.disk_percent(dir_str) else {
-                        break;
-                    };
-                    if pct < disk_threshold_percent {
-                        break;
-                    }
-                    match recording_repo
-                        .list_oldest_finalized(RETENTION_BATCH_SIZE)
-                        .await
-                    {
-                        Ok(rows) if !rows.is_empty() => {
-                            for row in rows {
-                                self.delete_recording_row(&recording_repo, row).await;
-                            }
+        if let Some(dir_str) = recording_dir.to_str() {
+            for _ in 0..MAX_RETENTION_BATCHES_PER_TICK {
+                let Some(pct) = self.disk_percent(dir_str) else {
+                    break;
+                };
+                let eligible: Vec<Uuid> = cameras
+                    .iter()
+                    .filter(|c| {
+                        let threshold = c
+                            .retention_disk_threshold_percent
+                            .unwrap_or(disk_threshold_percent);
+                        threshold > 0.0 && pct >= threshold
+                    })
+                    .map(|c| c.id)
+                    .collect();
+                if eligible.is_empty() {
+                    break;
+                }
+                match recording_repo
+                    .list_oldest_finalized_for_cameras(&eligible, RETENTION_BATCH_SIZE)
+                    .await
+                {
+                    Ok(rows) if !rows.is_empty() => {
+                        for row in rows {
+                            self.delete_recording_row(&recording_repo, row).await;
                         }
-                        _ => break,
                     }
+                    _ => break,
                 }
             }
         }

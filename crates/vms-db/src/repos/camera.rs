@@ -40,6 +40,11 @@ pub struct UpdateCamera {
     pub ring_buffer_duration_secs: Option<i32>,
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
+    /// `None` = leave unchanged. `Some(None)` = clear the override (inherit
+    /// the global default). `Some(Some(days))` = set an explicit override.
+    pub retention_days: Option<Option<i32>>,
+    /// Same three-state shape as `retention_days`.
+    pub retention_disk_threshold_percent: Option<Option<f64>>,
 }
 
 // -- Repository --
@@ -80,6 +85,8 @@ impl CameraRepo {
             enabled: Set(input.enabled),
             created_at: Set(ts),
             updated_at: Set(ts),
+            retention_days: Set(None),
+            retention_disk_threshold_percent: Set(None),
         };
         model.insert(&self.db).await.map_err(db_err)
     }
@@ -163,6 +170,12 @@ impl CameraRepo {
         }
         if let Some(v) = input.enabled {
             active.enabled = Set(v);
+        }
+        if let Some(v) = input.retention_days {
+            active.retention_days = Set(v);
+        }
+        if let Some(v) = input.retention_disk_threshold_percent {
+            active.retention_disk_threshold_percent = Set(v);
         }
 
         active.updated_at = Set(now());

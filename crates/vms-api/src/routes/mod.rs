@@ -13,6 +13,7 @@ mod pipeline_nodes;
 mod pipeline_triggers;
 mod pipelines;
 mod recordings;
+mod retention;
 mod settings;
 mod sources;
 mod thumbnails;
@@ -33,6 +34,7 @@ pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
 pub use pipeline_triggers::{CreateTriggerBody, UpdateTriggerBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use recordings::{PlaybackDto, RecordingDto};
+pub use retention::{RetentionPolicyDto, UpdateRetentionPolicyBody};
 pub use settings::SettingDto;
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
 pub use thumbnails::ThumbnailDto;
@@ -119,6 +121,11 @@ fn protected_routes() -> Router {
                         )
                         .push(Router::with_path("playback").get(recordings::get_playback))
                         .push(Router::with_path("events").get(events::list_events))
+                        .push(
+                            Router::with_path("retention-policy")
+                                .get(retention::get_retention_policy)
+                                .patch(retention::update_retention_policy),
+                        )
                         .push(
                             Router::with_path("thumbnails").push(
                                 Router::with_path("{filename}").get(thumbnails::get_thumbnail),

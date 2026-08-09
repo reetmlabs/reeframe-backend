@@ -36,6 +36,14 @@ pub struct Model {
     pub enabled: bool,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
+    /// Per-camera override of `[recordings] retention_days`. `None` inherits
+    /// the global default; `Some(0)` explicitly disables age-based cleanup
+    /// for this camera.
+    pub retention_days: Option<i32>,
+    /// Per-camera override of `[recordings] retention_disk_threshold_percent`.
+    /// `None` inherits the global default; `Some(0.0)` explicitly disables
+    /// disk-threshold cleanup for this camera.
+    pub retention_disk_threshold_percent: Option<f64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

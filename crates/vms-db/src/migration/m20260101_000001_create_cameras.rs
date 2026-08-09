@@ -82,4 +82,6 @@ pub enum Camera {
     Enabled,
     CreatedAt,
     UpdatedAt,
+    RetentionDays,
+    RetentionDiskThresholdPercent,
 }

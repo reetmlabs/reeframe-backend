@@ -456,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
     let stat_monitor = StatMonitor::new(trigger_evaluator.clone(), pipeline_registry.clone());
     stat_monitor.set_retention(RetentionConfig {
         recording_repo: recording_repo.clone(),
+        camera_repo: camera_repo.clone(),
         recording_dir: cfg.media.recording_dir.clone(),
         retention_days: cfg.recordings.retention_days,
         retention_disk_threshold_percent: cfg.recordings.retention_disk_threshold_percent,

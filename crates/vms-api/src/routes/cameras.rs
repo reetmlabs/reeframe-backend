@@ -215,6 +215,8 @@ pub async fn update_camera(
         ring_buffer_duration_secs: body.ring_buffer_duration_secs,
         ring_buffer_storage: body.ring_buffer_storage,
         enabled: body.enabled,
+        retention_days: None,
+        retention_disk_threshold_percent: None,
     };
 
     let camera = state.camera_repo.update(id, input).await?;

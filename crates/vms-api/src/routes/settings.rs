@@ -192,6 +192,7 @@ async fn apply_retention_now(state: &AppState) -> Result<(), ApiError> {
 
     state.stat_monitor.set_retention(RetentionConfig {
         recording_repo: state.recording_repo.clone(),
+        camera_repo: state.camera_repo.clone(),
         recording_dir: state.media_recording_dir.clone(),
         retention_days,
         retention_disk_threshold_percent,
