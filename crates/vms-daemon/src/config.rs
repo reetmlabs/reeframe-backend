@@ -130,6 +130,15 @@ impl Default for AuthConfig {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    /// `host:port` of a Relay/gateway server for WAPP pairing. Unset by
+    /// default — this BE keeps working standalone with zero dependency on
+    /// any Relay/WAPP being reachable. Set via config file or
+    /// VMS_GATEWAY__URL env var.
+    pub url: Option<String>,
+}
+
 // -- Root config --
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -140,6 +149,7 @@ pub struct AppConfig {
     pub api: ApiConfig,
     pub rtsp: RtspConfig,
     pub auth: AuthConfig,
+    pub gateway: GatewayConfig,
     /// Base64-encoded 32-byte AES-256-GCM encryption key.
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
@@ -158,6 +168,7 @@ impl Default for AppConfig {
             api: ApiConfig::default(),
             rtsp: RtspConfig::default(),
             auth: AuthConfig::default(),
+            gateway: GatewayConfig::default(),
             encryption_key: String::new(),
             log_level: "info".into(),
         }

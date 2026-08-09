@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod gateway;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -161,6 +162,16 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // -- Gateway (Relay/tunnel client for WAPP pairing) --
+    // Unset by default — matches Coordinator's own "stays autonomous"
+    // guarantee; with no `[gateway] url`, zero connection attempt is made.
+    let gateway_task = cfg.gateway.url.clone().map(|url| {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tracing::info!(url = %url, "Gateway client starting");
+        let join_handle = tokio::spawn(gateway::run(url, shutdown_rx));
+        (shutdown_tx, join_handle)
+    });
 
     // -- Crypto --
     let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {
@@ -496,6 +507,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!(error = %e, "Error during media manager shutdown");
         anyhow::anyhow!(e)
     })?;
+
+    // -- Graceful shutdown: gateway client --
+    if let Some((shutdown_tx, join_handle)) = gateway_task {
+        let _ = shutdown_tx.send(());
+        join_handle.await.ok();
+        tracing::info!("Gateway client stopped");
+    }
 
     tracing::info!("VMS Daemon stopped");
     Ok(())
