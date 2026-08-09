@@ -48,7 +48,10 @@ pub struct PlaybackDto {
 
 /// Parse an RFC 3339 datetime out of a query parameter, e.g.
 /// `?from=2026-07-01T14:00:00Z`.
-fn parse_query_datetime(req: &mut Request, name: &str) -> Result<DateTime<Utc>, ApiError> {
+pub(crate) fn parse_query_datetime(
+    req: &mut Request,
+    name: &str,
+) -> Result<DateTime<Utc>, ApiError> {
     let raw = req
         .query::<String>(name)
         .ok_or_else(|| ApiError::bad_request(format!("missing '{name}' query parameter")))?;

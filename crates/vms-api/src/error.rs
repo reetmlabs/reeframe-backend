@@ -6,6 +6,7 @@ use vms_core::VmsError;
 ///
 /// Implements `Writer` so it can be used as the `Err` arm of a handler's
 /// `Result` return type directly — Salvo renders it without any extra wiring.
+#[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,

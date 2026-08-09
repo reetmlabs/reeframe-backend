@@ -313,12 +313,13 @@ async fn main() -> anyhow::Result<()> {
     // has no wildcard, so a separate subscriber can't see every camera.
     let source_manager = SourceManager::new(media_event_tx);
     let bridge_event_bus = event_bus.clone();
+    let bridge_events_repo = events_repo.clone();
     tokio::spawn(async move {
         while let Some(event) = media_event_rx.recv().await {
             let topic = if let Some(source_id) = event.source_id {
                 vms_core::TopicKey::Source(source_id)
             } else if let Some(camera_id) = event.camera_id {
-                if let Err(e) = events_repo
+                if let Err(e) = bridge_events_repo
                     .record(vms_db::repos::event::CreateEvent {
                         camera_id,
                         event_type: event.event_type.clone(),
@@ -477,6 +478,7 @@ async fn main() -> anyhow::Result<()> {
         export_job_repo,
         settings_repo,
         tile_layout_repo,
+        events_repo,
         media_recording_dir: cfg.media.recording_dir.clone(),
         config_file_path: PathBuf::from(config::CONFIG_FILE_PATH),
         config_parser: Arc::new(config::parse_uploaded_config),

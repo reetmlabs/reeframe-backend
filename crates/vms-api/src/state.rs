@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use sea_orm::DatabaseConnection;
 use vms_db::{
-    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DestinationRepo, ExportJobRepo,
-    PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo, TileLayoutRepo,
-    UserRepo,
+    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DestinationRepo, EventsRepo,
+    ExportJobRepo, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo,
+    TileLayoutRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
@@ -47,6 +47,7 @@ pub struct AppState {
     pub export_job_repo: ExportJobRepo,
     pub settings_repo: SettingsRepo,
     pub tile_layout_repo: TileLayoutRepo,
+    pub events_repo: EventsRepo,
     /// Resolved `media.recording_dir` as of this boot — settings handlers
     /// need it for the retention disk-threshold check when rebuilding a
     /// `RetentionConfig` after a hot retention update; it's cold (a

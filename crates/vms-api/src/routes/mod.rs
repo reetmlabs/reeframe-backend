@@ -4,6 +4,7 @@ mod contact_lists;
 mod contacts;
 mod destinations;
 mod discovery;
+mod events;
 mod export_jobs;
 mod health;
 mod metrics;
@@ -14,6 +15,7 @@ mod pipelines;
 mod recordings;
 mod settings;
 mod sources;
+mod thumbnails;
 mod tile_profiles;
 mod users;
 mod webhooks;
@@ -24,6 +26,7 @@ pub use contact_lists::{ContactListDto, CreateContactListBody, UpdateContactList
 pub use contacts::{ContactDto, CreateContactBody, UpdateContactBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};
 pub use discovery::{DiscoveredDeviceDto, ResolvedStreamsDto};
+pub use events::EventDto;
 pub use export_jobs::{CreateExportBody, ExportJobDto};
 pub use pipeline_edges::{CreateEdgeBody, UpdateEdgeBody};
 pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
@@ -32,6 +35,7 @@ pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
 pub use recordings::{PlaybackDto, RecordingDto};
 pub use settings::SettingDto;
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
+pub use thumbnails::ThumbnailDto;
 pub use tile_profiles::{
     AssignSiteBody, CreateTileFormationBody, CreateTileProfileBody, SetBindingBody,
     TileCameraBindingDto, TileFormationDto, TileProfileDto, UpdateTileFormationBody,
@@ -103,8 +107,23 @@ fn protected_routes() -> Router {
                                 .push(Router::with_path("start").post(cameras::start_relay))
                                 .push(Router::with_path("stop").post(cameras::stop_relay)),
                         )
-                        .push(Router::with_path("recordings").get(recordings::list_recordings))
-                        .push(Router::with_path("playback").get(recordings::get_playback)),
+                        .push(
+                            Router::with_path("recordings")
+                                .get(recordings::list_recordings)
+                                .push(
+                                    Router::with_path("{recording_id}").push(
+                                        Router::with_path("thumbnails")
+                                            .get(thumbnails::list_thumbnails),
+                                    ),
+                                ),
+                        )
+                        .push(Router::with_path("playback").get(recordings::get_playback))
+                        .push(Router::with_path("events").get(events::list_events))
+                        .push(
+                            Router::with_path("thumbnails").push(
+                                Router::with_path("{filename}").get(thumbnails::get_thumbnail),
+                            ),
+                        ),
                 ),
         )
         .push(
