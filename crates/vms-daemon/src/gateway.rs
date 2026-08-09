@@ -1,11 +1,6 @@
 //! Persistent outbound connection to a Relay/gateway server for WAPP
-//! pairing, plus the registration handshake sent once each time it connects.
-//! The wire format below is provisional — nothing on the other end of this
-//! connection exists yet to confirm it against.
-//!
-//! Only runs at all when `[gateway] url` is configured — this BE stays
-//! fully autonomous with zero dependency on any Relay/WAPP being reachable
-//! otherwise, the same guarantee Coordinator trust already has.
+//! pairing, plus the registration handshake sent on connect. Only runs
+//! when `[gateway] url` is configured — otherwise this BE stays autonomous.
 
 use std::time::Duration;
 
@@ -16,20 +11,16 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-/// Sent once, immediately after connecting, so the Relay knows which site
-/// this connection belongs to and how to route requests to it. `be_id` is
-/// the same identifier Coordinator's `sites` table registers this BE under
-/// — trusting that identity is what the JWKS work already established.
-///
-/// Newline-delimited JSON: simplest thing that's both human-debuggable and
-/// trivially frameable over a raw stream, and easy to replace once a real
-/// protocol is designed against an actual Relay implementation.
+use crate::config::GatewayConfig;
+
+/// Sent once, right after connecting, so the Relay knows which site this
+/// connection belongs to. NDJSON-framed — simplest thing that's both
+/// debuggable and disposable once a real protocol exists.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct RegistrationMessage {
     be_id: Uuid,
-    /// This daemon's own version — the most concrete "capability info" that
-    /// actually exists today. Extend with real capability flags once the
-    /// Relay side defines what it needs to route on.
+    /// The most concrete "capability info" that exists today. Extend once
+    /// the Relay side defines real capability flags to route on.
     version: String,
 }
 
@@ -41,10 +32,8 @@ impl RegistrationMessage {
         }
     }
 
-    /// NDJSON framing: compact JSON plus a trailing `\n`. Serializing a
-    /// `Uuid` and a `String` can't fail, so this returns the bytes
-    /// directly rather than a `Result` — there is no "malformed" case once
-    /// you already have a `be_id: Uuid` in hand.
+    /// Compact JSON plus a trailing `\n`. Serializing a `Uuid`/`String`
+    /// can't fail, so this returns bytes directly rather than a `Result`.
     fn encode(&self) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(self).expect("RegistrationMessage always serializes");
         bytes.push(b'\n');
@@ -52,20 +41,27 @@ impl RegistrationMessage {
     }
 }
 
-/// Rejects a missing `be_id` before any connection is even attempted — a
-/// static configuration gap (`[gateway] url` set without `[gateway]
-/// be_id`), not a transient failure backoff/retry could ever fix. A
-/// malformed `be_id` in the config file is rejected even earlier, by
-/// `Uuid`'s own `Deserialize` impl when the config is first loaded.
-pub(crate) fn require_be_id(be_id: Option<Uuid>) -> Result<Uuid, String> {
+/// Whether the gateway client should run, and if so, against which
+/// address/identity. `url` unset means `Ok(None)` — no connection is ever
+/// attempted, since this is the only call site that leads to `run`.
+pub(crate) fn resolve(cfg: &GatewayConfig) -> Result<Option<(String, Uuid)>, String> {
+    let Some(url) = cfg.url.clone() else {
+        return Ok(None);
+    };
+    let be_id = require_be_id(cfg.be_id)?;
+    Ok(Some((url, be_id)))
+}
+
+/// Rejects a missing `be_id` before any connection is attempted — a
+/// static config gap backoff/retry can't fix. A malformed `be_id` is
+/// rejected even earlier, by `Uuid`'s own `Deserialize`.
+fn require_be_id(be_id: Option<Uuid>) -> Result<Uuid, String> {
     be_id.ok_or_else(|| "[gateway] be_id must be set when [gateway] url is configured".into())
 }
 
 /// Exponential backoff with jitter, capped at `max`. Mirrors
-/// `vms_media::camera_stream::ReconnectPolicy`'s "a connection must stay up
-/// for a while before the *next* failure counts as real recovery" design —
-/// without that, a connection that flaps every few seconds would hot-loop
-/// reconnects at the base delay forever instead of ever escalating.
+/// `vms_media::camera_stream::ReconnectPolicy`'s "must stay up a while
+/// before failure resets it" design, so flapping escalates instead of hot-looping.
 struct Backoff {
     base: Duration,
     max: Duration,
@@ -88,10 +84,9 @@ impl Backoff {
         }
     }
 
-    /// Call once per failed/dropped connection to get the delay before the
-    /// next attempt. Deterministic — jitter is applied separately by the
-    /// caller, at the point the delay is actually used, so this stays
-    /// exactly testable like `ReconnectPolicy::on_failure`.
+    /// Call once per failed/dropped connection for the next delay.
+    /// Deterministic — jitter is applied separately by the caller so
+    /// this stays exactly testable.
     fn next_delay(&mut self) -> Duration {
         if self.connected_at.elapsed() >= self.stable_uptime {
             self.delay = self.base;
@@ -101,10 +96,8 @@ impl Backoff {
         delay
     }
 
-    /// Call right after a connection attempt succeeds — starts the uptime
-    /// clock `next_delay` checks against. Deliberately does not reset
-    /// `delay` itself; only a *stable* connection (checked in `next_delay`)
-    /// counts as recovery.
+    /// Starts the uptime clock `next_delay` checks. Doesn't reset `delay`
+    /// itself — only a *stable* connection counts as recovery.
     fn record_connected(&mut self) {
         self.connected_at = Instant::now();
     }
@@ -118,14 +111,9 @@ fn jittered(delay: Duration) -> Duration {
     Duration::from_secs_f64((delay.as_secs_f64() + jitter).max(0.0))
 }
 
-/// Runs until `shutdown` resolves. Reconnects on any connect failure,
-/// registration-send failure, or dropped connection, with exponential
-/// backoff. A single long-lived task drives the whole lifecycle — no task
-/// or socket is ever spawned per attempt, so nothing accumulates across
-/// however many reconnect cycles happen.
-///
-/// `be_id` is required, not `Option<Uuid>` — see `require_be_id`'s doc
-/// comment for why a missing one is rejected before this is ever called.
+/// Runs until `shutdown` resolves, reconnecting with backoff on any
+/// connect/register failure or dropped connection. `be_id` is required,
+/// not `Option` — see `require_be_id` for why.
 pub async fn run(addr: String, be_id: Uuid, shutdown: tokio::sync::oneshot::Receiver<()>) {
     run_with_backoff(
         addr,
@@ -267,10 +255,8 @@ mod tests {
 
     // -- Connection lifecycle against a local mock acceptor --
 
-    /// Accepts connections on an ephemeral local port and immediately drops
-    /// each one — simulating a Relay server that keeps bouncing the BE,
-    /// forcing repeated reconnects. Returns the bound address and a counter
-    /// of how many connections it has accepted so far.
+    /// Accepts then immediately drops each connection, simulating a
+    /// bouncing Relay. Returns the address and an accept counter.
     async fn spawn_flaky_acceptor() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -301,10 +287,8 @@ mod tests {
             test_backoff(),
         ));
 
-        // Let several reconnect cycles happen. Each cycle is: real (fast,
-        // local) TCP connect + immediate drop, then a virtual-time sleep
-        // for the backoff delay — advancing time drives that sleep without
-        // any real wall-clock wait.
+        // Each cycle: real local connect+drop, then a virtual-time sleep
+        // for backoff — advancing time skips the wait.
         for _ in 0..10 {
             tokio::time::advance(Duration::from_millis(100)).await;
             tokio::task::yield_now().await;
@@ -323,6 +307,41 @@ mod tests {
             .await
             .expect("run task did not exit promptly after shutdown")
             .unwrap();
+    }
+
+    // -- Config surface --
+
+    #[test]
+    fn unset_url_means_no_connection_is_ever_attempted() {
+        let cfg = GatewayConfig {
+            url: None,
+            be_id: Some(Uuid::new_v4()),
+        };
+        // `resolve` is the only call site leading to `run` — `Ok(None)`
+        // is the actual decision not to connect, not just "no error."
+        assert_eq!(resolve(&cfg).unwrap(), None);
+    }
+
+    #[test]
+    fn url_without_be_id_is_rejected() {
+        let cfg = GatewayConfig {
+            url: Some("gateway.example.invalid:443".into()),
+            be_id: None,
+        };
+        assert!(resolve(&cfg).is_err());
+    }
+
+    #[test]
+    fn url_with_be_id_resolves_to_both() {
+        let be_id = Uuid::new_v4();
+        let cfg = GatewayConfig {
+            url: Some("gateway.example.invalid:443".into()),
+            be_id: Some(be_id),
+        };
+        assert_eq!(
+            resolve(&cfg).unwrap(),
+            Some(("gateway.example.invalid:443".to_string(), be_id))
+        );
     }
 
     // -- Registration handshake --
