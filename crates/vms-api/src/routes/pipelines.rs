@@ -4,8 +4,7 @@ use uuid::Uuid;
 use vms_db::{
     entities::{
         pipeline::{self, PipelineType},
-        pipeline_run,
-        run_node_result,
+        pipeline_run, run_node_result,
     },
     repos::pipeline::{CreatePipeline, UpdatePipeline},
 };

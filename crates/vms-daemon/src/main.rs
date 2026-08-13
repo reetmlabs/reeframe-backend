@@ -149,9 +149,17 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("[auth] mode = \"oidc\" requires [auth] jwks_url to be set");
             anyhow::anyhow!("missing jwks_url for oidc auth mode")
         })?;
+        let be_id = cfg.gateway.be_id.ok_or_else(|| {
+            tracing::error!(
+                "[auth] mode = \"oidc\" requires [gateway] be_id to be set — it's the expected \
+                 `aud` for every Coordinator-issued token this BE accepts"
+            );
+            anyhow::anyhow!("missing gateway.be_id for oidc auth mode")
+        })?;
         let provider = CoordinatorJwksAuthProvider::new(
             jwks_url.clone(),
             std::time::Duration::from_secs(cfg.auth.jwks_refresh_interval_secs),
+            be_id,
         );
         provider.prefetch().await.map_err(|e| {
             tracing::error!(jwks_url = %jwks_url, error = %e, "Failed to fetch Coordinator JWKS");

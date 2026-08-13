@@ -4,6 +4,8 @@
 /target
 **/target
 debug/
+Makefile
+Makefile.local.example
 
 # Remove Cargo.lock from here if this becomes a library instead of a binary
 # Cargo.lock
@@ -119,3 +121,9 @@ CLAUDE.local.md
 *.orig
 *.bak
 *.tmp
+
+# test_camera_server.py pid/log tracking (see Makefile)
+/.camera-pids/
+
+# Per-developer camera credentials — copy from Makefile.local.example
+/Makefile.local

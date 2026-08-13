@@ -7,9 +7,14 @@
 //! never makes a network call to Coordinator on the request path — only when
 //! the cache is stale (see [`CoordinatorJwksAuthProvider::ensure_fresh`]).
 //!
-//! Claims shape mirrors `coordinator-auth::token::Claims` in the Coordinator
-//! repo exactly (`sub`, `username`, `is_admin`, `exp`) — both sides must agree
-//! since this decodes tokens Coordinator signs with its Ed25519 key.
+//! Claims shape mirrors `coordinator-auth::token::SiteTokenClaims` in the
+//! Coordinator repo exactly (`sub`, `username`, `aud`, `role`, `exp`) — both
+//! sides must agree since this decodes tokens Coordinator signs with its
+//! Ed25519 key. Coordinator's *other* token shape (`coordinator-auth::token::
+//! Claims`, `is_admin` instead of `aud`/`role`) is a general identity
+//! assertion never meant to reach a BE directly — `set_audience` below
+//! rejects it outright (it carries no `aud` claim at all) rather than this
+//! BE silently trusting a token that was never scoped to it.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +25,19 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use vms_core::{AuthClaims, AuthProvider, VmsError};
+
+/// BE only distinguishes admin/non-admin today (`vms_db::entities::user::
+/// UserRole`) — Coordinator's finer-grained roles (Admin/Auditor/Operator/
+/// Viewer) collapse to that binary until the BE grows real per-role
+/// permissions. Exactly "Admin" (case-insensitive) becomes `"admin"`;
+/// everything else becomes `"viewer"`, the least-privileged choice.
+fn map_coordinator_role(role: &str) -> &'static str {
+    if role.eq_ignore_ascii_case("admin") {
+        "admin"
+    } else {
+        "viewer"
+    }
+}
 
 /// Fetches the current key set from Coordinator's JWKS endpoint. A trait
 /// (rather than calling `reqwest` directly from the provider) so tests can
@@ -53,7 +71,12 @@ impl JwksFetcher for HttpJwksFetcher {
 struct CoordinatorClaims {
     sub: Uuid,
     username: String,
-    is_admin: bool,
+    // Never read directly — `Validation::set_audience` below makes decode()
+    // itself reject a mismatch, so this field's only job is being present
+    // for serde to require and validate against.
+    #[allow(dead_code)]
+    aud: Uuid,
+    role: String,
     exp: i64,
 }
 
@@ -63,28 +86,38 @@ struct Cache {
 }
 
 /// Verifies JWTs signed by a Coordinator instance's Ed25519 key, fetched
-/// from `[auth] jwks_url` and cached locally for `refresh_interval`.
+/// from `[auth] jwks_url` and cached locally for `refresh_interval`. Only
+/// tokens whose `aud` claim matches `be_id` (this BE's own identity in
+/// Coordinator's `sites` table) are accepted — a token scoped to a
+/// different BE must never grant access here.
 pub struct CoordinatorJwksAuthProvider {
     fetcher: Arc<dyn JwksFetcher>,
     refresh_interval: Duration,
+    be_id: Uuid,
     cache: RwLock<Option<Cache>>,
 }
 
 impl CoordinatorJwksAuthProvider {
-    pub fn new(jwks_url: impl Into<String>, refresh_interval: Duration) -> Self {
+    pub fn new(jwks_url: impl Into<String>, refresh_interval: Duration, be_id: Uuid) -> Self {
         Self::with_fetcher(
             Arc::new(HttpJwksFetcher {
                 client: reqwest::Client::new(),
                 url: jwks_url.into(),
             }),
             refresh_interval,
+            be_id,
         )
     }
 
-    fn with_fetcher(fetcher: Arc<dyn JwksFetcher>, refresh_interval: Duration) -> Self {
+    fn with_fetcher(
+        fetcher: Arc<dyn JwksFetcher>,
+        refresh_interval: Duration,
+        be_id: Uuid,
+    ) -> Self {
         Self {
             fetcher,
             refresh_interval,
+            be_id,
             cache: RwLock::new(None),
         }
     }
@@ -156,15 +189,20 @@ impl AuthProvider for CoordinatorJwksAuthProvider {
         let decoding_key = DecodingKey::from_jwk(&jwk)
             .map_err(|e| VmsError::Unauthorized(format!("invalid JWKS key: {e}")))?;
 
-        let claims =
-            decode::<CoordinatorClaims>(token, &decoding_key, &Validation::new(Algorithm::EdDSA))
-                .map(|data| data.claims)
-                .map_err(|e| VmsError::Unauthorized(format!("invalid token: {e}")))?;
+        // `set_audience` makes jsonwebtoken itself reject a token whose `aud`
+        // doesn't match this BE's own id — including Coordinator's *other*
+        // token shape, which carries no `aud` claim at all and so can never
+        // pass this check.
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_audience(&[self.be_id.to_string()]);
+        let claims = decode::<CoordinatorClaims>(token, &decoding_key, &validation)
+            .map(|data| data.claims)
+            .map_err(|e| VmsError::Unauthorized(format!("invalid token: {e}")))?;
 
         Ok(AuthClaims {
             user_id: claims.sub,
             username: claims.username,
-            roles: vec![if claims.is_admin { "admin" } else { "viewer" }.to_string()],
+            roles: vec![map_coordinator_role(&claims.role).to_string()],
             expires_at: claims.exp,
         })
     }
@@ -214,8 +252,8 @@ mod tests {
     struct TestClaims {
         sub: Uuid,
         username: String,
-        is_admin: bool,
-        token_type: &'static str,
+        aud: Uuid,
+        role: String,
         iat: i64,
         exp: i64,
     }
@@ -252,34 +290,41 @@ mod tests {
         encode(&header, claims, &encoding_key).unwrap()
     }
 
-    fn access_claims(sub: Uuid) -> TestClaims {
+    fn access_claims(sub: Uuid, aud: Uuid) -> TestClaims {
         let now = Utc::now().timestamp();
         TestClaims {
             sub,
             username: "alice".into(),
-            is_admin: true,
-            token_type: "access",
+            aud,
+            role: "Admin".into(),
             iat: now,
             exp: now + 900,
         }
     }
 
-    fn provider_with_keys(keys: JwkSet, refresh_interval: Duration) -> CoordinatorJwksAuthProvider {
+    fn provider_with_keys(
+        keys: JwkSet,
+        refresh_interval: Duration,
+        be_id: Uuid,
+    ) -> CoordinatorJwksAuthProvider {
         CoordinatorJwksAuthProvider::with_fetcher(
             Arc::new(FakeFetcher {
                 keys: Mutex::new(keys),
                 calls: AtomicUsize::new(0),
             }),
             refresh_interval,
+            be_id,
         )
     }
 
     #[tokio::test]
-    async fn token_signed_by_a_known_coordinator_key_verifies() {
+    async fn token_signed_by_a_known_coordinator_key_and_matching_aud_verifies() {
         let (signing_key, jwk) = generate_keypair("kid-1");
-        let provider = provider_with_keys(JwkSet { keys: vec![jwk] }, Duration::from_secs(300));
+        let be_id = Uuid::new_v4();
+        let provider =
+            provider_with_keys(JwkSet { keys: vec![jwk] }, Duration::from_secs(300), be_id);
         let user_id = Uuid::new_v4();
-        let token = sign_token(&signing_key, "kid-1", &access_claims(user_id));
+        let token = sign_token(&signing_key, "kid-1", &access_claims(user_id, be_id));
 
         let claims = provider.verify_token(&token).await.unwrap();
 
@@ -289,11 +334,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_token_scoped_to_a_different_be_is_rejected() {
+        let (signing_key, jwk) = generate_keypair("kid-1");
+        let this_be_id = Uuid::new_v4();
+        let other_be_id = Uuid::new_v4();
+        let provider = provider_with_keys(
+            JwkSet { keys: vec![jwk] },
+            Duration::from_secs(300),
+            this_be_id,
+        );
+        let token = sign_token(
+            &signing_key,
+            "kid-1",
+            &access_claims(Uuid::new_v4(), other_be_id),
+        );
+
+        let result = provider.verify_token(&token).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_coordinator_role_maps_to_viewer() {
+        let (signing_key, jwk) = generate_keypair("kid-1");
+        let be_id = Uuid::new_v4();
+        let provider =
+            provider_with_keys(JwkSet { keys: vec![jwk] }, Duration::from_secs(300), be_id);
+        let mut claims = access_claims(Uuid::new_v4(), be_id);
+        claims.role = "Operator".into();
+        let token = sign_token(&signing_key, "kid-1", &claims);
+
+        let claims = provider.verify_token(&token).await.unwrap();
+
+        assert_eq!(claims.roles, vec!["viewer".to_string()]);
+    }
+
+    #[tokio::test]
     async fn token_signed_by_an_unrecognized_key_is_rejected() {
         let (_signing_key, jwk) = generate_keypair("kid-1");
-        let provider = provider_with_keys(JwkSet { keys: vec![jwk] }, Duration::from_secs(300));
+        let be_id = Uuid::new_v4();
+        let provider =
+            provider_with_keys(JwkSet { keys: vec![jwk] }, Duration::from_secs(300), be_id);
         let (rogue_key, _rogue_jwk) = generate_keypair("kid-rogue");
-        let token = sign_token(&rogue_key, "kid-rogue", &access_claims(Uuid::new_v4()));
+        let token = sign_token(
+            &rogue_key,
+            "kid-rogue",
+            &access_claims(Uuid::new_v4(), be_id),
+        );
 
         let result = provider.verify_token(&token).await;
 
@@ -303,6 +390,7 @@ mod tests {
     #[tokio::test]
     async fn stale_cache_triggers_a_refresh_before_verification() {
         let (signing_key, jwk) = generate_keypair("kid-1");
+        let be_id = Uuid::new_v4();
         let fetcher = Arc::new(FakeFetcher {
             keys: Mutex::new(JwkSet { keys: vec![jwk] }),
             calls: AtomicUsize::new(0),
@@ -310,8 +398,9 @@ mod tests {
         let provider = CoordinatorJwksAuthProvider::with_fetcher(
             fetcher.clone(),
             Duration::from_millis(0), // always stale
+            be_id,
         );
-        let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4()));
+        let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4(), be_id));
 
         // First call: cache is empty, forces a fetch. Second call: cache is
         // immediately stale again (0ms window), so this must refetch before
@@ -325,13 +414,17 @@ mod tests {
     #[tokio::test]
     async fn a_fresh_cache_is_not_refetched_on_every_verification() {
         let (signing_key, jwk) = generate_keypair("kid-1");
+        let be_id = Uuid::new_v4();
         let fetcher = Arc::new(FakeFetcher {
             keys: Mutex::new(JwkSet { keys: vec![jwk] }),
             calls: AtomicUsize::new(0),
         });
-        let provider =
-            CoordinatorJwksAuthProvider::with_fetcher(fetcher.clone(), Duration::from_secs(300));
-        let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4()));
+        let provider = CoordinatorJwksAuthProvider::with_fetcher(
+            fetcher.clone(),
+            Duration::from_secs(300),
+            be_id,
+        );
+        let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4(), be_id));
 
         provider.verify_token(&token).await.unwrap();
         provider.verify_token(&token).await.unwrap();
@@ -345,13 +438,15 @@ mod tests {
     #[tokio::test]
     async fn an_expired_token_is_rejected() {
         let (signing_key, jwk) = generate_keypair("kid-1");
-        let provider = provider_with_keys(JwkSet { keys: vec![jwk] }, Duration::from_secs(300));
+        let be_id = Uuid::new_v4();
+        let provider =
+            provider_with_keys(JwkSet { keys: vec![jwk] }, Duration::from_secs(300), be_id);
         let now = Utc::now().timestamp();
         let claims = TestClaims {
             sub: Uuid::new_v4(),
             username: "alice".into(),
-            is_admin: false,
-            token_type: "access",
+            aud: be_id,
+            role: "Viewer".into(),
             iat: now - 1000,
             exp: now - 100,
         };

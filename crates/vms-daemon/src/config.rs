@@ -141,10 +141,12 @@ pub struct GatewayConfig {
     /// VMS_GATEWAY__URL env var.
     pub url: Option<String>,
     /// The identifier Coordinator's `sites` table registered this BE
-    /// under — presented to the Relay on every connection so it knows
-    /// which site the connection belongs to. Required when `url` is set;
-    /// ignored otherwise. Set via config file or VMS_GATEWAY__BE_ID env
-    /// var.
+    /// under. Presented to the Relay on every connection so it knows which
+    /// site the connection belongs to (required when `url` is set; ignored
+    /// otherwise), and separately used as the expected `aud` when verifying
+    /// Coordinator-issued tokens (required whenever `[auth] mode = "oidc"`
+    /// — see `CoordinatorJwksAuthProvider`, unrelated to `url`/Relay).
+    /// Set via config file or VMS_GATEWAY__BE_ID env var.
     pub be_id: Option<uuid::Uuid>,
 }
 
