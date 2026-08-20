@@ -17,6 +17,7 @@ arc-swap       = { workspace = true }
 evalexpr       = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 sysinfo              = { workspace = true }
+serde          = { workspace = true }
 serde_json     = { workspace = true }
 uuid           = { workspace = true }
 chrono         = { workspace = true }
