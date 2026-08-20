@@ -3,6 +3,7 @@ pub mod camera;
 pub mod contact;
 pub mod contact_list;
 pub mod contact_list_member;
+pub mod daily_recording_coverage;
 pub mod destination;
 pub mod event;
 pub mod export_job;
