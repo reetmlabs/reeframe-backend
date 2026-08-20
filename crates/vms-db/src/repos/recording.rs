@@ -133,6 +133,28 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
+    /// Chunks whose `start_time` falls in `[from, to)`, oldest first — unlike
+    /// [`Self::list_for_camera`], this is not overlap-based: a chunk is
+    /// selected by its start time alone, matching how the daily-coverage
+    /// aggregator (and the FE's own `dailySummaries()`) buckets a whole
+    /// chunk into the single day its start falls on, never splitting one
+    /// across a day boundary.
+    pub async fn list_starting_in_range_for_camera(
+        &self,
+        camera_id: Uuid,
+        from: DateTimeWithTimeZone,
+        to: DateTimeWithTimeZone,
+    ) -> Result<Vec<recording::Model>, VmsError> {
+        recording::Entity::find()
+            .filter(recording::Column::CameraId.eq(camera_id))
+            .filter(recording::Column::StartTime.gte(from))
+            .filter(recording::Column::StartTime.lt(to))
+            .order_by_asc(recording::Column::StartTime)
+            .all(&self.db)
+            .await
+            .map_err(db_err)
+    }
+
     /// Resolve a specific instant to the chunk covering it —
     /// `start_time <= at` and (`end_time IS NULL` or `at < end_time`), i.e.
     /// including the chunk currently being written.
