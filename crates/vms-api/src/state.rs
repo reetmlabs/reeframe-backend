@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use sea_orm::DatabaseConnection;
 use vms_db::{
-    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DestinationRepo, EventsRepo,
-    ExportJobRepo, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo, SourceRepo,
-    TileLayoutRepo, UserRepo,
+    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DailyRecordingCoverageRepo,
+    DestinationRepo, EventsRepo, ExportJobRepo, PipelineRepo, PipelineRunRepo, RecordingRepo,
+    SettingsRepo, SourceRepo, TileLayoutRepo, UserRepo,
 };
 use vms_engine::{
     EventBus, Metrics, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
@@ -44,6 +44,7 @@ pub struct AppState {
     pub pipeline_repo: PipelineRepo,
     pub pipeline_run_repo: PipelineRunRepo,
     pub recording_repo: RecordingRepo,
+    pub daily_coverage_repo: DailyRecordingCoverageRepo,
     pub export_job_repo: ExportJobRepo,
     pub settings_repo: SettingsRepo,
     pub tile_layout_repo: TileLayoutRepo,

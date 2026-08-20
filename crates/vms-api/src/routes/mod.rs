@@ -33,7 +33,7 @@ pub use pipeline_edges::{CreateEdgeBody, UpdateEdgeBody};
 pub use pipeline_nodes::{CreateNodeBody, UpdateNodeBody};
 pub use pipeline_triggers::{CreateTriggerBody, UpdateTriggerBody};
 pub use pipelines::{CreatePipelineBody, PipelineDto, UpdatePipelineBody};
-pub use recordings::{PlaybackDto, RecordingDto};
+pub use recordings::{DailyCoverageDto, PlaybackDto, RecordingDto};
 pub use retention::{RetentionPolicyDto, UpdateRetentionPolicyBody};
 pub use settings::SettingDto;
 pub use sources::{CreateSourceBody, SourceDto, UpdateSourceBody};
@@ -112,6 +112,10 @@ fn protected_routes() -> Router {
                         .push(
                             Router::with_path("recordings")
                                 .get(recordings::list_recordings)
+                                .push(
+                                    Router::with_path("daily-summary")
+                                        .get(recordings::list_daily_summary),
+                                )
                                 .push(
                                     Router::with_path("{recording_id}").push(
                                         Router::with_path("thumbnails")
@@ -275,6 +279,7 @@ fn protected_routes() -> Router {
         .push(
             Router::with_path("recordings")
                 .push(Router::with_path("export").post(export_jobs::create_export))
+                .push(Router::with_path("daily-summary").get(recordings::list_daily_summary_bulk))
                 .push(
                     Router::with_path("{id}")
                         .push(Router::with_path("stream").get(recordings::stream_recording)),

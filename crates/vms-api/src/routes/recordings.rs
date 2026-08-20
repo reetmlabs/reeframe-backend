@@ -44,7 +44,46 @@ pub struct PlaybackDto {
     pub offset_secs: f64,
 }
 
+/// One precomputed daily-coverage row — see `vms_engine::coverage` for how
+/// `session_ranges`/`coverage_seconds` are derived (a port of the frontend's
+/// own `RecordingModel::dailySummaries()` merge algorithm).
+#[derive(Serialize)]
+pub struct DailyCoverageDto {
+    pub camera_id: Uuid,
+    pub date: chrono::NaiveDate,
+    pub coverage_seconds: i64,
+    pub session_ranges: serde_json::Value,
+    pub chunk_count: i32,
+    pub total_size_bytes: Option<i64>,
+    pub is_finalized: bool,
+    pub purged_by_retention: bool,
+}
+
+impl From<vms_db::entities::daily_recording_coverage::Model> for DailyCoverageDto {
+    fn from(m: vms_db::entities::daily_recording_coverage::Model) -> Self {
+        Self {
+            camera_id: m.camera_id,
+            date: m.day,
+            coverage_seconds: m.coverage_seconds,
+            session_ranges: m.session_ranges,
+            chunk_count: m.chunk_count,
+            total_size_bytes: m.total_size_bytes,
+            is_finalized: m.is_finalized,
+            purged_by_retention: m.purged_by_retention,
+        }
+    }
+}
+
 // -- Internal helpers --
+
+/// Parse a bare calendar date out of a query parameter, e.g. `?from=2026-07-01`.
+fn parse_query_date(req: &mut Request, name: &str) -> Result<chrono::NaiveDate, ApiError> {
+    let raw = req
+        .query::<String>(name)
+        .ok_or_else(|| ApiError::bad_request(format!("missing '{name}' query parameter")))?;
+    chrono::NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
+        .map_err(|_| ApiError::bad_request(format!("invalid '{name}' — expected yyyy-mm-dd")))
+}
 
 /// Parse an RFC 3339 datetime out of a query parameter, e.g.
 /// `?from=2026-07-01T14:00:00Z`.
@@ -167,4 +206,68 @@ pub async fn stream_recording(
 
     file.send(req.headers(), res).await;
     Ok(())
+}
+
+/// GET /cameras/{id}/recordings/daily-summary?from=<yyyy-mm-dd>&to=<yyyy-mm-dd>
+///
+/// Precomputed per-day coverage for one camera, `date` in `[from, to)` —
+/// `O(days)`, not `O(chunks)`. This is what a recordings panel should call
+/// for a whole visible range instead of `GET /cameras/{id}/recordings`
+/// followed by client-side bucketing.
+#[handler]
+pub async fn list_daily_summary(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<Vec<DailyCoverageDto>>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let camera_id = parse_id(req)?;
+    let from = parse_query_date(req, "from")?;
+    let to = parse_query_date(req, "to")?;
+
+    if from >= to {
+        return Err(ApiError::bad_request("'from' must be earlier than 'to'"));
+    }
+
+    let rows = state
+        .daily_coverage_repo
+        .list_range(camera_id, from, to)
+        .await?;
+
+    Ok(Json(rows.into_iter().map(DailyCoverageDto::from).collect()))
+}
+
+/// GET /recordings/daily-summary?camera_ids=<uuid,uuid,...>&from=&to=
+///
+/// Same as [`list_daily_summary`], across multiple cameras in one call — the
+/// fleet-overview shape, one query instead of N per-camera requests.
+#[handler]
+pub async fn list_daily_summary_bulk(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<Vec<DailyCoverageDto>>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let from = parse_query_date(req, "from")?;
+    let to = parse_query_date(req, "to")?;
+
+    if from >= to {
+        return Err(ApiError::bad_request("'from' must be earlier than 'to'"));
+    }
+
+    let raw_ids = req
+        .query::<String>("camera_ids")
+        .ok_or_else(|| ApiError::bad_request("missing 'camera_ids' query parameter"))?;
+    let camera_ids: Vec<Uuid> = raw_ids
+        .split(',')
+        .map(|s| s.trim().parse::<Uuid>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| {
+            ApiError::bad_request("invalid 'camera_ids' — expected comma-separated UUIDs")
+        })?;
+
+    let rows = state
+        .daily_coverage_repo
+        .list_range_bulk(&camera_ids, from, to)
+        .await?;
+
+    Ok(Json(rows.into_iter().map(DailyCoverageDto::from).collect()))
 }

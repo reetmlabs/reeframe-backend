@@ -20,13 +20,13 @@ use vms_api::{
     routes::build_router, state::AppState,
 };
 use vms_db::{
-    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DestinationRepo, EventsRepo,
-    ExportJobRepo, Migrator, PipelineRepo, PipelineRunRepo, RecordingRepo, SettingsRepo,
-    SourceRepo, TileLayoutRepo, UserRepo,
+    ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, Crypto, DailyRecordingCoverageRepo,
+    DestinationRepo, EventsRepo, ExportJobRepo, Migrator, PipelineRepo, PipelineRunRepo,
+    RecordingRepo, SettingsRepo, SourceRepo, TileLayoutRepo, UserRepo,
 };
 use vms_engine::{
-    EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager, RetentionConfig,
-    StatMonitor, TriggerEvaluator,
+    CoverageConfig, EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager,
+    RetentionConfig, StatMonitor, TriggerEvaluator,
 };
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 use vms_sources::SourceManager;
@@ -203,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
     let pipeline_repo = PipelineRepo::new(db.clone());
     let pipeline_run_repo = PipelineRunRepo::new(db.clone());
     let recording_repo = RecordingRepo::new(db.clone());
+    let daily_coverage_repo = DailyRecordingCoverageRepo::new(db.clone());
     let export_job_repo = ExportJobRepo::new(db.clone());
     let user_repo = UserRepo::new(db.clone());
     let api_key_repo = ApiKeyRepo::new(db.clone());
@@ -501,6 +502,12 @@ async fn main() -> anyhow::Result<()> {
         retention_days: cfg.recordings.retention_days,
         retention_disk_threshold_percent: cfg.recordings.retention_disk_threshold_percent,
     });
+    stat_monitor.set_coverage(CoverageConfig {
+        recording_repo: recording_repo.clone(),
+        camera_repo: camera_repo.clone(),
+        coverage_repo: daily_coverage_repo.clone(),
+        retention_days: cfg.recordings.retention_days,
+    });
     stat_monitor.clone().start();
     tracing::info!("Stat monitor started");
 
@@ -516,6 +523,7 @@ async fn main() -> anyhow::Result<()> {
         pipeline_repo,
         pipeline_run_repo,
         recording_repo,
+        daily_coverage_repo,
         export_job_repo,
         settings_repo,
         tile_layout_repo,
