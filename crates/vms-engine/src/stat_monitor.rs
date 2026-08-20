@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sysinfo::{Disks, System};
 use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, StatMetric, TriggerConfig};
-use vms_db::{CameraRepo, RecordingRepo};
+use vms_db::repos::daily_recording_coverage::UpsertDailyCoverage;
+use vms_db::{CameraRepo, DailyRecordingCoverageRepo, RecordingRepo};
 
+use crate::coverage::compute_day_coverage;
 use crate::{pipeline_registry::RegistrySnapshot, PipelineRegistry, TriggerEvaluator};
 
 /// Seconds between samples during normal operation (first sleep and default).
@@ -26,6 +28,18 @@ const NEAR_MARGIN: f64 = 0.20;
 /// wouldn't clear it.
 const MAX_RETENTION_BATCHES_PER_TICK: usize = 20;
 const RETENTION_BATCH_SIZE: u64 = 10;
+/// Minimum seconds between daily-coverage recomputes. Retention runs on
+/// every tick above (5/2/15s) because its query is a cheap age filter, but
+/// recomputing every camera's whole "today" this often would itself become
+/// the DB-pressure problem precomputed coverage exists to solve — so this
+/// is throttled independently, on the same tick, rather than on every one.
+const COVERAGE_RECOMPUTE_INTERVAL_SECS: u64 = 120;
+/// Cap on how many (camera, day) backfill pairs get computed in one
+/// coverage-recompute pass — same reasoning as
+/// [`MAX_RETENTION_BATCHES_PER_TICK`]: a fresh deploy with a long retention
+/// window shouldn't spike the DB computing months of history in one go: the
+/// rest backfills over subsequent passes.
+const MAX_COVERAGE_BACKFILL_PER_TICK: usize = 20;
 
 /// Recording retention configuration, set once via [`StatMonitor::set_retention`]
 /// after construction (kept out of `new()`'s signature so existing tests and
@@ -36,6 +50,18 @@ pub struct RetentionConfig {
     pub recording_dir: PathBuf,
     pub retention_days: u32,
     pub retention_disk_threshold_percent: f64,
+}
+
+/// Daily-coverage aggregation configuration, set once via
+/// [`StatMonitor::set_coverage`] — same "optional, no-op until configured"
+/// shape as [`RetentionConfig`]. `retention_days` mirrors
+/// `RetentionConfig::retention_days`: the global default backfill window,
+/// overridden per-camera the same way retention already is.
+pub struct CoverageConfig {
+    pub recording_repo: RecordingRepo,
+    pub camera_repo: CameraRepo,
+    pub coverage_repo: DailyRecordingCoverageRepo,
+    pub retention_days: u32,
 }
 
 /// Polls system metrics and feeds readings to the [`TriggerEvaluator`].
@@ -54,6 +80,8 @@ pub struct StatMonitor {
     sys: Mutex<System>,
     disks: Mutex<Disks>,
     retention: Mutex<Option<RetentionConfig>>,
+    coverage: Mutex<Option<CoverageConfig>>,
+    last_coverage_run: Mutex<Option<Instant>>,
 }
 
 impl StatMonitor {
@@ -64,6 +92,8 @@ impl StatMonitor {
             sys: Mutex::new(System::new()),
             disks: Mutex::new(Disks::new()),
             retention: Mutex::new(None),
+            coverage: Mutex::new(None),
+            last_coverage_run: Mutex::new(None),
         })
     }
 
@@ -72,6 +102,13 @@ impl StatMonitor {
     /// site that doesn't care about retention are unaffected.
     pub fn set_retention(&self, config: RetentionConfig) {
         *self.retention.lock().unwrap() = Some(config);
+    }
+
+    /// Set the daily-coverage configuration this monitor recomputes
+    /// periodically (see [`COVERAGE_RECOMPUTE_INTERVAL_SECS`]). Same
+    /// optional, separate-from-`new()` shape as [`Self::set_retention`].
+    pub fn set_coverage(&self, config: CoverageConfig) {
+        *self.coverage.lock().unwrap() = Some(config);
     }
 
     // -- Polling loop --
@@ -94,6 +131,7 @@ impl StatMonitor {
                 tokio::time::sleep(Duration::from_secs(interval_secs)).await;
                 let near = self.poll();
                 self.sweep_retention().await;
+                self.sweep_daily_coverage().await;
                 let next = if near {
                     FAST_INTERVAL_SECS
                 } else {
@@ -184,6 +222,11 @@ impl StatMonitor {
     /// setting as `camera.override.unwrap_or(global_default)`, so a per-camera
     /// override of `0` disables that half of the sweep for just that camera.
     /// No-op until [`Self::set_retention`] has been called.
+    ///
+    /// Every `(camera_id, day)` touched by a deletion is recomputed via
+    /// [`Self::recompute_purged_days`] once both passes finish, so a
+    /// precomputed coverage row never reports data retention just deleted —
+    /// a no-op itself until [`Self::set_coverage`] has also been called.
     async fn sweep_retention(&self) {
         let (recording_repo, camera_repo, recording_dir, retention_days, disk_threshold_percent) = {
             let guard = self.retention.lock().unwrap();
@@ -207,6 +250,8 @@ impl StatMonitor {
             }
         };
 
+        let mut purged_days: HashSet<(Uuid, chrono::NaiveDate)> = HashSet::new();
+
         for camera in &cameras {
             let effective_days = camera
                 .retention_days
@@ -223,6 +268,7 @@ impl StatMonitor {
             {
                 Ok(rows) => {
                     for row in rows {
+                        purged_days.insert((row.camera_id, row.start_time.date_naive()));
                         self.delete_recording_row(&recording_repo, row).await;
                     }
                 }
@@ -258,12 +304,188 @@ impl StatMonitor {
                 {
                     Ok(rows) if !rows.is_empty() => {
                         for row in rows {
+                            purged_days.insert((row.camera_id, row.start_time.date_naive()));
                             self.delete_recording_row(&recording_repo, row).await;
                         }
                     }
                     _ => break,
                 }
             }
+        }
+
+        if !purged_days.is_empty() {
+            self.recompute_purged_days(&recording_repo, purged_days)
+                .await;
+        }
+    }
+
+    /// Recompute each `(camera_id, day)` pair against whatever chunks
+    /// retention left behind, flagging `purged_by_retention` when nothing's
+    /// left. No-op if [`Self::set_coverage`] hasn't been called — coverage
+    /// precomputation is an optional feature, retention must work without it.
+    async fn recompute_purged_days(
+        &self,
+        recording_repo: &RecordingRepo,
+        days: HashSet<(Uuid, chrono::NaiveDate)>,
+    ) {
+        let coverage_repo = {
+            let guard = self.coverage.lock().unwrap();
+            let Some(cfg) = guard.as_ref() else {
+                return;
+            };
+            cfg.coverage_repo.clone()
+        };
+
+        for (camera_id, day) in days {
+            self.recompute_and_store_day(recording_repo, &coverage_repo, camera_id, day, true)
+                .await;
+        }
+    }
+
+    // -- Daily recording coverage --
+
+    /// Recompute every camera's "today" (UTC), then backfill any past day in
+    /// the retention window that has no row yet. No-op until
+    /// [`Self::set_coverage`] has been called, and throttled to
+    /// [`COVERAGE_RECOMPUTE_INTERVAL_SECS`] regardless — called every tick,
+    /// but only does real work once that interval has elapsed.
+    async fn sweep_daily_coverage(&self) {
+        {
+            let mut last_run = self.last_coverage_run.lock().unwrap();
+            let due = last_run.is_none_or(|t| {
+                t.elapsed() >= Duration::from_secs(COVERAGE_RECOMPUTE_INTERVAL_SECS)
+            });
+            if !due {
+                return;
+            }
+            *last_run = Some(Instant::now());
+        }
+
+        let (recording_repo, camera_repo, coverage_repo, retention_days) = {
+            let guard = self.coverage.lock().unwrap();
+            let Some(cfg) = guard.as_ref() else {
+                return;
+            };
+            (
+                cfg.recording_repo.clone(),
+                cfg.camera_repo.clone(),
+                cfg.coverage_repo.clone(),
+                cfg.retention_days,
+            )
+        };
+
+        let cameras = match camera_repo.list().await {
+            Ok(cams) => cams,
+            Err(e) => {
+                tracing::warn!(error = %e, "Coverage sweep: failed to list cameras");
+                return;
+            }
+        };
+
+        let today = chrono::Utc::now().date_naive();
+        let mut backfill_budget = MAX_COVERAGE_BACKFILL_PER_TICK;
+
+        for camera in &cameras {
+            self.recompute_and_store_day(&recording_repo, &coverage_repo, camera.id, today, false)
+                .await;
+
+            if backfill_budget == 0 {
+                continue;
+            }
+            let effective_days = camera
+                .retention_days
+                .map(|d| d as u32)
+                .unwrap_or(retention_days);
+
+            for offset in 1..=effective_days as i64 {
+                if backfill_budget == 0 {
+                    break;
+                }
+                let day = today - chrono::Duration::days(offset);
+                match coverage_repo.exists(camera.id, day).await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            camera_id = %camera.id,
+                            %day,
+                            error = %e,
+                            "Coverage sweep: failed to check for existing backfill row",
+                        );
+                        continue;
+                    }
+                }
+                self.recompute_and_store_day(
+                    &recording_repo,
+                    &coverage_repo,
+                    camera.id,
+                    day,
+                    false,
+                )
+                .await;
+                backfill_budget -= 1;
+            }
+        }
+    }
+
+    /// Compute one camera's coverage for `day` (UTC) from its current chunks
+    /// and upsert the row. `day < today` is finalized; `day == today` isn't.
+    /// `mark_purged_if_empty` is only `true` from the retention-purge hook —
+    /// a backfilled day with zero chunks means "never recorded," not
+    /// "recorded, then purged," so backfill/today recomputes never set it.
+    async fn recompute_and_store_day(
+        &self,
+        recording_repo: &RecordingRepo,
+        coverage_repo: &DailyRecordingCoverageRepo,
+        camera_id: Uuid,
+        day: chrono::NaiveDate,
+        mark_purged_if_empty: bool,
+    ) {
+        let Some(day_start) = day.and_hms_opt(0, 0, 0) else {
+            return;
+        };
+        let day_start = day_start.and_utc().fixed_offset();
+        let day_end = day_start + chrono::Duration::days(1);
+
+        let chunks = match recording_repo
+            .list_starting_in_range_for_camera(camera_id, day_start, day_end)
+            .await
+        {
+            Ok(chunks) => chunks,
+            Err(e) => {
+                tracing::warn!(
+                    camera_id = %camera_id,
+                    %day,
+                    error = %e,
+                    "Coverage sweep: failed to list chunks for day",
+                );
+                return;
+            }
+        };
+
+        let result = compute_day_coverage(&chunks);
+        let is_finalized = day < chrono::Utc::now().date_naive();
+        let purged_by_retention = mark_purged_if_empty && result.chunk_count == 0;
+
+        if let Err(e) = coverage_repo
+            .upsert(UpsertDailyCoverage {
+                camera_id,
+                day,
+                coverage_seconds: result.coverage_seconds,
+                session_ranges: result.session_ranges,
+                chunk_count: result.chunk_count,
+                total_size_bytes: result.total_size_bytes,
+                is_finalized,
+                purged_by_retention,
+            })
+            .await
+        {
+            tracing::warn!(
+                camera_id = %camera_id,
+                %day,
+                error = %e,
+                "Coverage sweep: failed to store daily coverage",
+            );
         }
     }
 
