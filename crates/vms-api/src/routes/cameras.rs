@@ -30,7 +30,11 @@ pub struct CameraDto {
     pub ring_buffer_duration_secs: i32,
     pub ring_buffer_storage: RingBufferStorage,
     pub enabled: bool,
-    /// `true` if a GStreamer recording pipeline is currently active.
+    /// `true` if the camera's live GStreamer pipeline is currently running
+    /// (viewing live does not imply recording — see `recording`).
+    pub live: bool,
+    /// `true` if a recording branch is currently attached and writing to
+    /// disk. Implies `live`.
     pub recording: bool,
     /// Main-quality (full resolution) RTSP relay URL, intended for
     /// full-screen live view. `null` until that relay is started.
@@ -46,6 +50,7 @@ pub struct CameraDto {
 impl CameraDto {
     fn from_model(
         m: camera::Model,
+        live: bool,
         recording: bool,
         relay_url: Option<String>,
         sub_relay_url: Option<String>,
@@ -63,6 +68,7 @@ impl CameraDto {
             ring_buffer_duration_secs: m.ring_buffer_duration_secs,
             ring_buffer_storage: m.ring_buffer_storage,
             enabled: m.enabled,
+            live,
             recording,
             relay_url,
             sub_relay_url,
@@ -120,6 +126,18 @@ fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>
     base_url.to_string()
 }
 
+/// Resolve a decrypted camera row's main + optional sub-stream RTSP URLs
+/// with credentials injected — shared by every handler that may need to
+/// start the camera's live pipeline (`recording/start`, `relay/start`).
+fn resolve_camera_urls(camera: &camera::Model, password: Option<&str>) -> (String, Option<String>) {
+    let rtsp_url = build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password);
+    let sub_rtsp_url = camera
+        .sub_rtsp_url
+        .as_deref()
+        .map(|sub| build_rtsp_url(sub, camera.username.as_deref(), password));
+    (rtsp_url, sub_rtsp_url)
+}
+
 // -- Handlers --
 
 /// GET /cameras
@@ -130,10 +148,11 @@ pub async fn list_cameras(depot: &mut Depot) -> Result<Json<Vec<CameraDto>>, Api
     let dtos = cameras
         .into_iter()
         .map(|m| {
-            let recording = state.media_manager.is_running(m.id);
+            let live = state.media_manager.is_running(m.id);
+            let recording = state.media_manager.is_recording(m.id);
             let relay_url = state.media_manager.relay_url(m.id, RelayQuality::Main);
             let sub_relay_url = state.media_manager.relay_url(m.id, RelayQuality::Sub);
-            CameraDto::from_model(m, recording, relay_url, sub_relay_url)
+            CameraDto::from_model(m, live, recording, relay_url, sub_relay_url)
         })
         .collect();
     Ok(Json(dtos))
@@ -168,7 +187,9 @@ pub async fn create_camera(
 
     let camera = state.camera_repo.create(input).await?;
     res.status_code(StatusCode::CREATED);
-    Ok(Json(CameraDto::from_model(camera, false, None, None)))
+    Ok(Json(CameraDto::from_model(
+        camera, false, false, None, None,
+    )))
 }
 
 /// GET /cameras/{id}
@@ -181,11 +202,13 @@ pub async fn get_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<Cam
         .get(id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
-    let recording = state.media_manager.is_running(id);
+    let live = state.media_manager.is_running(id);
+    let recording = state.media_manager.is_recording(id);
     let relay_url = state.media_manager.relay_url(id, RelayQuality::Main);
     let sub_relay_url = state.media_manager.relay_url(id, RelayQuality::Sub);
     Ok(Json(CameraDto::from_model(
         camera,
+        live,
         recording,
         relay_url,
         sub_relay_url,
@@ -220,11 +243,13 @@ pub async fn update_camera(
     };
 
     let camera = state.camera_repo.update(id, input).await?;
-    let recording = state.media_manager.is_running(id);
+    let live = state.media_manager.is_running(id);
+    let recording = state.media_manager.is_recording(id);
     let relay_url = state.media_manager.relay_url(id, RelayQuality::Main);
     let sub_relay_url = state.media_manager.relay_url(id, RelayQuality::Sub);
     Ok(Json(CameraDto::from_model(
         camera,
+        live,
         recording,
         relay_url,
         sub_relay_url,
@@ -242,7 +267,7 @@ pub async fn delete_camera(
     let id = parse_id(req)?;
 
     if state.media_manager.is_running(id) {
-        state.media_manager.stop_camera(id).await?;
+        state.media_manager.stop_live(id).await?;
     }
 
     state.camera_repo.delete(id).await?;
@@ -251,6 +276,10 @@ pub async fn delete_camera(
 }
 
 /// POST /cameras/{id}/recording/start
+///
+/// Starts recording — brings the camera's live pipeline up first if it
+/// isn't already running (recording never requires a separate "go live"
+/// call first).
 #[handler]
 pub async fn start_recording(
     req: &mut Request,
@@ -269,30 +298,20 @@ pub async fn start_recording(
         return Err(ApiError::bad_request("camera is disabled"));
     }
 
-    let rtsp_url = build_rtsp_url(
-        &camera.rtsp_url,
-        camera.username.as_deref(),
-        password.as_deref(),
-    );
-
-    // Resolve credentials into the sub-stream URL too, if the camera has
-    // one — `MediaManager::start_camera` starts a persistent sub-stream
-    // pipeline from it (tapped by motion detection by default, and later by
-    // a sub-quality relay), the same low-res-first precedence `start_relay`
-    // above already uses.
-    let sub_rtsp_url = camera
-        .sub_rtsp_url
-        .as_deref()
-        .map(|sub| build_rtsp_url(sub, camera.username.as_deref(), password.as_deref()));
+    let (rtsp_url, sub_rtsp_url) = resolve_camera_urls(&camera, password.as_deref());
 
     state
         .media_manager
-        .start_camera(id, &rtsp_url, sub_rtsp_url.as_deref())
+        .start_recording(id, &rtsp_url, sub_rtsp_url.as_deref())
         .await?;
     Ok(Json(serde_json::json!({"recording": true})))
 }
 
 /// POST /cameras/{id}/recording/stop
+///
+/// Detaches the recording branch only — the live pipeline (and any active
+/// relay/motion detection) keeps running. Use `DELETE /cameras/{id}` or stop
+/// the relay separately to tear down live view entirely.
 #[handler]
 pub async fn stop_recording(
     req: &mut Request,
@@ -301,7 +320,7 @@ pub async fn stop_recording(
 ) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
-    state.media_manager.stop_camera(id).await?;
+    state.media_manager.stop_recording(id)?;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
@@ -321,11 +340,14 @@ fn parse_relay_quality(req: &mut Request) -> Result<RelayQuality, ApiError> {
 
 /// POST /cameras/{id}/relay/start?quality=main|sub
 ///
-/// Starts an RTSP relay mount bridged from the camera's already-running
-/// main or sub-stream pipeline (`?quality=sub` requires recording to have
-/// been started with a `sub_rtsp_url` configured) — never a new connection
-/// to the camera. Probes the codec on first use (any quality — main and sub
-/// are assumed to share one encoding), then registers the mount.
+/// Starts an RTSP relay mount for live view — bridged from the camera's main
+/// or sub-stream pipeline, starting whichever one is needed on demand if
+/// it isn't already running (`?quality=sub` requires a `sub_rtsp_url`
+/// configured, but never requires recording to have been started).
+/// Recording is a separate, explicit concern — see `POST
+/// /cameras/{id}/recording/start`. Probes the codec on first use (any
+/// quality — main and sub are assumed to share one encoding), then
+/// registers the mount.
 #[handler]
 pub async fn start_relay(
     req: &mut Request,
@@ -335,9 +357,9 @@ pub async fn start_relay(
     let id = parse_id(req)?;
     let quality = parse_relay_quality(req)?;
 
-    let camera = state
+    let (camera, password) = state
         .camera_repo
-        .get(id)
+        .get_decrypted(id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
 
@@ -345,10 +367,18 @@ pub async fn start_relay(
         return Err(ApiError::bad_request("camera is disabled"));
     }
 
+    let (rtsp_url, sub_rtsp_url) = resolve_camera_urls(&camera, password.as_deref());
+
     let had_cached_codec = camera.codec.is_some();
     let codec = state
         .media_manager
-        .start_relay(id, quality, camera.codec.as_deref())
+        .start_relay(
+            id,
+            quality,
+            &rtsp_url,
+            sub_rtsp_url.as_deref(),
+            camera.codec.as_deref(),
+        )
         .await?;
 
     // Persist the detected codec so future daemon restarts can skip the probe.

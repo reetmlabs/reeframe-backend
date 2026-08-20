@@ -11,6 +11,7 @@ use uuid::Uuid;
 use vms_core::event::Event;
 use vms_core::{RecordingChunkEvent, VmsError};
 
+use crate::camera_stream;
 use crate::camera_stream::{build_camera_stream, spawn_monitor, ChunkNaming};
 use crate::motion_branch::{self, MotionHandle};
 use crate::relay::{RelayQuality, RelayServer};
@@ -57,10 +58,10 @@ struct CameraHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     /// Join handle for the bus-monitor / reconnect task.
     task: tokio::task::JoinHandle<()>,
-    /// Kept alive so the monitor task (which holds the other `Arc`) can
-    /// still refresh the session timestamp on reconnect — see
-    /// `camera_stream::ChunkNaming`.
-    #[allow(dead_code)]
+    /// Shared with the monitor task — needed here too so
+    /// `start_recording`/`stop_recording` can attach/detach the recording
+    /// branch against the same `ChunkNaming` state the monitor refreshes on
+    /// reconnect. See `camera_stream::ChunkNaming`.
     naming: Arc<ChunkNaming>,
 }
 
@@ -89,8 +90,15 @@ fn sub_tee_name(camera_id: Uuid) -> String {
 
 /// Manages per-camera GStreamer pipelines.
 ///
-/// Each started camera gets one pipeline:
-/// `rtspsrc -> rtph264depay -> h264parse -> tee -> queue -> splitmuxsink`
+/// Each started camera gets one **live** pipeline:
+/// `rtspsrc -> rtph264depay -> h264parse -> tee`
+///
+/// Recording is not part of that pipeline by default — it is an
+/// attach/detach branch (`queue -> splitmuxsink`) on the tee, started
+/// explicitly via [`start_recording`](Self::start_recording) and stopped via
+/// [`stop_recording`](Self::stop_recording), the same way the relay, ring
+/// buffer, motion detection, and thumbnail capture all tap the same tee.
+/// Connecting a relay (or otherwise going live) never implies recording.
 ///
 /// A background tokio task monitors the GStreamer bus for errors and EOS events
 /// and automatically reconnects with exponential backoff (2 s -> 60 s).
@@ -144,25 +152,27 @@ impl MediaManager {
         })
     }
 
-    /// Start continuous recording for a camera, its optional sub-stream
-    /// pipeline, and motion detection — all tied to this one call, since
-    /// they're only ever torn down together (see [`stop_camera`](Self::stop_camera)).
-    /// No-op if the recording pipeline is already running.
+    /// Start the camera's live pipeline (`rtspsrc -> tee`, no recording),
+    /// its optional sub-stream pipeline, and motion/thumbnail detection —
+    /// all tied to this one call, since they're only ever torn down together
+    /// (see [`stop_live`](Self::stop_live)). No-op if the live pipeline is
+    /// already running. Does **not** start recording — see
+    /// [`start_recording`](Self::start_recording) for that.
     ///
     /// `sub_rtsp_url` is the camera's dedicated low-resolution sub-stream,
     /// if it has one (the caller resolves credentials into the URL, same as
     /// `rtsp_url`). A camera typically supports only two concurrent RTSP
     /// sessions, already spoken for by this daemon: one for the main stream
-    /// (recording, full-screen relay, ring buffer), one for the sub-stream
-    /// (tile relay, analytics) — so motion detection never opens a
-    /// connection of its own. It taps the sub-stream pipeline's tee by
-    /// default (starting that pipeline here if it isn't already running),
-    /// falling back to the main pipeline's tee when the camera has no
-    /// sub-stream configured, or if starting the sub-stream pipeline fails.
-    /// Both the sub-stream and motion detection are best-effort: a failure
-    /// in either is logged but never fails the recording pipeline that just
-    /// started successfully.
-    pub async fn start_camera(
+    /// (recording when attached, full-screen relay, ring buffer), one for
+    /// the sub-stream (tile relay, analytics) — so motion detection never
+    /// opens a connection of its own. It taps the sub-stream pipeline's tee
+    /// by default (starting that pipeline here if it isn't already
+    /// running), falling back to the main pipeline's tee when the camera
+    /// has no sub-stream configured, or if starting the sub-stream pipeline
+    /// fails. Both the sub-stream and motion detection are best-effort: a
+    /// failure in either is logged but never fails the live pipeline that
+    /// just started successfully.
+    pub async fn start_live(
         &self,
         camera_id: Uuid,
         rtsp_url: &str,
@@ -175,13 +185,7 @@ impl MediaManager {
             }
         }
 
-        let (pipeline, naming) = build_camera_stream(
-            camera_id,
-            rtsp_url,
-            &self.config.recording_dir,
-            self.config.chunk_duration_secs,
-            self.chunk_event_tx.clone(),
-        )?;
+        let (pipeline, naming) = build_camera_stream(camera_id, rtsp_url)?;
 
         pipeline
             .set_state(gstreamer::State::Playing)
@@ -209,7 +213,7 @@ impl MediaManager {
             },
         );
 
-        tracing::info!(camera_id = %camera_id, rtsp_url, "Recording pipeline started");
+        tracing::info!(camera_id = %camera_id, rtsp_url, "Live pipeline started");
 
         // Prefer the sub-stream for motion detection and thumbnail capture
         // (cheaper decode, and neither needs main-resolution frames);
@@ -229,22 +233,108 @@ impl MediaManager {
             None => (pipeline, main_tee_name(camera_id)),
         };
 
-        if let Err(e) = self.start_motion_detection(camera_id, &low_res_pipeline, &low_res_tee) {
-            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
-        }
-        if let Err(e) = self.start_thumbnail_capture(camera_id, &low_res_pipeline, &low_res_tee) {
-            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start thumbnail capture");
-        }
+        self.attach_analytics_branches(camera_id, &low_res_pipeline, &low_res_tee);
 
         Ok(())
+    }
+
+    /// Attach motion detection and thumbnail capture to `tee_name`'s tee on
+    /// `pipeline` — both tied to "live" (start as soon as any pipeline for
+    /// this camera exists, independent of recording). No-ops individually if
+    /// already attached; failures are logged, never propagated, since
+    /// neither is essential to having a working live pipeline.
+    fn attach_analytics_branches(
+        &self,
+        camera_id: Uuid,
+        pipeline: &gstreamer::Pipeline,
+        tee_name: &str,
+    ) {
+        if let Err(e) = self.start_motion_detection(camera_id, pipeline, tee_name) {
+            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
+        }
+        if let Err(e) = self.start_thumbnail_capture(camera_id, pipeline, tee_name) {
+            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start thumbnail capture");
+        }
+    }
+
+    /// Start recording for a camera: ensures the live pipeline is running
+    /// (starting it via [`start_live`](Self::start_live) if not), then
+    /// attaches the recording branch (`queue -> splitmuxsink`) to its tee.
+    /// No-op if already recording.
+    pub async fn start_recording(
+        &self,
+        camera_id: Uuid,
+        rtsp_url: &str,
+        sub_rtsp_url: Option<&str>,
+    ) -> Result<(), VmsError> {
+        if !self.is_running(camera_id) {
+            self.start_live(camera_id, rtsp_url, sub_rtsp_url).await?;
+        }
+
+        let (pipeline, naming) = {
+            let cameras = self.cameras.lock().unwrap();
+            let h = cameras
+                .get(&camera_id)
+                .ok_or_else(|| VmsError::Media(format!("camera {camera_id} is not running")))?;
+            (h.pipeline.clone(), h.naming.clone())
+        };
+
+        camera_stream::attach_recording_branch(
+            camera_id,
+            &pipeline,
+            &naming,
+            &self.chunk_event_tx,
+            &self.config.recording_dir,
+            self.config.chunk_duration_secs,
+        )?;
+
+        tracing::info!(camera_id = %camera_id, "Recording started");
+        Ok(())
+    }
+
+    /// Stop recording for a camera — detaches the recording branch from the
+    /// tee, leaving the live pipeline (and relay/motion/thumbnails/ring
+    /// buffer) running untouched. No-op if not recording, or if the camera
+    /// is not even live.
+    pub fn stop_recording(&self, camera_id: Uuid) -> Result<(), VmsError> {
+        let Some((pipeline, naming)) = self
+            .cameras
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .map(|h| (h.pipeline.clone(), h.naming.clone()))
+        else {
+            return Ok(());
+        };
+        camera_stream::detach_recording_branch(camera_id, &pipeline, &naming)?;
+        tracing::info!(camera_id = %camera_id, "Recording stopped");
+        Ok(())
+    }
+
+    /// Return `true` if a recording branch is currently attached for `camera_id`.
+    pub fn is_recording(&self, camera_id: Uuid) -> bool {
+        self.cameras
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .map(|h| camera_stream::is_recording_attached(camera_id, &h.pipeline))
+            .unwrap_or(false)
     }
 
     /// Start an RTSP relay mount for a camera, bridged from whichever
     /// pipeline `quality` selects — the main pipeline for
     /// [`RelayQuality::Main`], the sub-stream pipeline for
-    /// [`RelayQuality::Sub`]. That pipeline must already be running
-    /// (recording started, with a sub-stream configured for `Sub`) —
-    /// relaying never starts a connection of its own.
+    /// [`RelayQuality::Sub`]. Neither pipeline needs to already be running —
+    /// live view never implies recording, so this starts whichever pipeline
+    /// `quality` needs on demand (no-op if already up), same as
+    /// [`start_live`](Self::start_live)/[`start_recording`](Self::start_recording)
+    /// would. Relaying itself never opens a second connection to the camera
+    /// beyond that one live pipeline.
+    ///
+    /// `rtsp_url`/`sub_rtsp_url` are only used if the relevant pipeline needs
+    /// starting — ignored (may be empty/`None`) if it's already running.
+    /// `RelayQuality::Sub` requires `sub_rtsp_url` to be `Some` the first
+    /// time it's requested for a camera.
     ///
     /// When `cached_codec` is `Some`, the probe step is skipped (instant
     /// start). When `None`, a brief separate connection probes the relevant
@@ -257,6 +347,8 @@ impl MediaManager {
         &self,
         camera_id: Uuid,
         quality: RelayQuality,
+        rtsp_url: &str,
+        sub_rtsp_url: Option<&str>,
         cached_codec: Option<&str>,
     ) -> Result<String, VmsError> {
         if self.relay.is_relaying(camera_id, quality) {
@@ -265,12 +357,13 @@ impl MediaManager {
 
         let (pipeline, tee_name, probe_url) = match quality {
             RelayQuality::Main => {
+                if !self.is_running(camera_id) {
+                    self.start_live(camera_id, rtsp_url, sub_rtsp_url).await?;
+                }
                 let cameras = self.cameras.lock().unwrap();
-                let h = cameras.get(&camera_id).ok_or_else(|| {
-                    VmsError::Media(format!(
-                        "camera {camera_id} is not running — cannot start relay"
-                    ))
-                })?;
+                let h = cameras
+                    .get(&camera_id)
+                    .expect("start_live just inserted this camera");
                 (
                     h.pipeline.clone(),
                     main_tee_name(camera_id),
@@ -278,12 +371,29 @@ impl MediaManager {
                 )
             }
             RelayQuality::Sub => {
+                if !self.sub_streams.lock().unwrap().contains_key(&camera_id) {
+                    let sub_url = sub_rtsp_url.ok_or_else(|| {
+                        VmsError::Media(format!(
+                            "camera {camera_id} has no sub-stream configured — cannot start sub relay"
+                        ))
+                    })?;
+                    let sub_pipeline = self.start_sub_stream(camera_id, sub_url)?;
+                    // First live activity for this camera if the main
+                    // pipeline isn't up either — attach motion/thumbnails
+                    // here so they aren't skipped just because the viewer
+                    // only ever asked for the sub-quality tile relay.
+                    if !self.is_running(camera_id) {
+                        self.attach_analytics_branches(
+                            camera_id,
+                            &sub_pipeline,
+                            &sub_tee_name(camera_id),
+                        );
+                    }
+                }
                 let subs = self.sub_streams.lock().unwrap();
-                let h = subs.get(&camera_id).ok_or_else(|| {
-                    VmsError::Media(format!(
-                        "sub-stream is not running for camera {camera_id} — start recording with a sub-stream configured first"
-                    ))
-                })?;
+                let h = subs
+                    .get(&camera_id)
+                    .expect("start_sub_stream just inserted this camera");
                 (
                     h.pipeline.clone(),
                     sub_tee_name(camera_id),
@@ -324,15 +434,18 @@ impl MediaManager {
         self.relay.stop_relay(camera_id, quality, &pipeline);
     }
 
-    /// Stop the recording pipeline for a camera, its sub-stream pipeline if
-    /// one is running, motion detection, and any relay mounts bridged from
+    /// Stop the live pipeline for a camera — its recording branch if one is
+    /// attached, its sub-stream pipeline if one is running, motion
+    /// detection, thumbnail capture, and any relay mounts bridged from
     /// either pipeline.
     ///
     /// Order matters: motion detection and both relay qualities are
     /// detached first (while both pipelines are still `Playing`, so their
     /// blocking-pad-probe detaches can complete cleanly), then the
-    /// sub-stream pipeline is torn down, then the main one.
-    pub async fn stop_camera(&self, camera_id: Uuid) -> Result<(), VmsError> {
+    /// sub-stream pipeline is torn down, then the main one — the recording
+    /// branch dies with it, no separate detach needed since the whole
+    /// pipeline is going to `Null` anyway.
+    pub async fn stop_live(&self, camera_id: Uuid) -> Result<(), VmsError> {
         self.stop_motion_detection(camera_id).await;
         self.stop_thumbnail_capture(camera_id).await;
         self.stop_relay(camera_id, RelayQuality::Main);
@@ -343,13 +456,13 @@ impl MediaManager {
         if let Some(h) = handle {
             let _ = h.shutdown_tx.send(());
             h.task.await.ok();
-            tracing::info!(camera_id = %camera_id, "Recording pipeline stopped");
+            tracing::info!(camera_id = %camera_id, "Live pipeline stopped");
         }
 
         Ok(())
     }
 
-    /// Stop all recording pipelines, all sub-stream pipelines, all
+    /// Stop all live pipelines, all sub-stream pipelines, all
     /// motion-detection and thumbnail-capture branches, and all relay
     /// mounts, wait for monitor/analyzer tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
@@ -558,7 +671,9 @@ impl MediaManager {
         self.relay.codec(camera_id, quality)
     }
 
-    /// Return `true` if a camera pipeline is currently running.
+    /// Return `true` if a camera's live pipeline is currently running
+    /// (independent of whether it's also recording — see
+    /// [`is_recording`](Self::is_recording)).
     pub fn is_running(&self, camera_id: Uuid) -> bool {
         self.cameras.lock().unwrap().contains_key(&camera_id)
     }

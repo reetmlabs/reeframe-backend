@@ -8,11 +8,12 @@ use crate::dispatcher::ActionContext;
 
 // -- Handler --
 
-/// Stop a camera's recording pipeline.
+/// Stop a camera's recording.
 ///
-/// Tears down the GStreamer pipeline for the resolved camera via
-/// `MediaManager::stop_camera`. If the camera is not currently running the
-/// call is a no-op and the handler returns success.
+/// Detaches the recording branch for the resolved camera via
+/// `MediaManager::stop_recording` — the live pipeline (and relay, motion
+/// detection, etc.) keeps running untouched. If the camera is not currently
+/// recording the call is a no-op and the handler returns success.
 pub async fn execute(
     node_id: NodeId,
     cfg: &StopRecordingConfig,
@@ -32,13 +33,13 @@ pub async fn execute(
         return NodeOutput::failure(node_id, "stop_recording: media manager not configured");
     };
 
-    // -- Stop the pipeline --
-    match media.stop_camera(camera_id).await {
+    // -- Stop recording --
+    match media.stop_recording(camera_id) {
         Ok(()) => {
             tracing::info!(
                 node_id = %node_id,
                 %camera_id,
-                "StopRecording: camera pipeline stopped"
+                "StopRecording: recording stopped"
             );
             NodeOutput::success(node_id)
                 .with_metadata(serde_json::json!({ "camera_id": camera_id }))

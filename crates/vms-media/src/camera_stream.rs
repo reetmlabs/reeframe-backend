@@ -42,32 +42,26 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
 
 // -- Camera stream builder --
 
-/// Build a per-camera GStreamer pipeline for continuous recording.
-///
-/// The codec is **not** assumed at build time. When `rtspsrc` connects to the
-/// camera and exposes an RTP src pad, the `pad-added` callback reads the
-/// `encoding-name` field from the SDP caps and inserts the appropriate
-/// depayloader + parser into the running pipeline:
-///
-/// ```text
-/// rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse]
-///                                                                      │
-///                                                                      ▼
-///                                                      tee ---> queue ---> splitmuxsink (MP4)
-/// ```
-///
-/// Elements that vary per-camera are named `cam_{id}_{role}` so the reconnect
-/// monitor can look them up by name instead of recreating them.
 /// State shared between the codec-detection `pad-added` handler, the
-/// `format-location-full` chunk-naming callback, and the reconnect
-/// monitor's session-timestamp refresh — all three need to agree
-/// on the current recording session's filename timestamp prefix, and the
-/// naming callback additionally needs whichever codec the pad-added handler
-/// most recently detected (recorded, not assumed, since it's negotiated
-/// per-camera from the SDP).
+/// `format-location-full` chunk-naming callback (once a recording branch is
+/// attached — see [`attach_recording_branch`]), and the reconnect monitor's
+/// session-timestamp refresh — all three need to agree on the current
+/// session's filename timestamp prefix, and the naming callback additionally
+/// needs whichever codec the pad-added handler most recently detected
+/// (recorded, not assumed, since it's negotiated per-camera from the SDP).
+/// Populated as soon as the live pipeline connects, whether or not recording
+/// is ever attached.
 pub(crate) struct ChunkNaming {
     session_ts: Mutex<String>,
     codec: Mutex<Option<String>>,
+    /// Path of the fragment currently open, if any — set by
+    /// `format-location-full`. Lets a graceful drain (see
+    /// `watch_current_close`) wait for *this* fragment specifically rather
+    /// than being satisfied by an unrelated one closing around the same time.
+    current_path: Mutex<Option<String>>,
+    /// Registered by a graceful drain, fired by `handle_fragment_closed`
+    /// once `current_path`'s fragment closes.
+    close_ack: Mutex<Option<(String, std::sync::mpsc::SyncSender<()>)>>,
 }
 
 impl ChunkNaming {
@@ -75,6 +69,8 @@ impl ChunkNaming {
         Arc::new(Self {
             session_ts: Mutex::new(session_timestamp()),
             codec: Mutex::new(None),
+            current_path: Mutex::new(None),
+            close_ack: Mutex::new(None),
         })
     }
 
@@ -85,9 +81,20 @@ impl ChunkNaming {
     pub(crate) fn refresh_session(&self) {
         *self.session_ts.lock().unwrap() = session_timestamp();
     }
+
+    /// Register interest in the currently-open fragment's close, for a
+    /// graceful stop/reconnect to wait on before tearing the branch down.
+    /// `None` if nothing is currently open — nothing to drain.
+    fn watch_current_close(&self) -> Option<std::sync::mpsc::Receiver<()>> {
+        let path = self.current_path.lock().unwrap().clone()?;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        *self.close_ack.lock().unwrap() = Some((path, tx));
+        Some(rx)
+    }
 }
 
-/// Build a per-camera GStreamer pipeline for continuous recording.
+/// Build a per-camera "live" GStreamer pipeline — `rtspsrc -> [depay|parse]
+/// -> tee`, nothing written to disk.
 ///
 /// The codec is **not** assumed at build time. When `rtspsrc` connects to the
 /// camera and exposes an RTP src pad, the `pad-added` callback reads the
@@ -95,21 +102,19 @@ impl ChunkNaming {
 /// depayloader + parser into the running pipeline:
 ///
 /// ```text
-/// rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse]
-///                                                                      │
-///                                                                      ▼
-///                                                      tee ---> queue ---> splitmuxsink (MP4)
+/// rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse] ---> tee
 /// ```
 ///
-/// `chunk_event_tx` carries `RecordingChunkEvent::Opened`/`Closed` out to
-/// whichever task actually has DB access (this crate deliberately has
-/// none) — see `vms_core::RecordingChunkEvent`'s doc comment for why.
+/// The `tee` is the fan-out point every consumer attaches to as an
+/// independent branch, live pipeline running or not otherwise affected:
+/// recording ([`attach_recording_branch`]), the RTSP relay
+/// (`relay_bridge::attach`), motion detection (`motion_branch::attach`),
+/// thumbnail capture (`thumbnail_branch::attach`), and the ring buffer
+/// (`ring_buffer_branch::attach`). Recording is just one more tap, not a
+/// precondition for any of the others — see `MediaManager::start_recording`.
 pub(crate) fn build_camera_stream(
     camera_id: Uuid,
     rtsp_url: &str,
-    recording_dir: &std::path::Path,
-    chunk_duration_secs: u64,
-    chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
 ) -> Result<(gstreamer::Pipeline, Arc<ChunkNaming>), VmsError> {
     let gst_pipeline = gstreamer::Pipeline::new();
     let naming = ChunkNaming::new();
@@ -122,42 +127,18 @@ pub(crate) fn build_camera_stream(
         .build()
         .map_err(|e| VmsError::Media(format!("rtspsrc: {e}")))?;
 
-    // -- Tee (fan-out point — recording branch now, ring buffer / analytics later)
+    // -- Tee (fan-out point — recording, relay, ring buffer, analytics all tap this) --
     let tee = gstreamer::ElementFactory::make("tee")
         .name(format!("cam_{}_tee", camera_id.as_simple()))
         .build()
         .map_err(|e| VmsError::Media(format!("tee: {e}")))?;
 
-    // -- Recording branch: queue -> splitmuxsink --
-    let (queue, splitmux) = build_recording_branch(
-        camera_id,
-        recording_dir,
-        chunk_duration_secs,
-        &naming,
-        &chunk_event_tx,
-    )?;
-
     // -- Assemble static part of the pipeline --
     // Depayloader + parser are NOT added here — they are created dynamically
     // in the pad-added callback once we know the codec from the camera's SDP.
     gst_pipeline
-        .add_many([&src, &tee, &queue, &splitmux])
+        .add_many([&src, &tee])
         .map_err(|e| VmsError::Media(format!("add_many: {e}")))?;
-
-    // tee ---> queue ---> splitmux (recording branch)
-    let tee_src = tee
-        .request_pad_simple("src_%u")
-        .ok_or_else(|| VmsError::Media("tee: no src_%u pad template".into()))?;
-    let queue_sink = queue
-        .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("queue: no sink pad".into()))?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee->queue: {e}")))?;
-
-    queue
-        .link(&splitmux)
-        .map_err(|e| VmsError::Media(format!("link queue->splitmux: {e}")))?;
 
     // -- Dynamic codec wiring --
     // rtspsrc only exposes src pads after it receives the SDP from the camera,
@@ -307,6 +288,12 @@ fn build_recording_branch(
     naming: &Arc<ChunkNaming>,
     chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
 ) -> Result<(gstreamer::Element, gstreamer::Element), VmsError> {
+    // A fresh instance has nothing open yet — clears any stale path left
+    // over from a prior recording session so a drain issued before this
+    // instance's first fragment opens doesn't wait on one that will never
+    // close (see `watch_current_close`).
+    *naming.current_path.lock().unwrap() = None;
+
     let queue = gstreamer::ElementFactory::make("queue")
         .name(format!("cam_{}_recqueue", camera_id.as_simple()))
         .property("max-size-time", 10_000_000_000u64) // 10 s jitter buffer
@@ -341,6 +328,7 @@ fn build_recording_branch(
             let session_ts = naming.session_ts.lock().unwrap().clone();
             let codec = naming.codec.lock().unwrap().clone();
             let file_path = chunk_location(&recording_dir, cam_id, &session_ts, fragment_id);
+            *naming.current_path.lock().unwrap() = Some(file_path.clone());
 
             let _ = tx.send(RecordingChunkEvent::Opened {
                 camera_id: cam_id,
@@ -357,9 +345,236 @@ fn build_recording_branch(
     Ok((queue, splitmux))
 }
 
+fn tee_name(camera_id: Uuid) -> String {
+    format!("cam_{}_tee", camera_id.as_simple())
+}
+
+fn recqueue_name(camera_id: Uuid) -> String {
+    format!("cam_{}_recqueue", camera_id.as_simple())
+}
+
+fn splitmux_name(camera_id: Uuid) -> String {
+    format!("cam_{}_splitmux", camera_id.as_simple())
+}
+
+/// Return `true` if a recording branch is currently attached to `camera_id`'s
+/// live pipeline — presence of the `splitmuxsink` element doubles as the
+/// state flag, since [`attach_recording_branch`]/[`detach_recording_branch`]
+/// are the only things that add/remove it.
+pub(crate) fn is_recording_attached(camera_id: Uuid, gst_pipeline: &gstreamer::Pipeline) -> bool {
+    gst_pipeline.by_name(&splitmux_name(camera_id)).is_some()
+}
+
+/// Attach the recording branch (`queue -> splitmuxsink`) to the tee of an
+/// already-running live pipeline. No-op if a recording branch is already
+/// attached. Safe to call while the pipeline is `Playing` — same
+/// attach-to-live-tee pattern as `ring_buffer_branch`/`motion_branch`.
+pub(crate) fn attach_recording_branch(
+    camera_id: Uuid,
+    gst_pipeline: &gstreamer::Pipeline,
+    naming: &Arc<ChunkNaming>,
+    chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
+    recording_dir: &Path,
+    chunk_duration_secs: u64,
+) -> Result<(), VmsError> {
+    if is_recording_attached(camera_id, gst_pipeline) {
+        return Ok(());
+    }
+
+    let tee = gst_pipeline
+        .by_name(&tee_name(camera_id))
+        .ok_or_else(|| VmsError::Media("attach recording branch: tee not found".into()))?;
+
+    let (queue, splitmux) = build_recording_branch(
+        camera_id,
+        recording_dir,
+        chunk_duration_secs,
+        naming,
+        chunk_event_tx,
+    )?;
+
+    gst_pipeline
+        .add_many([&queue, &splitmux])
+        .map_err(|e| VmsError::Media(format!("attach recording branch: add_many: {e}")))?;
+
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media("attach recording branch: tee has no src_%u pad template".into())
+    })?;
+    let queue_sink = queue.static_pad("sink").ok_or_else(|| {
+        VmsError::Media("attach recording branch: new queue has no sink pad".into())
+    })?;
+    tee_src
+        .link(&queue_sink)
+        .map_err(|e| VmsError::Media(format!("attach recording branch: link tee->queue: {e}")))?;
+    queue.link(&splitmux).map_err(|e| {
+        VmsError::Media(format!(
+            "attach recording branch: link queue->splitmux: {e}"
+        ))
+    })?;
+
+    for el in [&queue, &splitmux] {
+        el.sync_state_with_parent().map_err(|e| {
+            VmsError::Media(format!(
+                "attach recording branch: sync_state_with_parent: {e}"
+            ))
+        })?;
+    }
+
+    tracing::info!(camera_id = %camera_id, "Recording branch attached");
+    Ok(())
+}
+
+/// Detach the recording branch (`queue -> splitmuxsink`) from the tee of a
+/// running live pipeline, giving its in-flight chunk a chance to close
+/// cleanly first. No-op if no recording branch is attached.
+///
+/// Same blocking-pad-probe pattern as `ring_buffer_branch::detach` /
+/// `relay_bridge::detach`, plus one addition: the probe unlinks the branch
+/// from the tee and pushes EOS into it instead of nulling `splitmuxsink`
+/// outright — a raw state change discards whatever it hadn't finalized yet,
+/// truncating the file it was still writing. A short-lived `std::thread`
+/// then releases the tee's request pad, waits (bounded) for the EOS to
+/// produce the same `splitmuxsink-fragment-closed` message a normal
+/// size-based rotation would, and only then tears the branch elements down.
+/// Returns immediately — cleanup is asynchronous either way. Safe to call
+/// while `Playing`.
+pub(crate) fn detach_recording_branch(
+    camera_id: Uuid,
+    gst_pipeline: &gstreamer::Pipeline,
+    naming: &Arc<ChunkNaming>,
+) -> Result<(), VmsError> {
+    let Some(queue) = gst_pipeline.by_name(&recqueue_name(camera_id)) else {
+        return Ok(());
+    };
+    let Some(splitmux) = gst_pipeline.by_name(&splitmux_name(camera_id)) else {
+        return Ok(());
+    };
+
+    let queue_sink = queue
+        .static_pad("sink")
+        .ok_or_else(|| VmsError::Media("recording queue has no sink pad".into()))?;
+    let tee_src = queue_sink
+        .peer()
+        .ok_or_else(|| VmsError::Media("recording queue sink has no peer pad".into()))?;
+    let tee = tee_src
+        .parent_element()
+        .ok_or_else(|| VmsError::Media("recording tee src pad has no parent element".into()))?;
+
+    let close_rx = naming.watch_current_close();
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let queue_sink_clone = queue_sink.clone();
+
+    tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
+        pad.unlink(&queue_sink_clone).ok();
+        queue_sink_clone.send_event(gstreamer::event::Eos::new());
+        let _ = tx.send(());
+        gstreamer::PadProbeReturn::Remove
+    });
+
+    let tee_src_clone = tee_src.clone();
+    let pipeline_clone = gst_pipeline.clone();
+    std::thread::spawn(move || {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) => tracing::info!(camera_id = %camera_id, "Recording branch unlinked from tee"),
+            Err(_) => tracing::warn!(
+                camera_id = %camera_id,
+                "recording branch unlink probe timed out — releasing tee pad anyway",
+            ),
+        }
+        tee.release_request_pad(&tee_src_clone);
+
+        let drained = close_rx.is_some_and(|rx| rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        if drained {
+            tracing::info!(camera_id = %camera_id, "Recording branch closed its chunk cleanly");
+        } else {
+            tracing::warn!(
+                camera_id = %camera_id,
+                "recording branch drain timed out — its last chunk may be truncated",
+            );
+        }
+
+        queue.set_state(gstreamer::State::Null).ok();
+        splitmux.set_state(gstreamer::State::Null).ok();
+        pipeline_clone.remove(&queue).ok();
+        pipeline_clone.remove(&splitmux).ok();
+    });
+
+    Ok(())
+}
+
+/// Give the recording branch's in-flight chunk a chance to close cleanly
+/// before the caller forces the pipeline to `Null` — a raw state change
+/// discards whatever `splitmuxsink` hadn't finalized yet, truncating that
+/// chunk instead of closing it. No-op if no recording branch is attached, or
+/// if no fragment has opened yet.
+///
+/// Pumps `bus_stream` itself (the same stream the caller's own watch loop
+/// paused to call this) rather than waiting on a side channel, since the
+/// resulting `splitmuxsink-fragment-closed` message can only ever be
+/// delivered to whichever consumer is actually polling this pipeline's bus —
+/// `handle_fragment_closed` needs to keep firing for it here exactly as it
+/// would in the normal loop. Bounded by a timeout since the branch may
+/// already be unresponsive if whatever triggered the caller's teardown came
+/// from deeper in the pipeline; any unrelated message seen while draining is
+/// dispatched the same way the normal loop would, except Error/Eos, which
+/// are dropped here since the caller is already tearing down for exactly
+/// that reason.
+async fn drain_recording_branch(
+    camera_id: Uuid,
+    gst_pipeline: &gstreamer::Pipeline,
+    naming: &Arc<ChunkNaming>,
+    chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
+    bus_stream: &mut (impl futures::Stream<Item = gstreamer::Message> + Unpin),
+) {
+    use futures::StreamExt as _;
+
+    let Some(queue) = gst_pipeline.by_name(&recqueue_name(camera_id)) else {
+        return;
+    };
+    let Some(close_rx) = naming.watch_current_close() else {
+        return;
+    };
+    let Some(sink_pad) = queue.static_pad("sink") else {
+        return;
+    };
+    sink_pad.send_event(gstreamer::event::Eos::new());
+
+    let deadline = tokio::time::sleep(Duration::from_secs(5));
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            maybe_msg = bus_stream.next() => {
+                // The bus is gone (pipeline already torn down elsewhere) —
+                // nothing left to wait on.
+                let Some(msg) = maybe_msg else {
+                    tracing::warn!(camera_id = %camera_id, "recording branch drain: bus closed before its chunk closed");
+                    return;
+                };
+                if let gstreamer::MessageView::Element(elem) = msg.view() {
+                    handle_fragment_closed(camera_id, elem, naming, chunk_event_tx);
+                }
+                if close_rx.try_recv().is_ok() {
+                    tracing::info!(camera_id = %camera_id, "Recording branch closed its chunk cleanly");
+                    return;
+                }
+            }
+            _ = &mut deadline => {
+                tracing::warn!(
+                    camera_id = %camera_id,
+                    "recording branch drain timed out — its last chunk may be truncated",
+                );
+                return;
+            }
+        }
+    }
+}
+
 /// Tear down and rebuild the recording branch (`queue` + `splitmuxsink`)
 /// fresh on every reconnect, instead of reusing the same `splitmuxsink`
-/// instance indefinitely.
+/// instance indefinitely. No-op if no recording branch is currently attached
+/// — a camera that's live-only has nothing to rebuild.
 ///
 /// Fixes a reproduced bug: reused across a bare `Null`->`Playing` reconnect
 /// cycle, `splitmuxsink`'s internal GOP-collection state does not reset
@@ -385,18 +600,18 @@ fn rebuild_recording_branch(
     recording_dir: &Path,
     chunk_duration_secs: u64,
 ) -> Result<(), VmsError> {
-    let tee_name = format!("cam_{}_tee", camera_id.as_simple());
-    let queue_name = format!("cam_{}_recqueue", camera_id.as_simple());
-    let splitmux_name = format!("cam_{}_splitmux", camera_id.as_simple());
+    if !is_recording_attached(camera_id, gst_pipeline) {
+        return Ok(());
+    }
 
     let tee = gst_pipeline
-        .by_name(&tee_name)
+        .by_name(&tee_name(camera_id))
         .ok_or_else(|| VmsError::Media("rebuild recording branch: tee not found".into()))?;
     let old_queue = gst_pipeline
-        .by_name(&queue_name)
+        .by_name(&recqueue_name(camera_id))
         .ok_or_else(|| VmsError::Media("rebuild recording branch: recqueue not found".into()))?;
     let old_splitmux = gst_pipeline
-        .by_name(&splitmux_name)
+        .by_name(&splitmux_name(camera_id))
         .ok_or_else(|| VmsError::Media("rebuild recording branch: splitmux not found".into()))?;
 
     // Unlink and release the tee's request pad feeding the old queue, then
@@ -412,42 +627,14 @@ fn rebuild_recording_branch(
         .remove_many([&old_queue, &old_splitmux])
         .map_err(|e| VmsError::Media(format!("rebuild recording branch: remove_many: {e}")))?;
 
-    let (queue, splitmux) = build_recording_branch(
+    attach_recording_branch(
         camera_id,
-        recording_dir,
-        chunk_duration_secs,
+        gst_pipeline,
         naming,
         chunk_event_tx,
-    )?;
-
-    gst_pipeline
-        .add_many([&queue, &splitmux])
-        .map_err(|e| VmsError::Media(format!("rebuild recording branch: add_many: {e}")))?;
-
-    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
-        VmsError::Media("rebuild recording branch: tee has no src_%u pad template".into())
-    })?;
-    let queue_sink = queue.static_pad("sink").ok_or_else(|| {
-        VmsError::Media("rebuild recording branch: new queue has no sink pad".into())
-    })?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("rebuild recording branch: link tee->queue: {e}")))?;
-    queue.link(&splitmux).map_err(|e| {
-        VmsError::Media(format!(
-            "rebuild recording branch: link queue->splitmux: {e}"
-        ))
-    })?;
-
-    for el in [&queue, &splitmux] {
-        el.sync_state_with_parent().map_err(|e| {
-            VmsError::Media(format!(
-                "rebuild recording branch: sync_state_with_parent: {e}"
-            ))
-        })?;
-    }
-
-    Ok(())
+        recording_dir,
+        chunk_duration_secs,
+    )
 }
 
 // -- Reconnect backoff + circuit breaker --
@@ -604,6 +791,14 @@ pub(crate) fn spawn_monitor(
                 break;
             }
 
+            drain_recording_branch(
+                camera_id,
+                &gst_pipeline,
+                &naming,
+                &chunk_event_tx,
+                &mut bus_stream,
+            )
+            .await;
             gst_pipeline.set_state(gstreamer::State::Null).ok();
 
             // Fresh timestamp prefix -> no chunk filename collisions
@@ -677,6 +872,14 @@ pub(crate) fn spawn_monitor(
             }
         }
 
+        drain_recording_branch(
+            camera_id,
+            &gst_pipeline,
+            &naming,
+            &chunk_event_tx,
+            &mut bus_stream,
+        )
+        .await;
         gst_pipeline.set_state(gstreamer::State::Null).ok();
         tracing::info!(camera_id = %camera_id, "Stream monitor exited");
     })
@@ -715,6 +918,18 @@ fn handle_fragment_closed(
         tracing::warn!(camera_id = %camera_id, "fragment-closed message missing 'location'");
         return;
     };
+
+    // Wake a graceful drain waiting on exactly this fragment (see
+    // `watch_current_close`) — matched by path so an unrelated fragment
+    // closing around the same time can't be mistaken for it.
+    {
+        let mut ack = naming.close_ack.lock().unwrap();
+        if ack.as_ref().is_some_and(|(path, _)| path == &file_path) {
+            if let Some((_, tx)) = ack.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
 
     let codec = naming.codec.lock().unwrap().clone();
     let chunk_event_tx = chunk_event_tx.clone();

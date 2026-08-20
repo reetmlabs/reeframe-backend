@@ -372,13 +372,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Resource manager ready");
 
     // -- Auto-start relays for cameras that have a cached codec --
-    // These start instantly (no probe needed). Relays now bridge from an
-    // already-running pipeline's tee rather than opening a connection of
-    // their own (see `vms-media`'s relay rework), so this only applies to
-    // cameras whose pipeline `resource_manager.recover()` (above) already
-    // started — cameras not referenced by any enabled pipeline are left
-    // alone rather than auto-started into continuous recording just to
-    // pre-warm a relay that wasn't otherwise going to run.
+    // These start instantly (no probe needed). Relays bridge from a
+    // pipeline's tee rather than opening a connection of their own (see
+    // `vms-media`'s relay rework) and can now bring that pipeline up
+    // on-demand — but at boot we still only pre-warm relays for cameras
+    // whose live pipeline `resource_manager.recover()` (above) already
+    // started; cameras not referenced by any enabled pipeline are left
+    // alone rather than pre-warmed into a live pipeline nobody asked for
+    // yet. They'll still start on-demand the first time a client actually
+    // requests their relay at runtime.
     {
         let all_cameras = camera_repo.list().await.unwrap_or_default();
         let cached: Vec<_> = all_cameras
@@ -403,8 +405,32 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
+                // Already running (guarded above), so `start_relay`'s
+                // rtsp_url/sub_rtsp_url arguments are never exercised here —
+                // still resolved properly rather than passed as placeholders,
+                // in case that guard's assumption ever stops holding.
+                let Some((decrypted, password)) =
+                    camera_repo.get_decrypted(id).await.unwrap_or(None)
+                else {
+                    continue;
+                };
+                let rtsp_url = build_rtsp_url(
+                    &decrypted.rtsp_url,
+                    decrypted.username.as_deref(),
+                    password.as_deref(),
+                );
+                let sub_rtsp_url = decrypted.sub_rtsp_url.as_deref().map(|sub| {
+                    build_rtsp_url(sub, decrypted.username.as_deref(), password.as_deref())
+                });
+
                 match media_manager
-                    .start_relay(id, vms_media::RelayQuality::Main, Some(&codec))
+                    .start_relay(
+                        id,
+                        vms_media::RelayQuality::Main,
+                        &rtsp_url,
+                        sub_rtsp_url.as_deref(),
+                        Some(&codec),
+                    )
                     .await
                 {
                     Ok(_) => tracing::info!(camera_id = %id, codec, "Main relay auto-started"),
@@ -413,9 +439,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                if cam.sub_rtsp_url.is_some() {
+                if sub_rtsp_url.is_some() {
                     match media_manager
-                        .start_relay(id, vms_media::RelayQuality::Sub, Some(&codec))
+                        .start_relay(
+                            id,
+                            vms_media::RelayQuality::Sub,
+                            &rtsp_url,
+                            sub_rtsp_url.as_deref(),
+                            Some(&codec),
+                        )
                         .await
                     {
                         Ok(_) => tracing::info!(camera_id = %id, codec, "Sub relay auto-started"),
@@ -697,4 +729,15 @@ async fn shutdown_signal() {
 /// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.
 fn db_kind(url: &str) -> &str {
     url.split("://").next().unwrap_or("unknown")
+}
+
+/// Inject credentials into an RTSP URL if both username and password are present.
+/// `rtsp://host/path` + (user, pass) -> `rtsp://user:pass@host/path`
+fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>) -> String {
+    if let (Some(u), Some(p)) = (username, password) {
+        if let Some(rest) = base_url.strip_prefix("rtsp://") {
+            return format!("rtsp://{u}:{p}@{rest}");
+        }
+    }
+    base_url.to_string()
 }

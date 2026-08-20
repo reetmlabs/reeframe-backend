@@ -79,8 +79,12 @@ impl ResourceManager {
     /// Acquire all resources required by the currently enabled pipelines in `registry`.
     ///
     /// Called once at daemon startup after the pipeline registry is loaded.
-    /// Ensures every camera pipeline and source adapter needed by an enabled
-    /// pipeline is running before the trigger evaluator begins firing.
+    /// Ensures every camera's live pipeline and source adapter needed by an
+    /// enabled pipeline is running before the trigger evaluator begins
+    /// firing. This does not resume recording — a camera that was recording
+    /// before shutdown only comes back live; recording resumes once its
+    /// pipeline's `StartRecording` action fires again (e.g. the trigger
+    /// re-evaluates true) or an operator restarts it explicitly.
     pub async fn recover(&self, registry: &PipelineRegistry) -> Result<(), VmsError> {
         let snapshot = registry.snapshot();
 
@@ -242,7 +246,7 @@ impl ResourceManager {
 
     async fn start(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
-            ResourceId::CameraPipeline(cam_id) => self.start_camera(*cam_id).await,
+            ResourceId::CameraPipeline(cam_id) => self.start_live_camera(*cam_id).await,
             ResourceId::RingBuffer(cam_id) => {
                 self.ring_buffers
                     .start(*cam_id, DEFAULT_RING_BUFFER_SECS, RingBufferMode::Memory)
@@ -261,7 +265,7 @@ impl ResourceManager {
 
     async fn stop(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
-            ResourceId::CameraPipeline(cam_id) => self.media.stop_camera(*cam_id).await,
+            ResourceId::CameraPipeline(cam_id) => self.media.stop_live(*cam_id).await,
             ResourceId::RingBuffer(cam_id) => self.ring_buffers.stop(*cam_id),
             ResourceId::Source(id) => self.source_manager.stop(*id).await,
             ResourceId::DestinationPool(id) => {
@@ -275,7 +279,12 @@ impl ResourceManager {
         }
     }
 
-    async fn start_camera(&self, cam_id: Uuid) -> Result<(), VmsError> {
+    /// Acquire `ResourceId::CameraPipeline` for `cam_id` — brings up the
+    /// camera's **live** pipeline only (no recording). Continuous recording
+    /// is a separate, explicit concern handled by the `StartRecording`/
+    /// `StopRecording` actions (see `vms-actions`), not implied by a camera
+    /// merely being referenced by an enabled pipeline.
+    async fn start_live_camera(&self, cam_id: Uuid) -> Result<(), VmsError> {
         let Some((cam, password)) = self.cameras.get_decrypted(cam_id).await? else {
             return Err(VmsError::CameraNotFound(cam_id));
         };
@@ -285,7 +294,7 @@ impl ResourceManager {
             .as_deref()
             .map(|sub| build_rtsp_url(sub, cam.username.as_deref(), password.as_deref()));
         self.media
-            .start_camera(cam_id, &rtsp_url, sub_rtsp_url.as_deref())
+            .start_live(cam_id, &rtsp_url, sub_rtsp_url.as_deref())
             .await
     }
 

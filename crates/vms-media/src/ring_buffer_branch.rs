@@ -93,7 +93,11 @@ pub fn attach(
                 drop(map);
 
                 if let Ok(mut rb) = ring_buffer.lock() {
-                    rb.push(TimestampedFrame { pts, data, is_keyframe });
+                    rb.push(TimestampedFrame {
+                        pts,
+                        data,
+                        is_keyframe,
+                    });
                 }
 
                 Ok(gstreamer::FlowSuccess::Ok)

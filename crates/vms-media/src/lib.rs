@@ -1,25 +1,28 @@
-//! `vms-media` — GStreamer camera stream management and continuous recording.
+//! `vms-media` — GStreamer camera stream management, live view, and recording.
 //!
 //! # Module overview
 //!
 //! | Module | Purpose |
 //! |---|---|
-//! | [`manager`] | [`MediaManager`] — start/stop per-camera streams, graceful shutdown |
-//! | [`camera_stream`] | GStreamer pipeline builder and reconnect monitor task |
+//! | [`manager`] | [`MediaManager`] — start/stop per-camera live pipelines and recording, graceful shutdown |
+//! | [`camera_stream`] | GStreamer pipeline builder, recording-branch attach/detach, reconnect monitor task |
 //!
 //! # GStreamer element graph (per camera)
 //!
 //! ```text
-//! rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse]
-//!                                                                      │
-//!                                                                      ▼
-//!                                                      tee ---> queue ---> splitmuxsink (MP4)
+//! rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse] ---> tee
 //! ```
 //!
 //! The codec is detected at runtime from the camera's SDP (`encoding-name`
 //! field), so H.264 and H.265 cameras work without any configuration change.
-//! The `tee` is the fan-out point for future branches (ring buffer, analytics,
-//! live view) added in later steps.
+//! The `tee` is the fan-out point for every branch this crate attaches —
+//! recording, the RTSP relay, ring buffer, motion detection, thumbnail
+//! capture. **Recording is one such branch, not part of the base pipeline**:
+//! [`MediaManager::start_live`] brings the pipeline up with nothing written
+//! to disk; [`MediaManager::start_recording`] attaches the recording branch
+//! on top (starting the live pipeline first if needed). Connecting a relay
+//! for live view never implies recording, and stopping recording never tears
+//! down live view.
 
 pub(crate) mod camera_stream;
 pub mod export;

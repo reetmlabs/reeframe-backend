@@ -183,10 +183,14 @@ def _launch_from_ip_camera(url: str, bitrate: int) -> str:
 
     No scaling — the camera provides the stream at the desired resolution.
     latency=100 gives rtspsrc a small jitter buffer without adding noticeable
-    delay.
+    delay. The media=video filter is needed because decodebin has only one
+    sink pad: without it, a camera's audio pad loses the auto-link race and
+    ends up unlinked, which GStreamer treats as a fatal error that kills
+    the whole pipeline.
     """
     return (
-        f"( rtspsrc location={url} latency=100 ! decodebin name=d "
+        f"( rtspsrc location={url} latency=100 name=src "
+        f"src. ! application/x-rtp,media=video ! decodebin name=d "
         f"d. ! queue ! videoconvert "
         f"! x264enc tune=zerolatency bitrate={bitrate} speed-preset=ultrafast "
         f"! rtph264pay name=pay0 pt=96 )"

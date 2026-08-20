@@ -11,10 +11,11 @@ use crate::relay_bridge::{self, RelayBridgeHandle};
 
 /// Which of a camera's two persistent pipelines a relay mount is bridged
 /// from. A camera typically supports only two concurrent RTSP sessions —
-/// already spoken for by the main pipeline (recording) and the optional
+/// spoken for by the main (live/recording) pipeline and the optional
 /// sub-stream pipeline (see `sub_stream.rs`) — so both relay qualities tap
 /// one of those two pipelines' tees rather than opening connections of
-/// their own.
+/// their own. Neither pipeline needs to already be recording — starting a
+/// relay brings up whichever pipeline it needs on demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelayQuality {
     /// Full resolution — same connection recording uses. Intended for
@@ -52,9 +53,10 @@ struct RelayEntry {
 ///
 /// Each camera can be served at up to two mounts:
 /// `rtsp://{bind_host}:{bind_port}/{camera_id}` (main) and
-/// `.../{camera_id}/sub` (sub). Both are bridged from an already-running
-/// pipeline's tee (see `relay_bridge.rs`) — the relay never opens its own
-/// connection to the camera.
+/// `.../{camera_id}/sub` (sub). Both are bridged from a pipeline's tee (see
+/// `relay_bridge.rs`), started on demand by `MediaManager::start_relay` if
+/// not already running — the relay never opens its own connection to the
+/// camera, and never requires recording to be active.
 ///
 /// A dedicated GLib main loop runs on a background thread to drive I/O for
 /// the RTSP server without interfering with GStreamer's own main context.

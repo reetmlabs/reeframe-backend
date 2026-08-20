@@ -2,16 +2,17 @@
 //!
 //! Mirrors [`crate::ring_buffer_branch`]'s attach/detach pattern exactly —
 //! this is *not* a standalone connection to the camera. A camera typically
-//! supports only two concurrent RTSP sessions (recording already uses one,
-//! the relay uses the other when active), so a third independent connection
-//! just for motion detection would exceed that budget on many real cameras.
-//! Tapping the tee costs nothing extra connection-wise — it's exactly the
-//! "analytics later" branch the tee's own doc comment in `camera_stream.rs`
-//! already anticipated.
+//! supports only two concurrent RTSP sessions (the main live pipeline uses
+//! one — recording is just another tap on it when attached — the sub-stream
+//! pipeline uses the other when configured), so a third independent
+//! connection just for motion detection would exceed that budget on many
+//! real cameras. Tapping the tee costs nothing extra connection-wise — it's
+//! exactly the "analytics later" branch the tee's own doc comment in
+//! `camera_stream.rs` already anticipated.
 //!
-//! Trade-off: since the tee only exists on the *main* recording pipeline,
-//! this decodes off the main-resolution stream rather than a low-res
-//! sub-stream, then downscales. More decode CPU than sourcing from an
+//! Trade-off: when there's no sub-stream to prefer, this decodes off the
+//! main-resolution live pipeline's tee rather than a low-res sub-stream,
+//! then downscales. More decode CPU than sourcing from an
 //! already-small sub-stream, but still just decode+downscale — cheap
 //! relative to real inference — and it costs zero additional camera-side
 //! connections, which is the constraint that actually matters here.
@@ -87,7 +88,7 @@ impl MotionHandle {
 ///
 /// `tee_name` is the caller's choice of which tee to attach to — the
 /// sub-stream's tee by default, or the main pipeline's tee when the camera
-/// has no sub-stream configured (see `MediaManager::start_camera`). Every
+/// has no sub-stream configured (see `MediaManager::start_live`). Every
 /// analyzed frame produces zero or more [`MotionSignal`]s, converted to
 /// [`Event`]s (`TopicKey::Camera`) and sent on `event_tx` — the same
 /// bridge-to-`EventBus` channel used by `vms-sources` adapters, keeping this

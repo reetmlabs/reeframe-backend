@@ -152,7 +152,8 @@ MP4 chunks appear in `/var/lib/reeframe/recordings/`.
 ### Recording & media
 - Continuous chunked MP4 recording via GStreamer `splitmuxsink`, with `moov`-front remuxing for progressively Range-streamable chunks
 - H.264, H.265, MJPEG, and AV1 codec support
-- Dual main/sub-stream pipelines per camera — full-res recording, low-res tile/relay
+- Dual main/sub-stream pipelines per camera — full-res live/recording, low-res tile relay
+- Live view and recording are independent — connecting to a camera's relay brings its live pipeline up on demand without recording anything; recording is started/stopped explicitly and attaches to the same live pipeline
 - Automatic RTSP reconnection with exponential backoff (2 s → 60 s cap) and a circuit breaker for persistently unreachable cameras
 - Recordings index + playback API — list by camera/time range, seek-by-datetime, Range-enabled streaming, clip export
 - Age- and disk-threshold-based retention sweeps
