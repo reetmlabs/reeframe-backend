@@ -223,11 +223,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
     let (media_event_tx, mut media_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (chunk_event_tx, mut chunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
-    // `pipeline_live_tx`'s consumer (reconciling persisted recording intent
-    // against reality the moment a pipeline comes up) lands in a later
-    // commit — for now nothing reads `pipeline_live_rx` yet.
-    let (pipeline_live_tx, pipeline_live_rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = pipeline_live_rx;
+    let (pipeline_live_tx, mut pipeline_live_rx) = tokio::sync::mpsc::unbounded_channel();
     let media_manager = Arc::new(
         MediaManager::new(
             MediaConfig {
@@ -307,6 +303,22 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+            }
+        });
+    }
+
+    // -- Recording-intent reconciliation bridge --
+    // Fires every time a camera's pipeline comes up or reconnects
+    // (`MediaManager::pipeline_live_tx`) — resumes recording if
+    // `desired_recording` is set and it isn't already, without waiting for
+    // the periodic sweep.
+    {
+        let camera_repo = camera_repo.clone();
+        let media_manager = media_manager.clone();
+        tokio::spawn(async move {
+            while let Some(camera_id) = pipeline_live_rx.recv().await {
+                vms_engine::reconcile_recording_intent(&camera_repo, &media_manager, camera_id)
+                    .await;
             }
         });
     }
@@ -463,6 +475,32 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // -- Resume recordings the operator started manually --
+    // Parallel to the relay auto-start loop above, not folded into
+    // `resource_manager.recover()` — that stays scoped to cameras
+    // referenced by an enabled automation pipeline (Step 9-15). A camera
+    // recording only because an operator clicked "start" has no such
+    // reference, so it needs its own pass over `desired_recording` here.
+    {
+        let wanted: Vec<_> = camera_repo
+            .list()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c.enabled && c.desired_recording)
+            .collect();
+
+        if !wanted.is_empty() {
+            tracing::info!(
+                count = wanted.len(),
+                "Resuming manually-started recordings from persisted intent"
+            );
+            for cam in wanted {
+                vms_engine::reconcile_recording_intent(&camera_repo, &media_manager, cam.id).await;
             }
         }
     }
