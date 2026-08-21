@@ -901,12 +901,20 @@ pub(crate) fn spawn_monitor(
 const MIN_PLAUSIBLE_CHUNK_BYTES: u64 = 1024;
 
 /// Handle a `splitmuxsink-fragment-closed` element message: the previous
-/// chunk file is finalized on disk. Runs the faststart remux (see
-/// `remux_faststart`) on a blocking thread — off the live pipeline entirely,
-/// so a slow remux can never stall bus-message processing or interact with
-/// the reconnect path — then reads the final size and emits
-/// `RecordingChunkEvent::Closed` (or `Discarded` for an empty/garbage
-/// fragment — see `MIN_PLAUSIBLE_CHUNK_BYTES`).
+/// chunk file is finalized on disk. Emits `RecordingChunkEvent::Closed` (or
+/// `Discarded` for an empty/garbage fragment — see
+/// `MIN_PLAUSIBLE_CHUNK_BYTES`) from a `stat()` of the file as it already
+/// is, *then* attempts the faststart remux (see `remux_faststart`) on the
+/// same blocking thread — deliberately in that order. The remux demuxes and
+/// rewrites the whole file, which can take a real, unbounded amount of
+/// wall-clock time; nothing in the graceful-shutdown path
+/// (`drain_recording_branch`) waits for it, only for this event to be sent,
+/// so gating the event on the remux meant a shutdown that raced a slow
+/// remux lost the DB write for an otherwise perfectly good chunk — silently
+/// orphaning it forever, since retention and the daily-coverage sweep both
+/// only ever consider chunks with `end_time IS NOT NULL`. The remux itself
+/// stays best-effort exactly as before; a chunk that misses it is still
+/// fully playable, just not progressively seekable via HTTP Range.
 fn handle_fragment_closed(
     camera_id: Uuid,
     elem: &gstreamer::message::Element,
@@ -956,6 +964,15 @@ fn handle_fragment_closed(
             return;
         }
 
+        let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
+            camera_id,
+            file_path: file_path.clone(),
+            end_time: chrono::Utc::now(),
+            size_bytes: on_disk_size as i64,
+        });
+
+        // Best-effort from here on — nothing downstream depends on this
+        // completing, or even running at all (see the doc comment above).
         if let Some(codec) = codec.as_deref().and_then(codec_for) {
             if let Err(e) = remux_faststart(&file_path, codec.parse_factory) {
                 tracing::warn!(
@@ -966,17 +983,6 @@ fn handle_fragment_closed(
                 );
             }
         }
-
-        let size_bytes = std::fs::metadata(&file_path)
-            .map(|m| m.len() as i64)
-            .unwrap_or(0);
-
-        let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
-            camera_id,
-            file_path,
-            end_time: chrono::Utc::now(),
-            size_bytes,
-        });
     });
 }
 
