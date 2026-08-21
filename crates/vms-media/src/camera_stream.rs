@@ -740,6 +740,7 @@ pub(crate) fn spawn_monitor(
     recording_dir: PathBuf,
     chunk_duration_secs: u64,
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
+    pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -862,6 +863,10 @@ pub(crate) fn spawn_monitor(
                     Ok(_) => {
                         tracing::info!(camera_id = %camera_id, "Camera stream restarted");
                         policy.record_attempt();
+                        // Lets whichever task owns recording-intent reconciliation
+                        // resume it the moment the stream is back, not just at
+                        // daemon boot — see `pipeline_live_tx`'s doc comment.
+                        let _ = pipeline_live_tx.send(camera_id);
                         break 'reconnect;
                     }
                     Err(e) => {

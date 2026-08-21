@@ -118,6 +118,14 @@ pub struct MediaManager {
     /// opens/closes each chunk, for whichever task actually has DB access
     /// to turn them into `recordings` rows.
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
+    /// Fires the camera's ID every time its main pipeline reaches `Playing`
+    /// — a fresh [`start_live`](Self::start_live) *and* every successful
+    /// reconnect inside the monitor task. Lets whichever task actually has
+    /// DB access reconcile persisted recording intent against reality the
+    /// moment a pipeline comes back, not just at daemon boot — this crate
+    /// has no `vms-db` dependency, so it can only announce the event, not
+    /// act on it.
+    pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     motion: Mutex<HashMap<Uuid, MotionHandle>>,
     thumbnails: Mutex<HashMap<Uuid, ThumbnailHandle>>,
 }
@@ -130,12 +138,15 @@ impl MediaManager {
     /// `event_tx` is where motion/scene-change/tamper events get sent —
     /// the same channel `vms-sources` adapters publish onto, bridged to the
     /// `EventBus` in `main.rs`. `chunk_event_tx` is the equivalent channel
-    /// for recording-chunk lifecycle bookkeeping. Both keep this crate free
-    /// of a `vms-db`/`vms-engine` dependency.
+    /// for recording-chunk lifecycle bookkeeping. `pipeline_live_tx` is the
+    /// equivalent for "a camera's pipeline just came up" — see the field
+    /// doc comment. All three keep this crate free of a `vms-db`/
+    /// `vms-engine` dependency.
     pub fn new(
         config: MediaConfig,
         event_tx: mpsc::UnboundedSender<Event>,
         chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
+        pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     ) -> Result<Self, VmsError> {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
@@ -147,6 +158,7 @@ impl MediaManager {
             relay,
             event_tx,
             chunk_event_tx,
+            pipeline_live_tx,
             motion: Mutex::new(HashMap::new()),
             thumbnails: Mutex::new(HashMap::new()),
         })
@@ -190,6 +202,7 @@ impl MediaManager {
         pipeline
             .set_state(gstreamer::State::Playing)
             .map_err(|e| VmsError::Media(format!("start pipeline {camera_id}: {e}")))?;
+        let _ = self.pipeline_live_tx.send(camera_id);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let task = spawn_monitor(
@@ -199,6 +212,7 @@ impl MediaManager {
             self.config.recording_dir.clone(),
             self.config.chunk_duration_secs,
             self.chunk_event_tx.clone(),
+            self.pipeline_live_tx.clone(),
             shutdown_rx,
         );
 

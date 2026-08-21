@@ -223,6 +223,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
     let (media_event_tx, mut media_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (chunk_event_tx, mut chunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
+    // `pipeline_live_tx`'s consumer (reconciling persisted recording intent
+    // against reality the moment a pipeline comes up) lands in a later
+    // commit — for now nothing reads `pipeline_live_rx` yet.
+    let (pipeline_live_tx, pipeline_live_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = pipeline_live_rx;
     let media_manager = Arc::new(
         MediaManager::new(
             MediaConfig {
@@ -233,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
             },
             media_event_tx.clone(),
             chunk_event_tx,
+            pipeline_live_tx,
         )
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to initialise media manager");
