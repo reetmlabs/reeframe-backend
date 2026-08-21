@@ -86,6 +86,38 @@ fn sub_tee_name(camera_id: Uuid) -> String {
     format!("cam_{}_subtee", camera_id.as_simple())
 }
 
+/// Remove leftover `*.faststart.tmp` files from a previous process
+/// lifetime. `remux_faststart` always writes to a fresh tmp path per
+/// attempt and renames it into place on success, so any tmp file still
+/// present at startup is a dead partial write — most commonly from a
+/// remux that was still running when the process was hard-killed. Runs
+/// once at `MediaManager::new()`, non-recursively (recordings are stored
+/// flat in `recording_dir`); best-effort, since a leftover file is
+/// harmless clutter, not a correctness problem.
+fn cleanup_stale_faststart_tmp_files(recording_dir: &Path) {
+    let entries = match std::fs::read_dir(recording_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %recording_dir.display(), "Failed to scan recording dir for stale faststart tmp files");
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.to_string_lossy().ends_with(".faststart.tmp") {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "Removed stale faststart tmp file")
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "Failed to remove stale faststart tmp file")
+                }
+            }
+        }
+    }
+}
+
 // -- MediaManager --
 
 /// Manages per-camera GStreamer pipelines.
@@ -150,6 +182,7 @@ impl MediaManager {
     ) -> Result<Self, VmsError> {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
+        cleanup_stale_faststart_tmp_files(&config.recording_dir);
         let relay = Arc::new(RelayServer::new(&config.rtsp_bind)?);
         Ok(Self {
             config,
@@ -978,4 +1011,48 @@ fn detach_snapshot_branch(
         }
         tee_clone.release_request_pad(&tee_src_clone);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_stale_faststart_tmp_files;
+    use uuid::Uuid;
+
+    /// A scratch dir under the system temp dir, unique per test run, cleaned
+    /// up on drop.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("vms-media-test-{name}-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn removes_only_faststart_tmp_files() {
+        let dir = ScratchDir::new("removes-only-faststart-tmp");
+        let stale = dir.0.join("cam_abc_20260101_chunk00000.mp4.faststart.tmp");
+        let chunk = dir.0.join("cam_abc_20260101_chunk00000.mp4");
+        std::fs::write(&stale, b"").unwrap();
+        std::fs::write(&chunk, b"").unwrap();
+
+        cleanup_stale_faststart_tmp_files(&dir.0);
+
+        assert!(!stale.exists());
+        assert!(chunk.exists());
+    }
+
+    #[test]
+    fn missing_dir_does_not_panic() {
+        cleanup_stale_faststart_tmp_files(std::path::Path::new("/nonexistent/does/not/exist"));
+    }
 }
