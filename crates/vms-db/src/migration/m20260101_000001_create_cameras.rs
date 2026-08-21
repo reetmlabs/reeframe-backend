@@ -84,4 +84,5 @@ pub enum Camera {
     UpdatedAt,
     RetentionDays,
     RetentionDiskThresholdPercent,
+    DesiredRecording,
 }

@@ -44,6 +44,12 @@ pub struct Model {
     /// `None` inherits the global default; `Some(0.0)` explicitly disables
     /// disk-threshold cleanup for this camera.
     pub retention_disk_threshold_percent: Option<f64>,
+    /// Persisted operator intent — set by `POST /cameras/{id}/recording/
+    /// start|stop`, independent of whether a recording branch is actually
+    /// attached right now (see `MediaManager::is_recording` for that). The
+    /// source of truth boot recovery and reconnect handling reconcile
+    /// against, so a manually-started recording survives a restart.
+    pub desired_recording: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

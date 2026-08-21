@@ -87,6 +87,7 @@ impl CameraRepo {
             updated_at: Set(ts),
             retention_days: Set(None),
             retention_disk_threshold_percent: Set(None),
+            desired_recording: Set(false),
         };
         model.insert(&self.db).await.map_err(db_err)
     }
@@ -191,6 +192,22 @@ impl CameraRepo {
             .ok_or(VmsError::CameraNotFound(id))?;
         let mut active: ActiveModel = cam.into();
         active.codec = Set(Some(codec.to_owned()));
+        active.updated_at = Set(now());
+        active.update(&self.db).await.map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Persist operator intent — called from the `recording/start`/`stop`
+    /// routes before touching `MediaManager`, regardless of whether that
+    /// call succeeds, so this always reflects the last explicit request.
+    pub async fn set_desired_recording(&self, id: Uuid, desired: bool) -> Result<(), VmsError> {
+        let cam = camera::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+            .ok_or(VmsError::CameraNotFound(id))?;
+        let mut active: ActiveModel = cam.into();
+        active.desired_recording = Set(desired);
         active.updated_at = Set(now());
         active.update(&self.db).await.map_err(db_err)?;
         Ok(())
