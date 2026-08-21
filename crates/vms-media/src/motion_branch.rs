@@ -314,13 +314,14 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
     let pipeline_clone = pipeline.clone();
     let queue_sink_clone = queue_sink.clone();
     let queue_clone = queue.clone();
+    let rest_clone = rest.clone();
 
-    tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
+    let probe_id = tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
         pad.unlink(&queue_sink_clone).ok();
 
         queue_clone.set_state(gstreamer::State::Null).ok();
         pipeline_clone.remove(&queue_clone).ok();
-        for el in &rest {
+        for el in &rest_clone {
             el.set_state(gstreamer::State::Null).ok();
             pipeline_clone.remove(el).ok();
         }
@@ -329,14 +330,40 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
         gstreamer::PadProbeReturn::Remove
     });
 
+    let pipeline_clone2 = pipeline.clone();
     let tee_src_clone = tee_src.clone();
     std::thread::spawn(move || {
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(()) => tracing::info!(camera_id = %camera_id, "Motion detection branch detached"),
-            Err(_) => tracing::warn!(
+        let fired = rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        if fired {
+            tracing::info!(camera_id = %camera_id, "Motion detection branch detached");
+        } else {
+            // A BLOCK_DOWNSTREAM probe only fires when a buffer/event
+            // actually tries to cross this pad — if the pipeline's upstream
+            // has already died, nothing ever will, and the probe never
+            // fires. Giving up here without also forcing removal leaves
+            // this branch's elements permanently stuck in the pipeline
+            // under their fixed names, so every later `attach()` for this
+            // camera fails at `add_many` with a name collision forever.
+            // Five seconds without a single frame crossing a live tee tap
+            // is a reliable enough signal that nothing is flowing through
+            // this exact link for it to be safe to force the same teardown
+            // here.
+            tracing::warn!(
                 camera_id = %camera_id,
-                "motion detach probe timed out — releasing tee pad anyway",
-            ),
+                "motion detach probe timed out — forcing removal directly",
+            );
+            if let Some(id) = probe_id {
+                tee_src_clone.remove_probe(id);
+            }
+            if let Some(peer) = queue_sink.peer() {
+                peer.unlink(&queue_sink).ok();
+            }
+            queue.set_state(gstreamer::State::Null).ok();
+            pipeline_clone2.remove(&queue).ok();
+            for el in &rest {
+                el.set_state(gstreamer::State::Null).ok();
+                pipeline_clone2.remove(el).ok();
+            }
         }
         tee.release_request_pad(&tee_src_clone);
     });

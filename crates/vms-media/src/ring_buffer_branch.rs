@@ -176,7 +176,7 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
     let queue_clone = queue.clone();
     let appsink_clone = appsink.clone();
 
-    tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
+    let probe_id = tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
         pad.unlink(&queue_sink_clone).ok();
 
         queue_clone.set_state(gstreamer::State::Null).ok();
@@ -193,14 +193,37 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
     // We must not call release_request_pad from inside the probe callback —
     // it can deadlock because release_request_pad acquires the element lock
     // that the streaming thread already holds.
+    let pipeline_clone2 = pipeline.clone();
     let tee_src_clone = tee_src.clone();
     std::thread::spawn(move || {
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(()) => tracing::info!(camera_id = %camera_id, "Ring buffer branch detached"),
-            Err(_) => tracing::warn!(
+        let fired = rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        if fired {
+            tracing::info!(camera_id = %camera_id, "Ring buffer branch detached");
+        } else {
+            // A BLOCK_DOWNSTREAM probe only fires when a buffer/event
+            // actually tries to cross this pad — if the pipeline's upstream
+            // has already died, nothing ever will, and the probe never
+            // fires. Giving up here without also forcing removal leaves
+            // `queue`/`appsink` permanently stuck in the pipeline under
+            // their fixed names, so every later `attach()` for this camera
+            // fails at `add_many` with a name collision forever. Five
+            // seconds without a single frame crossing a live tee tap is a
+            // reliable enough signal that nothing is flowing through this
+            // exact link for it to be safe to force the same teardown here.
+            tracing::warn!(
                 camera_id = %camera_id,
-                "detach probe timed out — releasing tee pad anyway",
-            ),
+                "detach probe timed out — forcing removal directly",
+            );
+            if let Some(id) = probe_id {
+                tee_src_clone.remove_probe(id);
+            }
+            if let Some(peer) = queue_sink.peer() {
+                peer.unlink(&queue_sink).ok();
+            }
+            queue.set_state(gstreamer::State::Null).ok();
+            appsink.set_state(gstreamer::State::Null).ok();
+            pipeline_clone2.remove(&queue).ok();
+            pipeline_clone2.remove(&appsink).ok();
         }
         tee.release_request_pad(&tee_src_clone);
     });

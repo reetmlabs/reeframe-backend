@@ -301,8 +301,13 @@ pub fn attach(
 /// Detach a relay bridge: removes the mount factory (existing viewers keep
 /// their current session; new ones get "not found") and tears down the
 /// tee-tap via the same blocking-pad-probe pattern as
-/// [`crate::ring_buffer_branch::detach`]. Returns immediately — element
-/// cleanup is asynchronous. Safe to call while `Playing`.
+/// [`crate::ring_buffer_branch::detach`], falling back to forcing the same
+/// removal directly if the probe never fires (e.g. the tee has stopped
+/// flowing data because the pipeline's upstream already died) — otherwise
+/// the branch's elements are orphaned in the pipeline forever under their
+/// fixed names, and every later `attach()` for this camera+quality fails.
+/// Returns immediately — element cleanup is asynchronous either way. Safe
+/// to call while `Playing`.
 pub fn detach(
     pipeline: &gstreamer::Pipeline,
     mounts: &gstreamer_rtsp_server::RTSPMountPoints,
@@ -335,7 +340,7 @@ pub fn detach(
     let queue_clone = queue.clone();
     let appsink_clone = appsink.clone();
 
-    tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
+    let probe_id = tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
         pad.unlink(&queue_sink_clone).ok();
 
         queue_clone.set_state(gstreamer::State::Null).ok();
@@ -348,14 +353,39 @@ pub fn detach(
         gstreamer::PadProbeReturn::Remove
     });
 
+    let pipeline_clone2 = pipeline.clone();
     let tee_src_clone = tee_src.clone();
     std::thread::spawn(move || {
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(()) => tracing::info!(camera_id = %camera_id, "Relay bridge detached"),
-            Err(_) => tracing::warn!(
+        let fired = rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        if fired {
+            tracing::info!(camera_id = %camera_id, "Relay bridge detached");
+        } else {
+            // A BLOCK_DOWNSTREAM probe only fires when a buffer/event
+            // actually tries to cross this pad — if the pipeline's upstream
+            // (the camera connection) has already died, nothing ever will,
+            // and the probe never fires. Giving up here without also
+            // forcing removal left `queue`/`appsink` permanently stuck in
+            // the pipeline under their fixed names — every later `attach()`
+            // for this camera+quality then failed at `add_many` with a name
+            // collision, forever, recoverable only by rebuilding the whole
+            // pipeline (daemon restart; see the incident this fixes). Five
+            // seconds without a single frame crossing a live tee tap is a
+            // reliable enough signal that nothing is flowing through this
+            // exact link for it to be safe to force the same teardown here.
+            tracing::warn!(
                 camera_id = %camera_id,
-                "relay bridge detach probe timed out — releasing tee pad anyway",
-            ),
+                "relay bridge detach probe timed out — forcing removal directly",
+            );
+            if let Some(id) = probe_id {
+                tee_src_clone.remove_probe(id);
+            }
+            if let Some(peer) = queue_sink.peer() {
+                peer.unlink(&queue_sink).ok();
+            }
+            queue.set_state(gstreamer::State::Null).ok();
+            appsink.set_state(gstreamer::State::Null).ok();
+            pipeline_clone2.remove(&queue).ok();
+            pipeline_clone2.remove(&appsink).ok();
         }
         tee.release_request_pad(&tee_src_clone);
     });
