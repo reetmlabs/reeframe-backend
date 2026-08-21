@@ -18,5 +18,5 @@ pub use pipeline_executor::PipelineExecutor;
 pub use pipeline_registry::PipelineRegistry;
 pub use recording_intent::reconcile_recording_intent;
 pub use resource_manager::ResourceManager;
-pub use stat_monitor::{CoverageConfig, RetentionConfig, StatMonitor};
+pub use stat_monitor::{CoverageConfig, RecordingIntentConfig, RetentionConfig, StatMonitor};
 pub use trigger_evaluator::TriggerEvaluator;

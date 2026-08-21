@@ -25,8 +25,8 @@ use vms_db::{
     RecordingRepo, SettingsRepo, SourceRepo, TileLayoutRepo, UserRepo,
 };
 use vms_engine::{
-    CoverageConfig, EventBus, Metrics, PipelineExecutor, PipelineRegistry, ResourceManager,
-    RetentionConfig, StatMonitor, TriggerEvaluator,
+    CoverageConfig, EventBus, Metrics, PipelineExecutor, PipelineRegistry, RecordingIntentConfig,
+    ResourceManager, RetentionConfig, StatMonitor, TriggerEvaluator,
 };
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 use vms_sources::SourceManager;
@@ -551,6 +551,10 @@ async fn main() -> anyhow::Result<()> {
         camera_repo: camera_repo.clone(),
         coverage_repo: daily_coverage_repo.clone(),
         retention_days: cfg.recordings.retention_days,
+    });
+    stat_monitor.set_recording_intent(RecordingIntentConfig {
+        camera_repo: camera_repo.clone(),
+        media_manager: media_manager.clone(),
     });
     stat_monitor.clone().start();
     tracing::info!("Stat monitor started");

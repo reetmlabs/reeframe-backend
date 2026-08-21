@@ -8,8 +8,10 @@ use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, StatMetric, TriggerConfig};
 use vms_db::repos::daily_recording_coverage::UpsertDailyCoverage;
 use vms_db::{CameraRepo, DailyRecordingCoverageRepo, RecordingRepo};
+use vms_media::MediaManager;
 
 use crate::coverage::compute_day_coverage;
+use crate::recording_intent::reconcile_recording_intent;
 use crate::{pipeline_registry::RegistrySnapshot, PipelineRegistry, TriggerEvaluator};
 
 /// Seconds between samples during normal operation (first sleep and default).
@@ -40,6 +42,11 @@ const COVERAGE_RECOMPUTE_INTERVAL_SECS: u64 = 120;
 /// window shouldn't spike the DB computing months of history in one go: the
 /// rest backfills over subsequent passes.
 const MAX_COVERAGE_BACKFILL_PER_TICK: usize = 20;
+/// Minimum seconds between recording-intent sweeps — the safety net for
+/// whatever `MediaManager::pipeline_live_tx`'s event-driven reconciliation
+/// misses (a missed event, a race, a bug). Not the primary mechanism, so a
+/// worst-case delay this long before self-healing is fine.
+const RECORDING_INTENT_SWEEP_INTERVAL_SECS: u64 = 30;
 
 /// Recording retention configuration, set once via [`StatMonitor::set_retention`]
 /// after construction (kept out of `new()`'s signature so existing tests and
@@ -64,6 +71,17 @@ pub struct CoverageConfig {
     pub retention_days: u32,
 }
 
+/// Recording-intent reconciliation configuration, set once via
+/// [`StatMonitor::set_recording_intent`] — same "optional, no-op until
+/// configured" shape as [`RetentionConfig`]/[`CoverageConfig`]. The first of
+/// these three to need a live [`MediaManager`] handle rather than just DB
+/// repos, since reconciling intent means actually attaching a recording
+/// branch, not just reading/writing rows.
+pub struct RecordingIntentConfig {
+    pub camera_repo: CameraRepo,
+    pub media_manager: Arc<MediaManager>,
+}
+
 /// Polls system metrics and feeds readings to the [`TriggerEvaluator`].
 ///
 /// Wraps `sysinfo` behind a `Mutex` so the same `System` instance is reused
@@ -82,6 +100,8 @@ pub struct StatMonitor {
     retention: Mutex<Option<RetentionConfig>>,
     coverage: Mutex<Option<CoverageConfig>>,
     last_coverage_run: Mutex<Option<Instant>>,
+    recording_intent: Mutex<Option<RecordingIntentConfig>>,
+    last_recording_intent_sweep: Mutex<Option<Instant>>,
 }
 
 impl StatMonitor {
@@ -94,6 +114,8 @@ impl StatMonitor {
             retention: Mutex::new(None),
             coverage: Mutex::new(None),
             last_coverage_run: Mutex::new(None),
+            recording_intent: Mutex::new(None),
+            last_recording_intent_sweep: Mutex::new(None),
         })
     }
 
@@ -109,6 +131,13 @@ impl StatMonitor {
     /// optional, separate-from-`new()` shape as [`Self::set_retention`].
     pub fn set_coverage(&self, config: CoverageConfig) {
         *self.coverage.lock().unwrap() = Some(config);
+    }
+
+    /// Set the recording-intent configuration this monitor sweeps
+    /// periodically (see [`RECORDING_INTENT_SWEEP_INTERVAL_SECS`]). Same
+    /// optional, separate-from-`new()` shape as [`Self::set_retention`].
+    pub fn set_recording_intent(&self, config: RecordingIntentConfig) {
+        *self.recording_intent.lock().unwrap() = Some(config);
     }
 
     // -- Polling loop --
@@ -132,6 +161,7 @@ impl StatMonitor {
                 let near = self.poll();
                 self.sweep_retention().await;
                 self.sweep_daily_coverage().await;
+                self.sweep_recording_intent().await;
                 let next = if near {
                     FAST_INTERVAL_SECS
                 } else {
@@ -486,6 +516,56 @@ impl StatMonitor {
                 error = %e,
                 "Coverage sweep: failed to store daily coverage",
             );
+        }
+    }
+
+    // -- Recording intent --
+
+    /// Safety net for [`MediaManager`]'s event-driven reconciliation
+    /// (`pipeline_live_tx`, consumed at the daemon layer) — catches a
+    /// missed event, a race, or a bug by periodically confirming every
+    /// camera that wants to be recording actually is. No-op until
+    /// [`Self::set_recording_intent`] has been called.
+    async fn sweep_recording_intent(&self) {
+        {
+            let mut last = self.last_recording_intent_sweep.lock().unwrap();
+            let due = last.is_none_or(|t| {
+                t.elapsed() >= Duration::from_secs(RECORDING_INTENT_SWEEP_INTERVAL_SECS)
+            });
+            if !due {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+
+        let (camera_repo, media_manager) = {
+            let guard = self.recording_intent.lock().unwrap();
+            let Some(cfg) = guard.as_ref() else {
+                return;
+            };
+            (cfg.camera_repo.clone(), cfg.media_manager.clone())
+        };
+
+        let cameras = match camera_repo.list().await {
+            Ok(cams) => cams,
+            Err(e) => {
+                tracing::warn!(error = %e, "Recording intent sweep: failed to list cameras");
+                return;
+            }
+        };
+
+        // Pre-filtered on fields `list()` already returned, before falling
+        // into `reconcile_recording_intent`'s own (re-)checks — avoids a
+        // decrypt-and-check round trip for every camera that isn't even
+        // trying to record, on a tick that runs every 30 s regardless.
+        for camera in cameras {
+            if !camera.enabled || !camera.desired_recording {
+                continue;
+            }
+            if media_manager.is_recording(camera.id) {
+                continue;
+            }
+            reconcile_recording_intent(&camera_repo, &media_manager, camera.id).await;
         }
     }
 
