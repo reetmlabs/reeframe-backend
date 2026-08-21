@@ -36,6 +36,12 @@ pub struct CameraDto {
     /// `true` if a recording branch is currently attached and writing to
     /// disk. Implies `live`.
     pub recording: bool,
+    /// Persisted operator intent — set by `recording/start`/`stop`, not by
+    /// anything else. Can be `true` while `recording` is `false` (camera
+    /// unreachable, mid-reconnect) — that combination means "trying to
+    /// record but not currently succeeding," distinct from an operator
+    /// having stopped it on purpose.
+    pub desired_recording: bool,
     /// Main-quality (full resolution) RTSP relay URL, intended for
     /// full-screen live view. `null` until that relay is started.
     pub relay_url: Option<String>,
@@ -70,6 +76,7 @@ impl CameraDto {
             enabled: m.enabled,
             live,
             recording,
+            desired_recording: m.desired_recording,
             relay_url,
             sub_relay_url,
             created_at: m.created_at,
@@ -300,6 +307,12 @@ pub async fn start_recording(
 
     let (rtsp_url, sub_rtsp_url) = resolve_camera_urls(&camera, password.as_deref());
 
+    // Persisted before the actual attach attempt, and independent of
+    // whether it succeeds — this is what lets boot recovery and reconnect
+    // handling resume recording later even if it fails to start right now
+    // (camera unreachable, etc.) instead of the intent being lost with it.
+    state.camera_repo.set_desired_recording(id, true).await?;
+
     state
         .media_manager
         .start_recording(id, &rtsp_url, sub_rtsp_url.as_deref())
@@ -320,6 +333,11 @@ pub async fn stop_recording(
 ) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
+
+    // This is the only way intent is ever cleared — until this runs, boot
+    // recovery and reconnect handling keep trying to resume recording.
+    state.camera_repo.set_desired_recording(id, false).await?;
+
     state.media_manager.stop_recording(id)?;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
