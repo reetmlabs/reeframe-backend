@@ -17,8 +17,7 @@
 //! a shared canonical timezone to bucket by, since a server serves many
 //! viewers who may be in different zones). A chunk within a few hours of UTC
 //! midnight can land on a different calendar day here than in the frontend's
-//! own on-demand fallback — accepted as a known limitation, see
-//! `roadmap/BE/roadmap.md`'s "Step 16e" entry.
+//! own on-demand fallback — accepted as a known limitation.
 
 use chrono::{DateTime, FixedOffset};
 use serde::Serialize;

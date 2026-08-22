@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-/// JPEG encode quality (0–100). Not currently configurable — nothing in
-/// the roadmap step asked for it, only the capture interval.
+/// JPEG encode quality (0–100). Not currently configurable — only the
+/// capture interval is.
 const JPEG_QUALITY: i32 = 75;
 
 fn queue_name(id: Uuid) -> String {

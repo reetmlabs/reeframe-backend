@@ -6494,6 +6494,8 @@ dependencies = [
  "chrono-tz",
  "dashmap",
  "evalexpr",
+ "gstreamer",
+ "gstreamer-pbutils",
  "prometheus",
  "sea-orm",
  "serde",

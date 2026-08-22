@@ -479,10 +479,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // -- Reconcile orphaned recording chunks from a previous process lifetime --
+    // Must run before the resume loop below opens any fresh chunks of its
+    // own, since every `end_time IS NULL` row found here is unconditionally
+    // a leftover, never a chunk this process is currently writing.
+    vms_engine::reconcile_orphaned_chunks(&recording_repo).await;
+
     // -- Resume recordings the operator started manually --
     // Parallel to the relay auto-start loop above, not folded into
     // `resource_manager.recover()` — that stays scoped to cameras
-    // referenced by an enabled automation pipeline (Step 9-15). A camera
+    // referenced by an enabled automation pipeline. A camera
     // recording only because an operator clicked "start" has no such
     // reference, so it needs its own pass over `desired_recording` here.
     {

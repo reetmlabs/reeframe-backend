@@ -290,11 +290,148 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
+    /// Every row still open (`end_time IS NULL`), across all cameras — used
+    /// by the daemon-startup reconciliation sweep, where every such row is
+    /// unconditionally left over from a previous process lifetime (this
+    /// runs before any camera in the current process has opened a chunk).
+    pub async fn list_open_chunks(&self) -> Result<Vec<recording::Model>, VmsError> {
+        recording::Entity::find()
+            .filter(recording::Column::EndTime.is_null())
+            .all(&self.db)
+            .await
+            .map_err(db_err)
+    }
+
+    /// Backfill `end_time`/`size_bytes` on an already-fetched row — used by
+    /// the startup reconciliation sweep to heal a chunk whose file turned
+    /// out to be valid despite the row being left open. Takes the row
+    /// itself (from [`Self::list_open_chunks`]) rather than an id, unlike
+    /// [`Self::close_chunk_by_path`], since the caller already has it and a
+    /// re-lookup by id would be redundant.
+    pub async fn backfill_end_time(
+        &self,
+        row: recording::Model,
+        end_time: DateTimeWithTimeZone,
+        size_bytes: i64,
+    ) -> Result<(), VmsError> {
+        let mut active: ActiveModel = row.into();
+        active.end_time = Set(Some(end_time));
+        active.size_bytes = Set(Some(size_bytes));
+        active.update(&self.db).await.map_err(db_err)?;
+        Ok(())
+    }
+
     pub async fn delete(&self, id: Uuid) -> Result<(), VmsError> {
         recording::Entity::delete_by_id(id)
             .exec(&self.db)
             .await
             .map_err(db_err)?;
         Ok(())
+    }
+}
+
+// -- Tests --
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use sea_orm_migration::MigratorTrait;
+
+    use super::*;
+    use crate::{
+        crypto::Crypto,
+        entities::camera::RingBufferStorage,
+        migration::Migrator,
+        repos::camera::{CameraRepo, CreateCamera},
+    };
+
+    async fn test_db() -> DatabaseConnection {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        db
+    }
+
+    async fn create_camera(db: &DatabaseConnection) -> Uuid {
+        let repo = CameraRepo::new(db.clone(), Crypto::from_key([0u8; 32]));
+        repo.create(CreateCamera {
+            name: "cam".into(),
+            description: None,
+            rtsp_url: "rtsp://example.invalid/stream".into(),
+            sub_rtsp_url: None,
+            manufacturer: None,
+            model: None,
+            username: None,
+            password: None,
+            extra_config: serde_json::json!({}),
+            ring_buffer_duration_secs: 300,
+            ring_buffer_storage: RingBufferStorage::Memory,
+            enabled: true,
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn list_open_chunks_finds_only_end_time_null_rows() {
+        let db = test_db().await;
+        let camera_id = create_camera(&db).await;
+        let repo = RecordingRepo::new(db);
+
+        let open = repo
+            .open_chunk(OpenChunk {
+                camera_id,
+                file_path: "/rec/open.mp4".into(),
+                chunk_index: 0,
+                start_time: Utc::now().fixed_offset(),
+                codec: None,
+            })
+            .await
+            .unwrap();
+        let closed = repo
+            .open_chunk(OpenChunk {
+                camera_id,
+                file_path: "/rec/closed.mp4".into(),
+                chunk_index: 1,
+                start_time: Utc::now().fixed_offset(),
+                codec: None,
+            })
+            .await
+            .unwrap();
+        repo.close_chunk_by_path(camera_id, &closed.file_path, Utc::now().fixed_offset(), 100)
+            .await
+            .unwrap();
+
+        let found = repo.list_open_chunks().await.unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, open.id);
+    }
+
+    #[tokio::test]
+    async fn backfill_end_time_sets_end_time_and_size_bytes() {
+        let db = test_db().await;
+        let camera_id = create_camera(&db).await;
+        let repo = RecordingRepo::new(db);
+
+        let row = repo
+            .open_chunk(OpenChunk {
+                camera_id,
+                file_path: "/rec/orphaned.mp4".into(),
+                chunk_index: 0,
+                start_time: Utc::now().fixed_offset(),
+                codec: None,
+            })
+            .await
+            .unwrap();
+        let end_time = Utc::now().fixed_offset();
+
+        repo.backfill_end_time(row.clone(), end_time, 4096)
+            .await
+            .unwrap();
+
+        let healed = repo.get(row.id).await.unwrap();
+        assert_eq!(healed.end_time, Some(end_time));
+        assert_eq!(healed.size_bytes, Some(4096));
     }
 }

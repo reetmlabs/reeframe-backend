@@ -1,8 +1,8 @@
 //! Reconciles persisted recording intent (`cameras.desired_recording`)
 //! against reality. `MediaManager::is_recording` alone can't survive a
 //! restart, and `ResourceManager::recover()` only re-acquires pipelines for
-//! cameras referenced by an enabled automation pipeline (see Step 9-15) —
-//! a manually-started recording is invisible to both. This is the piece
+//! cameras referenced by an enabled automation pipeline — a manually-started
+//! recording is invisible to both. This is the piece
 //! that resumes it anyway: called both from `MediaManager`'s
 //! `pipeline_live_tx` notification (event-driven, fires the moment a
 //! pipeline comes up or reconnects) and from a periodic sweep, as a
