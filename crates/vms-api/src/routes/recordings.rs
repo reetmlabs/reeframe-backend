@@ -103,6 +103,17 @@ pub(crate) fn parse_query_datetime(
         })
 }
 
+/// A still-open row (`end_time IS NULL`) only proves the chunk is genuinely
+/// being written right now if its camera is actually recording. Otherwise
+/// it's an interrupted chunk that never got finalized or cleaned up —
+/// serving it would hand back a file that fails to play.
+fn is_untrustworthy_open_chunk(
+    end_time: Option<DateTime<FixedOffset>>,
+    camera_is_recording: bool,
+) -> bool {
+    end_time.is_none() && !camera_is_recording
+}
+
 // -- Handlers --
 
 /// GET /cameras/{id}/recordings?from=<rfc3339>&to=<rfc3339>
@@ -140,9 +151,11 @@ pub async fn list_recordings(
 /// the caller loads it and seeks to `offset_secs`, no server-side transcoding
 /// needed since chunks are already faststart-remuxed on close.
 ///
-/// If `at` falls in a gap (camera offline, or outside all recorded history),
-/// responds `404` with the nearest chunk boundaries on either side so the
-/// caller can offer "jump to nearest available footage" instead of a dead end.
+/// If `at` falls in a gap (camera offline, outside all recorded history, or
+/// resolves only to a still-open chunk from a camera that isn't actually
+/// recording right now), responds `404` with the nearest chunk boundaries
+/// on either side so the caller can offer "jump to nearest available
+/// footage" instead of a dead end.
 #[handler]
 pub async fn get_playback(
     req: &mut Request,
@@ -159,13 +172,18 @@ pub async fn get_playback(
         .resolve_at(camera_id, at_offset)
         .await?
     {
-        let offset_secs = (at_offset - rec.start_time).num_milliseconds() as f64 / 1000.0;
-        res.render(Json(PlaybackDto {
-            recording_id: rec.id,
-            stream_url: format!("/recordings/{}/stream", rec.id),
-            offset_secs,
-        }));
-        return Ok(());
+        let untrustworthy =
+            is_untrustworthy_open_chunk(rec.end_time, state.media_manager.is_recording(camera_id));
+
+        if !untrustworthy {
+            let offset_secs = (at_offset - rec.start_time).num_milliseconds() as f64 / 1000.0;
+            res.render(Json(PlaybackDto {
+                recording_id: rec.id,
+                stream_url: format!("/recordings/{}/stream", rec.id),
+                offset_secs,
+            }));
+            return Ok(());
+        }
     }
 
     let (before, after) = state
@@ -270,4 +288,22 @@ pub async fn list_daily_summary_bulk(
         .await?;
 
     Ok(Json(rows.into_iter().map(DailyCoverageDto::from).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_chunk_is_untrustworthy_unless_camera_is_recording() {
+        assert!(is_untrustworthy_open_chunk(None, false));
+        assert!(!is_untrustworthy_open_chunk(None, true));
+    }
+
+    #[test]
+    fn closed_chunk_is_always_trustworthy() {
+        let end_time = Some(Utc::now().fixed_offset());
+        assert!(!is_untrustworthy_open_chunk(end_time, false));
+        assert!(!is_untrustworthy_open_chunk(end_time, true));
+    }
 }
