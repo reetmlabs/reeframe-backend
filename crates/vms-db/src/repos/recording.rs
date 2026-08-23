@@ -158,6 +158,11 @@ impl RecordingRepo {
     /// Resolve a specific instant to the chunk covering it —
     /// `start_time <= at` and (`end_time IS NULL` or `at < end_time`), i.e.
     /// including the chunk currently being written.
+    ///
+    /// Ordered by `start_time DESC` in case more than one row matches (e.g. a
+    /// chunk orphaned mid-recording with `end_time` never set) — the most
+    /// recently started match is always the correct/current chunk, never a
+    /// stale earlier one.
     pub async fn resolve_at(
         &self,
         camera_id: Uuid,
@@ -171,6 +176,7 @@ impl RecordingRepo {
                     .add(recording::Column::EndTime.is_null())
                     .add(recording::Column::EndTime.gt(at)),
             )
+            .order_by_desc(recording::Column::StartTime)
             .one(&self.db)
             .await
             .map_err(db_err)
