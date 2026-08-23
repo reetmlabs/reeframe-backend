@@ -91,6 +91,13 @@ impl ChunkNaming {
         *self.close_ack.lock().unwrap() = Some((path, tx));
         Some(rx)
     }
+
+    /// Peek the fragment currently open, if any, without registering a drain
+    /// wait — lets a timed-out drain still index the fragment it gave up
+    /// waiting on (see `drain_recording_branch`).
+    fn current_path(&self) -> Option<String> {
+        self.current_path.lock().unwrap().clone()
+    }
 }
 
 /// Build a per-camera "live" GStreamer pipeline — `rtspsrc -> [depay|parse]
@@ -563,8 +570,16 @@ async fn drain_recording_branch(
             _ = &mut deadline => {
                 tracing::warn!(
                     camera_id = %camera_id,
-                    "recording branch drain timed out — its last chunk may be truncated",
+                    "recording branch drain timed out — indexing its last chunk from disk instead of leaving it open forever",
                 );
+                if let Some(file_path) = naming.current_path() {
+                    naming.close_ack.lock().unwrap().take();
+                    let codec = naming.codec.lock().unwrap().clone();
+                    let chunk_event_tx = chunk_event_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        finalize_fragment_file(camera_id, file_path, codec, chunk_event_tx);
+                    });
+                }
                 return;
             }
         }
@@ -948,42 +963,58 @@ fn handle_fragment_closed(
     let chunk_event_tx = chunk_event_tx.clone();
 
     tokio::task::spawn_blocking(move || {
-        let on_disk_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
-        if on_disk_size < MIN_PLAUSIBLE_CHUNK_BYTES {
+        finalize_fragment_file(camera_id, file_path, codec, chunk_event_tx);
+    });
+}
+
+/// `stat()` `file_path` and index it as `Closed` (or `Discarded` if it never
+/// grew past `MIN_PLAUSIBLE_CHUNK_BYTES`), then best-effort faststart-remux
+/// it. Shared by `handle_fragment_closed`'s normal close path and by
+/// `drain_recording_branch`'s timeout fallback, so a fragment that never
+/// produces a `splitmuxsink-fragment-closed` message in time still gets
+/// indexed instead of leaving its `recording` row open forever. Blocking —
+/// callers run it on a blocking thread.
+fn finalize_fragment_file(
+    camera_id: Uuid,
+    file_path: String,
+    codec: Option<String>,
+    chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
+) {
+    let on_disk_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+    if on_disk_size < MIN_PLAUSIBLE_CHUNK_BYTES {
+        tracing::warn!(
+            camera_id = %camera_id,
+            file_path,
+            size_bytes = on_disk_size,
+            "Discarding empty/garbage fragment — not indexing it as a real chunk",
+        );
+        std::fs::remove_file(&file_path).ok();
+        let _ = chunk_event_tx.send(RecordingChunkEvent::Discarded {
+            camera_id,
+            file_path,
+        });
+        return;
+    }
+
+    let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
+        camera_id,
+        file_path: file_path.clone(),
+        end_time: chrono::Utc::now(),
+        size_bytes: on_disk_size as i64,
+    });
+
+    // Best-effort from here on — nothing downstream depends on this
+    // completing, or even running at all (see the doc comment above).
+    if let Some(codec) = codec.as_deref().and_then(codec_for) {
+        if let Err(e) = remux_faststart(&file_path, codec.parse_factory) {
             tracing::warn!(
                 camera_id = %camera_id,
                 file_path,
-                size_bytes = on_disk_size,
-                "Discarding empty/garbage fragment — not indexing it as a real chunk",
+                error = %e,
+                "Faststart remux failed — chunk stays playable, just not progressively seekable",
             );
-            std::fs::remove_file(&file_path).ok();
-            let _ = chunk_event_tx.send(RecordingChunkEvent::Discarded {
-                camera_id,
-                file_path,
-            });
-            return;
         }
-
-        let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
-            camera_id,
-            file_path: file_path.clone(),
-            end_time: chrono::Utc::now(),
-            size_bytes: on_disk_size as i64,
-        });
-
-        // Best-effort from here on — nothing downstream depends on this
-        // completing, or even running at all (see the doc comment above).
-        if let Some(codec) = codec.as_deref().and_then(codec_for) {
-            if let Err(e) = remux_faststart(&file_path, codec.parse_factory) {
-                tracing::warn!(
-                    camera_id = %camera_id,
-                    file_path,
-                    error = %e,
-                    "Faststart remux failed — chunk stays playable, just not progressively seekable",
-                );
-            }
-        }
-    });
+    }
 }
 
 /// Rewrite `path` in place so its `moov` atom sits before `mdat` — what lets
