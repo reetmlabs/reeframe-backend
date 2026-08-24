@@ -8,8 +8,8 @@ use vms_core::{
     VmsError,
 };
 
-use crate::dispatcher::ActionContext;
 use super::gst as gst_util;
+use crate::dispatcher::ActionContext;
 
 // -- Handler --
 
@@ -72,12 +72,11 @@ pub async fn execute(
     let out_format = cfg.output_format.clone();
     let out_path = output_path.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        merge_blocking(&clips, &out_format, &out_path)
-    })
-    .await
-    .map_err(|e| format!("merge_clips task panic: {e}"))
-    .and_then(|r| r.map_err(|e| e.to_string()));
+    let result =
+        tokio::task::spawn_blocking(move || merge_blocking(&clips, &out_format, &out_path))
+            .await
+            .map_err(|e| format!("merge_clips task panic: {e}"))
+            .and_then(|r| r.map_err(|e| e.to_string()));
 
     match result {
         Ok(()) => {
@@ -97,11 +96,7 @@ pub async fn execute(
 ///
 /// All clips must have the same resolution and frame rate (guaranteed when
 /// clips come from the same camera). `videoconvert` normalises pixel formats.
-fn merge_blocking(
-    clips: &[PathBuf],
-    output_format: &str,
-    output: &Path,
-) -> Result<(), VmsError> {
+fn merge_blocking(clips: &[PathBuf], output_format: &str, output: &Path) -> Result<(), VmsError> {
     gstreamer::init().ok();
 
     let Some(output_str) = output.to_str() else {

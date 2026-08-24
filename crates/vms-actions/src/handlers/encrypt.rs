@@ -84,7 +84,10 @@ pub async fn execute(
 
 // -- Key resolution --
 
-fn resolve_key_blocking(key_ref: &str, default_key: Option<[u8; 32]>) -> Result<[u8; 32], VmsError> {
+fn resolve_key_blocking(
+    key_ref: &str,
+    default_key: Option<[u8; 32]>,
+) -> Result<[u8; 32], VmsError> {
     if key_ref == "default" {
         return default_key
             .ok_or_else(|| VmsError::Config("no default encryption key configured".into()));
@@ -113,8 +116,8 @@ fn encrypt_file_blocking(input: &Path, key: &[u8; 32], output: &Path) -> Result<
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| VmsError::Encryption("failed to initialise cipher".into()))?;
 
-    let mut in_file = std::fs::File::open(input)
-        .map_err(|e| VmsError::Media(format!("open input: {e}")))?;
+    let mut in_file =
+        std::fs::File::open(input).map_err(|e| VmsError::Media(format!("open input: {e}")))?;
     let mut out_file = std::fs::File::create(output)
         .map_err(|e| VmsError::Media(format!("create output: {e}")))?;
 

@@ -9,8 +9,8 @@ use vms_core::{
     VmsError,
 };
 
-use crate::dispatcher::ActionContext;
 use super::gst as gst_util;
+use crate::dispatcher::ActionContext;
 
 // -- Handler --
 
@@ -136,14 +136,19 @@ fn watermark_blocking(
 
     pipeline
         .add_many([
-            &src, &decode, &convert_in, &overlay, &convert_out, &encoder, &muxer, &sink,
+            &src,
+            &decode,
+            &convert_in,
+            &overlay,
+            &convert_out,
+            &encoder,
+            &muxer,
+            &sink,
         ])
         .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
 
-    gstreamer::Element::link_many([
-        &convert_in, &overlay, &convert_out, &encoder, &muxer, &sink,
-    ])
-    .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
+    gstreamer::Element::link_many([&convert_in, &overlay, &convert_out, &encoder, &muxer, &sink])
+        .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
 
     src.link(&decode)
         .map_err(|e| VmsError::Media(format!("link src→decode: {e}")))?;
@@ -180,11 +185,11 @@ fn render_text(template: &str, input: &NodeInput) -> Result<String, String> {
 
 fn position_to_alignment(pos: &WatermarkPosition) -> (&'static str, &'static str) {
     match pos {
-        WatermarkPosition::TopLeft     => ("top", "left"),
-        WatermarkPosition::TopRight    => ("top", "right"),
-        WatermarkPosition::BottomLeft  => ("bottom", "left"),
+        WatermarkPosition::TopLeft => ("top", "left"),
+        WatermarkPosition::TopRight => ("top", "right"),
+        WatermarkPosition::BottomLeft => ("bottom", "left"),
         WatermarkPosition::BottomRight => ("bottom", "right"),
-        WatermarkPosition::Center      => ("center", "center"),
+        WatermarkPosition::Center => ("center", "center"),
     }
 }
 
@@ -196,12 +201,18 @@ mod tests {
 
     #[test]
     fn position_top_left() {
-        assert_eq!(position_to_alignment(&WatermarkPosition::TopLeft), ("top", "left"));
+        assert_eq!(
+            position_to_alignment(&WatermarkPosition::TopLeft),
+            ("top", "left")
+        );
     }
 
     #[test]
     fn position_center() {
-        assert_eq!(position_to_alignment(&WatermarkPosition::Center), ("center", "center"));
+        assert_eq!(
+            position_to_alignment(&WatermarkPosition::Center),
+            ("center", "center")
+        );
     }
 
     #[test]

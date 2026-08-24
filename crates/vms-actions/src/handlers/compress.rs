@@ -45,12 +45,11 @@ pub async fn execute(
     let in_path = input_path.clone();
     let out_path = output_path.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        compress_blocking(&in_path, &cfg_clone, &out_path)
-    })
-    .await
-    .map_err(|e| format!("compress task panic: {e}"))
-    .and_then(|r| r.map_err(|e| e.to_string()));
+    let result =
+        tokio::task::spawn_blocking(move || compress_blocking(&in_path, &cfg_clone, &out_path))
+            .await
+            .map_err(|e| format!("compress task panic: {e}"))
+            .and_then(|r| r.map_err(|e| e.to_string()));
 
     match result {
         Ok(()) => {
@@ -68,13 +67,9 @@ pub async fn execute(
 
 // -- Blocking implementation --
 
-fn compress_blocking(
-    input: &Path,
-    cfg: &CompressConfig,
-    output: &Path,
-) -> Result<(), VmsError> {
-    let in_file = std::fs::File::open(input)
-        .map_err(|e| VmsError::Media(format!("open input: {e}")))?;
+fn compress_blocking(input: &Path, cfg: &CompressConfig, output: &Path) -> Result<(), VmsError> {
+    let in_file =
+        std::fs::File::open(input).map_err(|e| VmsError::Media(format!("open input: {e}")))?;
     let mut reader = BufReader::new(in_file);
 
     match cfg.algorithm {
@@ -121,7 +116,7 @@ fn file_extension(algorithm: &CompressionAlgorithm) -> &'static str {
     match algorithm {
         CompressionAlgorithm::Zstd => "zst",
         CompressionAlgorithm::Gzip => "gz",
-        CompressionAlgorithm::Lz4  => "lz4",
+        CompressionAlgorithm::Lz4 => "lz4",
     }
 }
 
@@ -135,7 +130,7 @@ mod tests {
     fn extensions_are_correct() {
         assert_eq!(file_extension(&CompressionAlgorithm::Zstd), "zst");
         assert_eq!(file_extension(&CompressionAlgorithm::Gzip), "gz");
-        assert_eq!(file_extension(&CompressionAlgorithm::Lz4),  "lz4");
+        assert_eq!(file_extension(&CompressionAlgorithm::Lz4), "lz4");
     }
 
     #[test]
@@ -150,12 +145,18 @@ mod tests {
         f.write_all(&b"hello world ".repeat(1000)).unwrap();
         drop(f);
 
-        let cfg = CompressConfig { algorithm: CompressionAlgorithm::Zstd, level: 3 };
+        let cfg = CompressConfig {
+            algorithm: CompressionAlgorithm::Zstd,
+            level: 3,
+        };
         compress_blocking(&input, &cfg, &output).unwrap();
 
         let original_size = std::fs::metadata(&input).unwrap().len();
         let compressed_size = std::fs::metadata(&output).unwrap().len();
-        assert!(compressed_size < original_size, "compressed should be smaller");
+        assert!(
+            compressed_size < original_size,
+            "compressed should be smaller"
+        );
 
         std::fs::remove_file(&input).ok();
         std::fs::remove_file(&output).ok();

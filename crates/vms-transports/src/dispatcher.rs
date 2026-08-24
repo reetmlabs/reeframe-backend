@@ -43,14 +43,30 @@ impl TransportDispatcher {
         progress_tx: Option<&UnboundedSender<TransferProgress>>,
     ) -> NodeOutput {
         match dest.dest_type {
-            DestinationType::Local => local::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
-            DestinationType::S3    => s3::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
-            DestinationType::Sftp  => sftp::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
-            DestinationType::Smb      => smb::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
-            DestinationType::Telegram => telegram::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
-            DestinationType::Webhook  => webhook::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
-            DestinationType::Email    => email::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
-            DestinationType::Slack    => slack::deliver(node_id, dest, transport_cfg, input, progress_tx).await,
+            DestinationType::Local => {
+                local::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
+            DestinationType::S3 => {
+                s3::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
+            DestinationType::Sftp => {
+                sftp::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
+            DestinationType::Smb => {
+                smb::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
+            DestinationType::Telegram => {
+                telegram::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
+            DestinationType::Webhook => {
+                webhook::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
+            DestinationType::Email => {
+                email::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
+            DestinationType::Slack => {
+                slack::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+            }
             ref other => NodeOutput::failure(
                 node_id,
                 format!("{:?} transport is not yet implemented", other),

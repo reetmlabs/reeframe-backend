@@ -65,19 +65,28 @@ pub async fn deliver(
     let bucket = match cfg.get("bucket").and_then(|v| v.as_str()) {
         Some(b) => b.to_string(),
         None => {
-            return NodeOutput::failure(node_id, "s3 transport: destination config missing \"bucket\"")
+            return NodeOutput::failure(
+                node_id,
+                "s3 transport: destination config missing \"bucket\"",
+            )
         }
     };
     let access_key = match cfg.get("access_key_id").and_then(|v| v.as_str()) {
         Some(k) => k.to_string(),
         None => {
-            return NodeOutput::failure(node_id, "s3 transport: destination config missing \"access_key_id\"")
+            return NodeOutput::failure(
+                node_id,
+                "s3 transport: destination config missing \"access_key_id\"",
+            )
         }
     };
     let secret_key = match cfg.get("secret_access_key").and_then(|v| v.as_str()) {
         Some(k) => k.to_string(),
         None => {
-            return NodeOutput::failure(node_id, "s3 transport: destination config missing \"secret_access_key\"")
+            return NodeOutput::failure(
+                node_id,
+                "s3 transport: destination config missing \"secret_access_key\"",
+            )
         }
     };
 
@@ -86,7 +95,10 @@ pub async fn deliver(
         .and_then(|v| v.as_str())
         .unwrap_or("us-east-1")
         .to_string();
-    let endpoint = cfg.get("endpoint").and_then(|v| v.as_str()).map(str::to_string);
+    let endpoint = cfg
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let path_style = cfg
         .get("path_style_access")
         .and_then(|v| v.as_bool())
@@ -111,7 +123,9 @@ pub async fn deliver(
 
             let built = match builder.build() {
                 Ok(s) => Arc::new(s),
-                Err(e) => return NodeOutput::failure(node_id, format!("s3 transport: build client: {e}")),
+                Err(e) => {
+                    return NodeOutput::failure(node_id, format!("s3 transport: build client: {e}"))
+                }
             };
             s3_clients().insert(dest.id, built.clone());
             built
@@ -187,7 +201,8 @@ pub async fn deliver(
 
     // -- Upload artifact or text --
     if let Some(src) = artifact {
-        match stream_file_to_s3(&*store, src, &object_path, node_id, ctx.run_id, progress_tx).await {
+        match stream_file_to_s3(&*store, src, &object_path, node_id, ctx.run_id, progress_tx).await
+        {
             Ok(()) => {
                 let object_url = format!("s3://{}/{}", bucket, key);
                 tracing::info!(
@@ -197,8 +212,9 @@ pub async fn deliver(
                     key     = %key,
                     "S3 transport: artifact uploaded"
                 );
-                NodeOutput::success(node_id)
-                    .with_metadata(serde_json::json!({ "s3_url": object_url, "bucket": bucket, "key": key }))
+                NodeOutput::success(node_id).with_metadata(
+                    serde_json::json!({ "s3_url": object_url, "bucket": bucket, "key": key }),
+                )
             }
             Err(e) => NodeOutput::failure(node_id, format!("s3 transport: {e}")),
         }
@@ -231,13 +247,17 @@ pub async fn deliver(
                 }
                 let object_url = format!("s3://{}/{}", bucket, key);
                 tracing::info!(node_id = %node_id, dest_id = %dest.id, bucket = %bucket, key = %key, "S3 transport: text content uploaded");
-                NodeOutput::success(node_id)
-                    .with_metadata(serde_json::json!({ "s3_url": object_url, "bucket": bucket, "key": key }))
+                NodeOutput::success(node_id).with_metadata(
+                    serde_json::json!({ "s3_url": object_url, "bucket": bucket, "key": key }),
+                )
             }
             Err(e) => NodeOutput::failure(node_id, format!("s3 transport: put text: {e}")),
         }
     } else {
-        NodeOutput::failure(node_id, "s3 transport: no artifact or text in parent outputs")
+        NodeOutput::failure(
+            node_id,
+            "s3 transport: no artifact or text in parent outputs",
+        )
     }
 }
 
@@ -265,7 +285,10 @@ async fn stream_file_to_s3(
     let mut bytes_sent: u64 = 0;
 
     loop {
-        let n = file.read(&mut buf).await.map_err(|e| format!("read: {e}"))?;
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
             break;
         }
@@ -277,10 +300,18 @@ async fn stream_file_to_s3(
         bytes_sent += n as u64;
 
         if let Some(tx) = progress_tx {
-            let _ = tx.send(TransferProgress { node_id, run_id, bytes_sent, total_bytes });
+            let _ = tx.send(TransferProgress {
+                node_id,
+                run_id,
+                bytes_sent,
+                total_bytes,
+            });
         }
     }
 
-    upload.complete().await.map_err(|e| format!("finalize multipart: {e}"))?;
+    upload
+        .complete()
+        .await
+        .map_err(|e| format!("finalize multipart: {e}"))?;
     Ok(())
 }

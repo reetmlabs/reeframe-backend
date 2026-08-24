@@ -65,8 +65,12 @@ pub fn wire_decodebin(
         };
 
         if s.name().starts_with("video/") {
-            let Some(sink) = video_sink_weak.upgrade() else { return };
-            let Some(sink_pad) = sink.static_pad("sink") else { return };
+            let Some(sink) = video_sink_weak.upgrade() else {
+                return;
+            };
+            let Some(sink_pad) = sink.static_pad("sink") else {
+                return;
+            };
             if !sink_pad.is_linked() {
                 if let Err(e) = pad.link(&sink_pad) {
                     tracing::warn!("wire_decodebin: video link failed: {e}");
@@ -75,7 +79,9 @@ pub fn wire_decodebin(
         } else if s.name().starts_with("audio/") {
             // Sink audio to fakesink — keeps the pipeline from stalling when
             // we only need the video stream.
-            let Some(pl) = pipeline_weak.upgrade() else { return };
+            let Some(pl) = pipeline_weak.upgrade() else {
+                return;
+            };
             match gstreamer::ElementFactory::make("fakesink").build() {
                 Ok(fs) => {
                     pl.add(&fs).ok();
@@ -104,10 +110,7 @@ pub fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
             gstreamer::MessageView::Eos(_) => return Ok(()),
             gstreamer::MessageView::Error(err) => {
                 pipeline.set_state(gstreamer::State::Null).ok();
-                return Err(VmsError::Media(format!(
-                    "GStreamer error: {}",
-                    err.error()
-                )));
+                return Err(VmsError::Media(format!("GStreamer error: {}", err.error())));
             }
             _ => {}
         }

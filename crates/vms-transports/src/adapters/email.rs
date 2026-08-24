@@ -68,11 +68,19 @@ pub async fn deliver(
 
     let smtp_host = match cfg.get("smtp_host").and_then(|v| v.as_str()) {
         Some(h) => h.to_string(),
-        None => return NodeOutput::failure(node_id, "email: destination config missing \"smtp_host\""),
+        None => {
+            return NodeOutput::failure(node_id, "email: destination config missing \"smtp_host\"")
+        }
     };
     let smtp_port = cfg.get("smtp_port").and_then(|v| v.as_u64()).unwrap_or(587) as u16;
-    let username = cfg.get("username").and_then(|v| v.as_str()).map(str::to_string);
-    let password = cfg.get("password").and_then(|v| v.as_str()).map(str::to_string);
+    let username = cfg
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let password = cfg
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let from_addr = match cfg.get("from").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => return NodeOutput::failure(node_id, "email: destination config missing \"from\""),
@@ -86,7 +94,11 @@ pub async fn deliver(
         .and_then(|v| v.as_str())
         .unwrap_or("Reeframe notification")
         .to_string();
-    let tls_mode = cfg.get("tls").and_then(|v| v.as_str()).unwrap_or("starttls").to_string();
+    let tls_mode = cfg
+        .get("tls")
+        .and_then(|v| v.as_str())
+        .unwrap_or("starttls")
+        .to_string();
 
     // -- Template context --
     let ctx = &input.trigger_ctx;
@@ -111,14 +123,21 @@ pub async fn deliver(
     // -- Render subject --
     let subject = match env.render_str(&subject_tpl, &tpl_ctx) {
         Ok(s) => s,
-        Err(e) => return NodeOutput::failure(node_id, format!("email: subject render failed: {e}")),
+        Err(e) => {
+            return NodeOutput::failure(node_id, format!("email: subject render failed: {e}"))
+        }
     };
 
     // -- Render body --
     let body_text = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
         Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
             Ok(s) => s,
-            Err(e) => return NodeOutput::failure(node_id, format!("email: message_template render failed: {e}")),
+            Err(e) => {
+                return NodeOutput::failure(
+                    node_id,
+                    format!("email: message_template render failed: {e}"),
+                )
+            }
         },
         None => input.first_text().unwrap_or("").to_string(),
     };
@@ -129,12 +148,19 @@ pub async fn deliver(
         Err(e) => return NodeOutput::failure(node_id, format!("email: invalid from address: {e}")),
     };
 
-    let mut builder = Message::builder().from(from_mailbox).subject(subject.clone());
+    let mut builder = Message::builder()
+        .from(from_mailbox)
+        .subject(subject.clone());
 
     for addr in to_raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let mailbox: lettre::message::Mailbox = match addr.parse() {
             Ok(m) => m,
-            Err(e) => return NodeOutput::failure(node_id, format!("email: invalid to address \"{addr}\": {e}")),
+            Err(e) => {
+                return NodeOutput::failure(
+                    node_id,
+                    format!("email: invalid to address \"{addr}\": {e}"),
+                )
+            }
         };
         builder = builder.to(mailbox);
     }
@@ -150,10 +176,13 @@ pub async fn deliver(
             Err(e) => return NodeOutput::failure(node_id, format!("email: read artifact: {e}")),
         };
         let mime = mime_from_path(src);
-        let attachment = Attachment::new(artifact_name.to_string())
-            .body(file_bytes, mime);
+        let attachment = Attachment::new(artifact_name.to_string()).body(file_bytes, mime);
 
-        match builder.multipart(MultiPart::mixed().singlepart(text_part).singlepart(attachment)) {
+        match builder.multipart(
+            MultiPart::mixed()
+                .singlepart(text_part)
+                .singlepart(attachment),
+        ) {
             Ok(m) => m,
             Err(e) => return NodeOutput::failure(node_id, format!("email: build message: {e}")),
         }
@@ -165,18 +194,23 @@ pub async fn deliver(
     };
 
     // -- Build SMTP transport (cached by destination ID) --
-    let transport: Arc<AsyncSmtpTransport<Tokio1Executor>> =
-        match smtp_clients().get(&dest.id) {
-            Some(cached) => cached.clone(),
-            None => {
-                let built = match build_transport(&smtp_host, smtp_port, &tls_mode, username, password) {
-                    Ok(t) => Arc::new(t),
-                    Err(e) => return NodeOutput::failure(node_id, format!("email: build smtp transport: {e}")),
-                };
-                smtp_clients().insert(dest.id, built.clone());
-                built
-            }
-        };
+    let transport: Arc<AsyncSmtpTransport<Tokio1Executor>> = match smtp_clients().get(&dest.id) {
+        Some(cached) => cached.clone(),
+        None => {
+            let built = match build_transport(&smtp_host, smtp_port, &tls_mode, username, password)
+            {
+                Ok(t) => Arc::new(t),
+                Err(e) => {
+                    return NodeOutput::failure(
+                        node_id,
+                        format!("email: build smtp transport: {e}"),
+                    )
+                }
+            };
+            smtp_clients().insert(dest.id, built.clone());
+            built
+        }
+    };
 
     // -- Send --
     match transport.send(message).await {
@@ -224,10 +258,10 @@ fn build_transport(
 fn mime_from_path(path: &std::path::PathBuf) -> ContentType {
     match path.extension().and_then(|e| e.to_str()) {
         Some("mp4") | Some("mov") | Some("avi") => ContentType::parse("video/mp4").unwrap(),
-        Some("jpg") | Some("jpeg")              => ContentType::parse("image/jpeg").unwrap(),
-        Some("png")                             => ContentType::parse("image/png").unwrap(),
-        Some("pdf")                             => ContentType::parse("application/pdf").unwrap(),
-        Some("txt")                             => ContentType::TEXT_PLAIN,
-        _                                       => ContentType::parse("application/octet-stream").unwrap(),
+        Some("jpg") | Some("jpeg") => ContentType::parse("image/jpeg").unwrap(),
+        Some("png") => ContentType::parse("image/png").unwrap(),
+        Some("pdf") => ContentType::parse("application/pdf").unwrap(),
+        Some("txt") => ContentType::TEXT_PLAIN,
+        _ => ContentType::parse("application/octet-stream").unwrap(),
     }
 }

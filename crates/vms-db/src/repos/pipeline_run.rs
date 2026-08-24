@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect,
+};
 use uuid::Uuid;
 use vms_core::VmsError;
 

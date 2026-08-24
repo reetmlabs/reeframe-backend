@@ -118,10 +118,7 @@ pub async fn deliver(
     }
 
     if let Err(e) = tokio::fs::create_dir_all(&output_path).await {
-        return NodeOutput::failure(
-            node_id,
-            format!("local transport: create output dir: {e}"),
-        );
+        return NodeOutput::failure(node_id, format!("local transport: create output dir: {e}"));
     }
 
     output_path.push(&filename);
@@ -166,10 +163,7 @@ pub async fn deliver(
                 );
                 NodeOutput::success(node_id).with_artifact(output_path)
             }
-            Err(e) => NodeOutput::failure(
-                node_id,
-                format!("local transport: write text: {e}"),
-            ),
+            Err(e) => NodeOutput::failure(node_id, format!("local transport: write text: {e}")),
         }
     } else {
         NodeOutput::failure(
@@ -191,11 +185,7 @@ async fn copy_with_progress(
     let mut file = tokio::fs::File::open(src)
         .await
         .map_err(|e| format!("open source: {e}"))?;
-    let total_bytes = file
-        .metadata()
-        .await
-        .map(|m| m.len())
-        .ok();
+    let total_bytes = file.metadata().await.map(|m| m.len()).ok();
 
     let mut out = tokio::fs::File::create(dst)
         .await
@@ -205,15 +195,25 @@ async fn copy_with_progress(
     let mut bytes_sent: u64 = 0;
 
     loop {
-        let n = file.read(&mut buf).await.map_err(|e| format!("read: {e}"))?;
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
             break;
         }
-        out.write_all(&buf[..n]).await.map_err(|e| format!("write: {e}"))?;
+        out.write_all(&buf[..n])
+            .await
+            .map_err(|e| format!("write: {e}"))?;
         bytes_sent += n as u64;
 
         if let Some(tx) = progress_tx {
-            let _ = tx.send(TransferProgress { node_id, run_id, bytes_sent, total_bytes });
+            let _ = tx.send(TransferProgress {
+                node_id,
+                run_id,
+                bytes_sent,
+                total_bytes,
+            });
         }
     }
 

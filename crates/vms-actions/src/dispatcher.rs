@@ -12,8 +12,8 @@ use vms_media::{MediaManager, RingBufferManager};
 
 use crate::handlers::{
     compress, delay, encrypt, extract_clip, merge_clips, ptz_move, render_notification,
-    set_stream_quality, snapshot, start_recording, stop_recording, transcode,
-    trigger_alarm_output, watermark,
+    set_stream_quality, snapshot, start_recording, stop_recording, transcode, trigger_alarm_output,
+    watermark,
 };
 
 // -- ActionContext --

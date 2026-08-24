@@ -49,11 +49,18 @@ pub async fn deliver(
 
     let bot_token = match cfg.get("bot_token").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
-        None => return NodeOutput::failure(node_id, "telegram: destination config missing \"bot_token\""),
+        None => {
+            return NodeOutput::failure(
+                node_id,
+                "telegram: destination config missing \"bot_token\"",
+            )
+        }
     };
     let chat_id = match cfg.get("chat_id").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
-        None => return NodeOutput::failure(node_id, "telegram: destination config missing \"chat_id\""),
+        None => {
+            return NodeOutput::failure(node_id, "telegram: destination config missing \"chat_id\"")
+        }
     };
 
     // -- Render message template --
@@ -76,18 +83,19 @@ pub async fn deliver(
 
     let env = Environment::new();
 
-    let message_text: Option<String> = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
-        Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                return NodeOutput::failure(
-                    node_id,
-                    format!("telegram: message_template render failed: {e}"),
-                )
-            }
-        },
-        None => input.first_text().map(str::to_string),
-    };
+    let message_text: Option<String> =
+        match transport_cfg.and_then(|c| c.message_template.as_deref()) {
+            Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    return NodeOutput::failure(
+                        node_id,
+                        format!("telegram: message_template render failed: {e}"),
+                    )
+                }
+            },
+            None => input.first_text().map(str::to_string),
+        };
 
     let base_url = format!("https://api.telegram.org/bot{bot_token}");
 
@@ -138,15 +146,26 @@ pub async fn deliver(
             Ok(r) => {
                 let status = r.status().as_u16();
                 let body = r.text().await.unwrap_or_default();
-                NodeOutput::failure(node_id, format!("telegram: sendDocument HTTP {status}: {body}"))
+                NodeOutput::failure(
+                    node_id,
+                    format!("telegram: sendDocument HTTP {status}: {body}"),
+                )
             }
-            Err(e) => NodeOutput::failure(node_id, format!("telegram: sendDocument request failed: {e}")),
+            Err(e) => NodeOutput::failure(
+                node_id,
+                format!("telegram: sendDocument request failed: {e}"),
+            ),
         }
     } else {
         // -- Send text message --
         let text = match message_text {
             Some(t) => t,
-            None => return NodeOutput::failure(node_id, "telegram: no artifact or text in parent outputs"),
+            None => {
+                return NodeOutput::failure(
+                    node_id,
+                    "telegram: no artifact or text in parent outputs",
+                )
+            }
         };
 
         let body = serde_json::json!({
@@ -169,9 +188,15 @@ pub async fn deliver(
             Ok(r) => {
                 let status = r.status().as_u16();
                 let body = r.text().await.unwrap_or_default();
-                NodeOutput::failure(node_id, format!("telegram: sendMessage HTTP {status}: {body}"))
+                NodeOutput::failure(
+                    node_id,
+                    format!("telegram: sendMessage HTTP {status}: {body}"),
+                )
             }
-            Err(e) => NodeOutput::failure(node_id, format!("telegram: sendMessage request failed: {e}")),
+            Err(e) => NodeOutput::failure(
+                node_id,
+                format!("telegram: sendMessage request failed: {e}"),
+            ),
         }
     }
 }

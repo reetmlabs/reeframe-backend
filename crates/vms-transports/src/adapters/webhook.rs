@@ -74,18 +74,19 @@ pub async fn deliver(
 
     let env = Environment::new();
 
-    let message_text: Option<String> = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
-        Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                return NodeOutput::failure(
-                    node_id,
-                    format!("webhook: message_template render failed: {e}"),
-                )
-            }
-        },
-        None => input.first_text().map(str::to_string),
-    };
+    let message_text: Option<String> =
+        match transport_cfg.and_then(|c| c.message_template.as_deref()) {
+            Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    return NodeOutput::failure(
+                        node_id,
+                        format!("webhook: message_template render failed: {e}"),
+                    )
+                }
+            },
+            None => input.first_text().map(str::to_string),
+        };
 
     // -- Build request --
     let mut req = client().post(&url);
@@ -120,8 +121,9 @@ pub async fn deliver(
             let status = r.status();
             if status.is_success() {
                 tracing::info!(node_id = %node_id, dest_id = %dest.id, %url, http_status = %status, "Webhook: delivered");
-                NodeOutput::success(node_id)
-                    .with_metadata(serde_json::json!({ "url": url, "http_status": status.as_u16() }))
+                NodeOutput::success(node_id).with_metadata(
+                    serde_json::json!({ "url": url, "http_status": status.as_u16() }),
+                )
             } else {
                 let body = r.text().await.unwrap_or_default();
                 NodeOutput::failure(node_id, format!("webhook: HTTP {status}: {body}"))

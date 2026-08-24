@@ -12,12 +12,13 @@ use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use uuid::Uuid;
 use vms_core::{
-    pipeline::CompiledPipeline,
-    Event, ScheduleMode, StatMetric, SystemSignal, TopicKey, TriggerConfig, TriggerContext,
-    TriggerType, VmsError,
+    pipeline::CompiledPipeline, Event, ScheduleMode, StatMetric, SystemSignal, TopicKey,
+    TriggerConfig, TriggerContext, TriggerType, VmsError,
 };
 
-use crate::{time_helpers, EventBus, PipelineExecutor, PipelineRegistry, pipeline_registry::RegistrySnapshot};
+use crate::{
+    pipeline_registry::RegistrySnapshot, time_helpers, EventBus, PipelineExecutor, PipelineRegistry,
+};
 
 /// Evaluates pipeline triggers and dispatches pipeline runs.
 ///
@@ -419,7 +420,10 @@ impl TriggerEvaluator {
             }
 
             match &trigger.config {
-                TriggerConfig::Event { filter, duration_secs } => {
+                TriggerConfig::Event {
+                    filter,
+                    duration_secs,
+                } => {
                     if let Some(src_id) = trigger.source_id {
                         if event.source_id != Some(src_id) {
                             continue;

@@ -47,9 +47,7 @@ pub async fn execute(
     }
 
     // -- Anchor the extraction window to the latest buffered PTS --
-    let event_pts = ring_buffer
-        .latest_pts(camera_id)
-        .unwrap_or(Duration::ZERO);
+    let event_pts = ring_buffer.latest_pts(camera_id).unwrap_or(Duration::ZERO);
 
     tracing::debug!(
         node_id = %node_id,

@@ -8,8 +8,8 @@ use vms_core::{
     VmsError,
 };
 
-use crate::dispatcher::ActionContext;
 use super::gst as gst_util;
+use crate::dispatcher::ActionContext;
 
 // -- Handler --
 
@@ -45,12 +45,11 @@ pub async fn execute(
     let in_path = input_path.clone();
     let out_path = output_path.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        transcode_blocking(&in_path, &cfg_clone, &out_path)
-    })
-    .await
-    .map_err(|e| format!("transcode task panic: {e}"))
-    .and_then(|r| r.map_err(|e| e.to_string()));
+    let result =
+        tokio::task::spawn_blocking(move || transcode_blocking(&in_path, &cfg_clone, &out_path))
+            .await
+            .map_err(|e| format!("transcode task panic: {e}"))
+            .and_then(|r| r.map_err(|e| e.to_string()));
 
     match result {
         Ok(()) => {
@@ -63,11 +62,7 @@ pub async fn execute(
 
 // -- Blocking implementation --
 
-fn transcode_blocking(
-    input: &Path,
-    cfg: &TranscodeConfig,
-    output: &Path,
-) -> Result<(), VmsError> {
+fn transcode_blocking(input: &Path, cfg: &TranscodeConfig, output: &Path) -> Result<(), VmsError> {
     gstreamer::init().ok();
 
     let Some(input_str) = input.to_str() else {
@@ -119,7 +114,9 @@ fn transcode_blocking(
             .map_err(|e| VmsError::Media(format!("capsfilter: {e}")))?;
 
         pipeline
-            .add_many([&src, &decode, &convert, &scale, &filter, &encoder, &muxer, &sink])
+            .add_many([
+                &src, &decode, &convert, &scale, &filter, &encoder, &muxer, &sink,
+            ])
             .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
 
         gstreamer::Element::link_many([&convert, &scale, &filter, &encoder, &muxer, &sink])
@@ -162,8 +159,7 @@ fn make_encoder(cfg: &TranscodeConfig) -> Result<gstreamer::Element, VmsError> {
         }
     };
 
-    let mut builder = gstreamer::ElementFactory::make(factory)
-        .property(bitrate_prop, bitrate_val);
+    let mut builder = gstreamer::ElementFactory::make(factory).property(bitrate_prop, bitrate_val);
 
     if has_preset && !cfg.preset.is_empty() {
         builder = builder.property_from_str("speed-preset", &cfg.preset);

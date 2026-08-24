@@ -51,15 +51,31 @@ pub async fn deliver(
 
     let host = match cfg.get("host").and_then(|v| v.as_str()) {
         Some(h) => h.to_string(),
-        None => return NodeOutput::failure(node_id, "sftp transport: destination config missing \"host\""),
+        None => {
+            return NodeOutput::failure(
+                node_id,
+                "sftp transport: destination config missing \"host\"",
+            )
+        }
     };
     let port = cfg.get("port").and_then(|v| v.as_u64()).unwrap_or(22) as u16;
     let username = match cfg.get("username").and_then(|v| v.as_str()) {
         Some(u) => u.to_string(),
-        None => return NodeOutput::failure(node_id, "sftp transport: destination config missing \"username\""),
+        None => {
+            return NodeOutput::failure(
+                node_id,
+                "sftp transport: destination config missing \"username\"",
+            )
+        }
     };
-    let password = cfg.get("password").and_then(|v| v.as_str()).map(str::to_string);
-    let private_key = cfg.get("private_key").and_then(|v| v.as_str()).map(str::to_string);
+    let password = cfg
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let private_key = cfg
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let key_passphrase = cfg
         .get("private_key_passphrase")
         .and_then(|v| v.as_str())
@@ -67,7 +83,12 @@ pub async fn deliver(
         .to_string();
     let remote_base = match cfg.get("remote_path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
-        None => return NodeOutput::failure(node_id, "sftp transport: destination config missing \"remote_path\""),
+        None => {
+            return NodeOutput::failure(
+                node_id,
+                "sftp transport: destination config missing \"remote_path\"",
+            )
+        }
     };
 
     if password.is_none() && private_key.is_none() {
@@ -150,7 +171,10 @@ pub async fn deliver(
     let payload = if let Some(src) = artifact {
         // Get file size for progress reporting without reading the file.
         let total_bytes = tokio::fs::metadata(src).await.map(|m| m.len()).ok();
-        SftpPayload::File { path: src.clone(), total_bytes }
+        SftpPayload::File {
+            path: src.clone(),
+            total_bytes,
+        }
     } else if let Some(text) = input.first_text() {
         let content = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
             Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
@@ -166,7 +190,10 @@ pub async fn deliver(
         };
         SftpPayload::Text(content.into_bytes())
     } else {
-        return NodeOutput::failure(node_id, "sftp transport: no artifact or text in parent outputs");
+        return NodeOutput::failure(
+            node_id,
+            "sftp transport: no artifact or text in parent outputs",
+        );
     };
 
     // -- tokio::sync::mpsc::UnboundedSender is Send — clone it into the blocking thread --
@@ -201,18 +228,25 @@ pub async fn deliver(
                 "SFTP transport: artifact uploaded"
             );
             let sftp_url = format!("sftp://{host}{remote_path}");
-            NodeOutput::success(node_id)
-                .with_metadata(serde_json::json!({ "sftp_url": sftp_url, "remote_path": remote_path }))
+            NodeOutput::success(node_id).with_metadata(
+                serde_json::json!({ "sftp_url": sftp_url, "remote_path": remote_path }),
+            )
         }
         Ok(Err(e)) => NodeOutput::failure(node_id, format!("sftp transport: {e}")),
-        Err(e) => NodeOutput::failure(node_id, format!("sftp transport: spawn_blocking panicked: {e}")),
+        Err(e) => NodeOutput::failure(
+            node_id,
+            format!("sftp transport: spawn_blocking panicked: {e}"),
+        ),
     }
 }
 
 // -- Payload enum --
 
 enum SftpPayload {
-    File { path: PathBuf, total_bytes: Option<u64> },
+    File {
+        path: PathBuf,
+        total_bytes: Option<u64>,
+    },
     Text(Vec<u8>),
 }
 
@@ -232,18 +266,19 @@ fn upload_blocking(
     progress_tx: Option<&UnboundedSender<TransferProgress>>,
 ) -> Result<String, String> {
     // -- Connect and handshake --
-    let tcp = TcpStream::connect(addr)
-        .map_err(|e| format!("connect {addr}: {e}"))?;
+    let tcp = TcpStream::connect(addr).map_err(|e| format!("connect {addr}: {e}"))?;
 
-    let mut session = Session::new()
-        .map_err(|e| format!("session init: {e}"))?;
+    let mut session = Session::new().map_err(|e| format!("session init: {e}"))?;
     session.set_tcp_stream(tcp);
-    session.handshake()
-        .map_err(|e| format!("handshake: {e}"))?;
+    session.handshake().map_err(|e| format!("handshake: {e}"))?;
 
     // -- Authenticate --
     if let Some(pem) = private_key {
-        let passphrase = if key_passphrase.is_empty() { None } else { Some(key_passphrase) };
+        let passphrase = if key_passphrase.is_empty() {
+            None
+        } else {
+            Some(key_passphrase)
+        };
         session
             .userauth_pubkey_memory(username, None, pem, passphrase)
             .map_err(|e| format!("pubkey auth: {e}"))?;
@@ -258,7 +293,8 @@ fn upload_blocking(
     }
 
     // -- Open SFTP subsystem --
-    let sftp = session.sftp()
+    let sftp = session
+        .sftp()
         .map_err(|e| format!("open sftp subsystem: {e}"))?;
 
     // -- Create remote directories --
@@ -271,8 +307,8 @@ fn upload_blocking(
 
     match payload {
         SftpPayload::File { path, total_bytes } => {
-            let mut file = std::fs::File::open(&path)
-                .map_err(|e| format!("open local file: {e}"))?;
+            let mut file =
+                std::fs::File::open(&path).map_err(|e| format!("open local file: {e}"))?;
             let mut buf = vec![0u8; CHUNK_SIZE];
             let mut bytes_sent: u64 = 0;
 
@@ -281,18 +317,27 @@ fn upload_blocking(
                 if n == 0 {
                     break;
                 }
-                remote.write_all(&buf[..n]).map_err(|e| format!("write: {e}"))?;
+                remote
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("write: {e}"))?;
                 bytes_sent += n as u64;
 
                 if let Some(tx) = progress_tx {
-                    let _ = tx.send(TransferProgress { node_id, run_id, bytes_sent, total_bytes });
+                    let _ = tx.send(TransferProgress {
+                        node_id,
+                        run_id,
+                        bytes_sent,
+                        total_bytes,
+                    });
                 }
             }
         }
 
         SftpPayload::Text(bytes) => {
             let total = bytes.len() as u64;
-            remote.write_all(&bytes).map_err(|e| format!("write text: {e}"))?;
+            remote
+                .write_all(&bytes)
+                .map_err(|e| format!("write text: {e}"))?;
             if let Some(tx) = progress_tx {
                 let _ = tx.send(TransferProgress {
                     node_id,

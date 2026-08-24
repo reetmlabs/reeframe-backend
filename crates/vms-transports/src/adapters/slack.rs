@@ -53,9 +53,18 @@ pub async fn deliver(
 ) -> NodeOutput {
     let cfg = &dest.config;
 
-    let webhook_url = cfg.get("webhook_url").and_then(|v| v.as_str()).map(str::to_string);
-    let bot_token   = cfg.get("bot_token").and_then(|v| v.as_str()).map(str::to_string);
-    let channel     = cfg.get("channel").and_then(|v| v.as_str()).map(str::to_string);
+    let webhook_url = cfg
+        .get("webhook_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let bot_token = cfg
+        .get("bot_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let channel = cfg
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     if webhook_url.is_none() && bot_token.is_none() {
         return NodeOutput::failure(
@@ -84,13 +93,19 @@ pub async fn deliver(
 
     let env = Environment::new();
 
-    let message_text: Option<String> = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
-        Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
-            Ok(s) => Some(s),
-            Err(e) => return NodeOutput::failure(node_id, format!("slack: message_template render failed: {e}")),
-        },
-        None => input.first_text().map(str::to_string),
-    };
+    let message_text: Option<String> =
+        match transport_cfg.and_then(|c| c.message_template.as_deref()) {
+            Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    return NodeOutput::failure(
+                        node_id,
+                        format!("slack: message_template render failed: {e}"),
+                    )
+                }
+            },
+            None => input.first_text().map(str::to_string),
+        };
 
     // -- Incoming Webhook mode --
     if let Some(url) = webhook_url {
@@ -103,7 +118,9 @@ pub async fn deliver(
                 }
             }
             None if artifact.is_some() => format!("_Attachment: {artifact_name}_"),
-            None => return NodeOutput::failure(node_id, "slack: no text or artifact in parent outputs"),
+            None => {
+                return NodeOutput::failure(node_id, "slack: no text or artifact in parent outputs")
+            }
         };
 
         let body = serde_json::json!({ "text": text });
@@ -111,8 +128,7 @@ pub async fn deliver(
         return match client().post(&url).json(&body).send().await {
             Ok(r) if r.status().is_success() => {
                 tracing::info!(node_id = %node_id, dest_id = %dest.id, "Slack webhook: message sent");
-                NodeOutput::success(node_id)
-                    .with_metadata(serde_json::json!({ "mode": "webhook" }))
+                NodeOutput::success(node_id).with_metadata(serde_json::json!({ "mode": "webhook" }))
             }
             Ok(r) => {
                 let status = r.status().as_u16();
@@ -131,11 +147,23 @@ pub async fn deliver(
     };
 
     if let Some(src) = artifact {
-        upload_file(client(), &token, &channel, src, artifact_name, message_text.as_deref(), node_id, dest).await
+        upload_file(
+            client(),
+            &token,
+            &channel,
+            src,
+            artifact_name,
+            message_text.as_deref(),
+            node_id,
+            dest,
+        )
+        .await
     } else {
         let text = match message_text {
             Some(t) => t,
-            None => return NodeOutput::failure(node_id, "slack: no text or artifact in parent outputs"),
+            None => {
+                return NodeOutput::failure(node_id, "slack: no text or artifact in parent outputs")
+            }
         };
         post_message(client(), &token, &channel, &text, node_id, dest).await
     }
@@ -160,20 +188,18 @@ async fn post_message(
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => {
-            match r.json::<serde_json::Value>().await {
-                Ok(json) if json["ok"].as_bool() == Some(true) => {
-                    tracing::info!(node_id = %node_id, dest_id = %dest.id, %channel, "Slack: message sent");
-                    NodeOutput::success(node_id)
-                        .with_metadata(serde_json::json!({ "mode": "bot", "channel": channel }))
-                }
-                Ok(json) => {
-                    let err = json["error"].as_str().unwrap_or("unknown").to_string();
-                    NodeOutput::failure(node_id, format!("slack chat.postMessage error: {err}"))
-                }
-                Err(e) => NodeOutput::failure(node_id, format!("slack: parse response: {e}")),
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(json) if json["ok"].as_bool() == Some(true) => {
+                tracing::info!(node_id = %node_id, dest_id = %dest.id, %channel, "Slack: message sent");
+                NodeOutput::success(node_id)
+                    .with_metadata(serde_json::json!({ "mode": "bot", "channel": channel }))
             }
-        }
+            Ok(json) => {
+                let err = json["error"].as_str().unwrap_or("unknown").to_string();
+                NodeOutput::failure(node_id, format!("slack chat.postMessage error: {err}"))
+            }
+            Err(e) => NodeOutput::failure(node_id, format!("slack: parse response: {e}")),
+        },
         Ok(r) => {
             let status = r.status().as_u16();
             NodeOutput::failure(node_id, format!("slack chat.postMessage HTTP {status}"))
@@ -208,9 +234,16 @@ async fn upload_file(
     let url_json = match url_resp {
         Ok(r) => match r.json::<serde_json::Value>().await {
             Ok(j) => j,
-            Err(e) => return NodeOutput::failure(node_id, format!("slack: parse upload URL response: {e}")),
+            Err(e) => {
+                return NodeOutput::failure(
+                    node_id,
+                    format!("slack: parse upload URL response: {e}"),
+                )
+            }
         },
-        Err(e) => return NodeOutput::failure(node_id, format!("slack: getUploadURLExternal failed: {e}")),
+        Err(e) => {
+            return NodeOutput::failure(node_id, format!("slack: getUploadURLExternal failed: {e}"))
+        }
     };
 
     if url_json["ok"].as_bool() != Some(true) {
@@ -220,7 +253,9 @@ async fn upload_file(
 
     let upload_url = match url_json["upload_url"].as_str() {
         Some(u) => u.to_string(),
-        None => return NodeOutput::failure(node_id, "slack: getUploadURLExternal missing upload_url"),
+        None => {
+            return NodeOutput::failure(node_id, "slack: getUploadURLExternal missing upload_url")
+        }
     };
     let file_id = match url_json["file_id"].as_str() {
         Some(id) => id.to_string(),
@@ -260,24 +295,32 @@ async fn upload_file(
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => {
-            match r.json::<serde_json::Value>().await {
-                Ok(json) if json["ok"].as_bool() == Some(true) => {
-                    tracing::info!(node_id = %node_id, dest_id = %dest.id, %channel, %filename, "Slack: file uploaded");
-                    NodeOutput::success(node_id)
-                        .with_metadata(serde_json::json!({ "mode": "bot", "channel": channel, "file_id": file_id }))
-                }
-                Ok(json) => {
-                    let err = json["error"].as_str().unwrap_or("unknown").to_string();
-                    NodeOutput::failure(node_id, format!("slack completeUploadExternal error: {err}"))
-                }
-                Err(e) => NodeOutput::failure(node_id, format!("slack: parse complete response: {e}")),
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(json) if json["ok"].as_bool() == Some(true) => {
+                tracing::info!(node_id = %node_id, dest_id = %dest.id, %channel, %filename, "Slack: file uploaded");
+                NodeOutput::success(node_id).with_metadata(
+                    serde_json::json!({ "mode": "bot", "channel": channel, "file_id": file_id }),
+                )
             }
-        }
+            Ok(json) => {
+                let err = json["error"].as_str().unwrap_or("unknown").to_string();
+                NodeOutput::failure(
+                    node_id,
+                    format!("slack completeUploadExternal error: {err}"),
+                )
+            }
+            Err(e) => NodeOutput::failure(node_id, format!("slack: parse complete response: {e}")),
+        },
         Ok(r) => {
             let status = r.status().as_u16();
-            NodeOutput::failure(node_id, format!("slack completeUploadExternal HTTP {status}"))
+            NodeOutput::failure(
+                node_id,
+                format!("slack completeUploadExternal HTTP {status}"),
+            )
         }
-        Err(e) => NodeOutput::failure(node_id, format!("slack: complete upload request failed: {e}")),
+        Err(e) => NodeOutput::failure(
+            node_id,
+            format!("slack: complete upload request failed: {e}"),
+        ),
     }
 }

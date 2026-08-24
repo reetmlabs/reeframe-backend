@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use uuid::Uuid;
-use vms_core::{
-    pipeline::CompiledPipeline, TopicKey, TriggerConfig, TriggerType, VmsError,
-};
+use vms_core::{pipeline::CompiledPipeline, TopicKey, TriggerConfig, TriggerType, VmsError};
 use vms_db::PipelineRepo;
 
 /// Atomic snapshot of the pipeline registry — pipeline map plus trigger index.
@@ -104,7 +102,10 @@ impl PipelineRegistry {
         let loaded = pipelines.len();
         let skipped = rows.len() - loaded;
         let trigger_index = build_trigger_index(&pipelines);
-        self.store.store(Arc::new(RegistrySnapshot { pipelines, trigger_index }));
+        self.store.store(Arc::new(RegistrySnapshot {
+            pipelines,
+            trigger_index,
+        }));
 
         if skipped > 0 {
             tracing::info!(loaded, skipped, "Pipeline registry reloaded");
