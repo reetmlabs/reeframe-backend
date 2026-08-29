@@ -793,6 +793,52 @@ impl PipelineRepo {
         trigger.delete(&self.db).await.map_err(db_err)?;
         self.recompute_refs(pipeline_id).await
     }
+
+    /// Create or update the pipeline's one trigger to match `input`, keyed by
+    /// convention — a `pipeline_triggers` row represents its pipeline's single
+    /// `trigger_root` node — rather than a stored FK, since the DAG compiler
+    /// already enforces exactly one `trigger_root` node per pipeline.
+    pub async fn upsert_node_trigger(
+        &self,
+        pipeline_id: Uuid,
+        input: CreateTrigger,
+    ) -> Result<PipelineTrigger, VmsError> {
+        // If more than one trigger row exists for this pipeline (no unique
+        // constraint enforces at most one — see the module doc comment),
+        // update the first and leave the rest alone rather than erroring.
+        let mut existing = self.load_triggers(pipeline_id).await?;
+        let Some(current) = existing.drain(..).next() else {
+            return self.create_trigger(pipeline_id, input).await;
+        };
+
+        // A trigger's variant can't change via update_trigger (by design — see
+        // its doc comment); switching trigger_type in the UI needs delete+recreate.
+        if trigger_type_from_config(&input.config) != current.trigger_type {
+            self.delete_trigger(current.id).await?;
+            return self.create_trigger(pipeline_id, input).await;
+        }
+
+        self.update_trigger(
+            current.id,
+            UpdateTrigger {
+                config: Some(input.config),
+                source_id: Some(input.source_id),
+                camera_id: Some(input.camera_id),
+                enabled: Some(input.enabled),
+            },
+        )
+        .await
+    }
+
+    /// Deletes every trigger row for `pipeline_id` — called when its
+    /// `trigger_root` node is deleted, so no stale enabled trigger survives
+    /// without a node representing it.
+    pub async fn delete_triggers_for_pipeline(&self, pipeline_id: Uuid) -> Result<(), VmsError> {
+        for t in self.load_triggers(pipeline_id).await? {
+            self.delete_trigger(t.id).await?;
+        }
+        Ok(())
+    }
 }
 
 // -- DB-to-domain translation --
@@ -1954,5 +2000,125 @@ mod tests {
 
         assert_eq!(refs.len(), 1);
         assert!(refs[0].needs_ring_buffer);
+    }
+
+    // -- upsert_node_trigger / delete_triggers_for_pipeline --
+
+    use crate::migration::Migrator;
+    use sea_orm_migration::MigratorTrait;
+    use vms_core::trigger::ScheduleMode;
+
+    async fn test_repo() -> PipelineRepo {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        PipelineRepo::new(db)
+    }
+
+    async fn make_pipeline(repo: &PipelineRepo) -> Uuid {
+        repo.create(CreatePipeline {
+            name: "test".into(),
+            description: None,
+            pipeline_type: PipelineType::User,
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    fn manual_trigger() -> CreateTrigger {
+        CreateTrigger {
+            config: TriggerConfig::Manual {
+                parameter_schema: None,
+            },
+            source_id: None,
+            camera_id: None,
+            enabled: true,
+        }
+    }
+
+    fn schedule_trigger(expr: &str) -> CreateTrigger {
+        CreateTrigger {
+            config: TriggerConfig::Schedule {
+                mode: ScheduleMode::Cron {
+                    expression: expr.into(),
+                },
+                timezone: "UTC".into(),
+            },
+            source_id: None,
+            camera_id: None,
+            enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_node_trigger_creates_when_none_exists() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let trigger = repo
+            .upsert_node_trigger(pipeline_id, manual_trigger())
+            .await
+            .unwrap();
+
+        assert_eq!(trigger.pipeline_id, pipeline_id);
+        assert_eq!(trigger.trigger_type, CoreTriggerType::Manual);
+        assert_eq!(repo.load_triggers(pipeline_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_node_trigger_updates_the_existing_row_of_the_same_variant() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let first = repo
+            .upsert_node_trigger(pipeline_id, schedule_trigger("0 * * * *"))
+            .await
+            .unwrap();
+
+        let updated = repo
+            .upsert_node_trigger(pipeline_id, schedule_trigger("*/5 * * * *"))
+            .await
+            .unwrap();
+
+        assert_eq!(updated.id, first.id);
+        assert_eq!(repo.load_triggers(pipeline_id).await.unwrap().len(), 1);
+        match updated.config {
+            TriggerConfig::Schedule {
+                mode: ScheduleMode::Cron { expression },
+                ..
+            } => assert_eq!(expression, "*/5 * * * *"),
+            other => panic!("expected schedule/cron config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_node_trigger_recreates_on_variant_change() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let first = repo
+            .upsert_node_trigger(pipeline_id, schedule_trigger("0 * * * *"))
+            .await
+            .unwrap();
+
+        let second = repo
+            .upsert_node_trigger(pipeline_id, manual_trigger())
+            .await
+            .unwrap();
+
+        assert_ne!(second.id, first.id);
+        assert_eq!(second.trigger_type, CoreTriggerType::Manual);
+        assert_eq!(repo.load_triggers(pipeline_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_triggers_for_pipeline_removes_every_row() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        repo.upsert_node_trigger(pipeline_id, manual_trigger())
+            .await
+            .unwrap();
+
+        repo.delete_triggers_for_pipeline(pipeline_id).await.unwrap();
+
+        assert!(repo.load_triggers(pipeline_id).await.unwrap().is_empty());
     }
 }

@@ -12,8 +12,8 @@
 use salvo::prelude::*;
 use serde::Deserialize;
 use uuid::Uuid;
-use vms_core::{ActionConfig, NodeType, PipelineNode, TransportConfig};
-use vms_db::repos::pipeline::{CreateNode, UpdateNode};
+use vms_core::{ActionConfig, NodeType, PipelineNode, TransportConfig, TriggerConfig};
+use vms_db::repos::pipeline::{CreateNode, CreateTrigger, UpdateNode};
 
 use crate::{
     error::{parse_body, parse_id, ApiError},
@@ -21,6 +21,23 @@ use crate::{
 };
 
 // -- Request bodies --
+
+/// Trigger fields carried by a `trigger_root` node — mirrors
+/// `pipeline_triggers::CreateTriggerBody` exactly, since saving this node is
+/// what creates/updates the pipeline's one row in that table (see
+/// `PipelineRepo::upsert_node_trigger`).
+#[derive(Deserialize)]
+pub struct NodeTriggerBody {
+    pub config: TriggerConfig,
+    pub source_id: Option<Uuid>,
+    pub camera_id: Option<Uuid>,
+    #[serde(default = "default_trigger_enabled")]
+    pub enabled: bool,
+}
+
+fn default_trigger_enabled() -> bool {
+    true
+}
 
 #[derive(Deserialize)]
 pub struct CreateNodeBody {
@@ -30,6 +47,7 @@ pub struct CreateNodeBody {
     pub destination_id: Option<Uuid>,
     pub contact_list_id: Option<Uuid>,
     pub condition_expr: Option<String>,
+    pub trigger: Option<NodeTriggerBody>,
     pub label: Option<String>,
     pub pos_x: Option<f64>,
     pub pos_y: Option<f64>,
@@ -44,6 +62,7 @@ pub struct UpdateNodeBody {
     pub destination_id: Option<Uuid>,
     pub contact_list_id: Option<Uuid>,
     pub condition_expr: Option<String>,
+    pub trigger: Option<NodeTriggerBody>,
     pub label: Option<String>,
     pub pos_x: Option<f64>,
     pub pos_y: Option<f64>,
@@ -62,6 +81,13 @@ pub async fn create_node(
     let pipeline_id = parse_id(req)?;
     let body: CreateNodeBody = parse_body(req).await?;
 
+    if body.trigger.is_some() && body.node_type != NodeType::TriggerRoot {
+        return Err(ApiError::bad_request(
+            "trigger config is only valid on a trigger_root node",
+        ));
+    }
+    let trigger = body.trigger;
+
     let node = state
         .pipeline_repo
         .create_node(
@@ -79,6 +105,21 @@ pub async fn create_node(
             },
         )
         .await?;
+
+    if let Some(t) = trigger {
+        state
+            .pipeline_repo
+            .upsert_node_trigger(
+                pipeline_id,
+                CreateTrigger {
+                    config: t.config,
+                    source_id: t.source_id,
+                    camera_id: t.camera_id,
+                    enabled: t.enabled,
+                },
+            )
+            .await?;
+    }
 
     res.status_code(StatusCode::CREATED);
     Ok(Json(node))
@@ -127,8 +168,15 @@ pub async fn update_node(
 
     // Confirm the node belongs to this pipeline before touching it — without
     // this, a valid node_id under the wrong pipeline_id in the URL would
-    // silently update someone else's node.
-    require_node_in_pipeline(state, pipeline_id, node_id).await?;
+    // silently update someone else's node. Also needed to know its node_type,
+    // since `trigger` is only valid on a trigger_root node.
+    let existing = require_node_in_pipeline(state, pipeline_id, node_id).await?;
+    if body.trigger.is_some() && existing.node_type != NodeType::TriggerRoot {
+        return Err(ApiError::bad_request(
+            "trigger config is only valid on a trigger_root node",
+        ));
+    }
+    let trigger = body.trigger;
 
     let node = state
         .pipeline_repo
@@ -147,6 +195,21 @@ pub async fn update_node(
         )
         .await?;
 
+    if let Some(t) = trigger {
+        state
+            .pipeline_repo
+            .upsert_node_trigger(
+                pipeline_id,
+                CreateTrigger {
+                    config: t.config,
+                    source_id: t.source_id,
+                    camera_id: t.camera_id,
+                    enabled: t.enabled,
+                },
+            )
+            .await?;
+    }
+
     Ok(Json(node))
 }
 
@@ -163,8 +226,17 @@ pub async fn delete_node(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let (pipeline_id, node_id) = parse_pipeline_and_node_id(req)?;
 
-    require_node_in_pipeline(state, pipeline_id, node_id).await?;
+    let existing = require_node_in_pipeline(state, pipeline_id, node_id).await?;
     state.pipeline_repo.delete_node(node_id).await?;
+    if existing.node_type == NodeType::TriggerRoot {
+        // No trigger_root node left to represent it — drop the pipeline's
+        // trigger row(s) too, rather than leaving an enabled trigger that
+        // silently keeps holding a source/camera resource open.
+        state
+            .pipeline_repo
+            .delete_triggers_for_pipeline(pipeline_id)
+            .await?;
+    }
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
@@ -185,14 +257,11 @@ async fn require_node_in_pipeline(
     state: &AppState,
     pipeline_id: Uuid,
     node_id: Uuid,
-) -> Result<(), ApiError> {
-    let belongs = state
+) -> Result<PipelineNode, ApiError> {
+    state
         .pipeline_repo
         .get_node(node_id)
         .await?
-        .is_some_and(|n| n.pipeline_id == pipeline_id);
-    if !belongs {
-        return Err(ApiError::not_found(format!("node {node_id} not found")));
-    }
-    Ok(())
+        .filter(|n| n.pipeline_id == pipeline_id)
+        .ok_or_else(|| ApiError::not_found(format!("node {node_id} not found")))
 }

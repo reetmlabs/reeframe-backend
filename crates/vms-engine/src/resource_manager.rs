@@ -88,21 +88,34 @@ impl ResourceManager {
     pub async fn recover(&self, registry: &PipelineRegistry) -> Result<(), VmsError> {
         let snapshot = registry.snapshot();
 
+        // Every acquire() below is logged-and-continued rather than `?`-propagated:
+        // one stale/unreachable resource (a deleted camera still referenced by an
+        // enabled pipeline, a broker that's down, ...) must not block every other
+        // pipeline's resources from starting too.
         for pipeline in snapshot.pipelines.values() {
             for cam_ref in &pipeline.camera_refs {
-                self.acquire(ResourceId::CameraPipeline(cam_ref.camera_id))
-                    .await?;
+                if let Err(e) = self.acquire(ResourceId::CameraPipeline(cam_ref.camera_id)).await {
+                    tracing::error!(pipeline_id = %pipeline.id, camera_id = %cam_ref.camera_id,
+                        error = %e, "Failed to acquire camera pipeline during recovery — continuing");
+                }
                 if cam_ref.needs_ring_buffer {
-                    self.acquire(ResourceId::RingBuffer(cam_ref.camera_id))
-                        .await?;
+                    if let Err(e) = self.acquire(ResourceId::RingBuffer(cam_ref.camera_id)).await {
+                        tracing::error!(pipeline_id = %pipeline.id, camera_id = %cam_ref.camera_id,
+                            error = %e, "Failed to acquire ring buffer during recovery — continuing");
+                    }
                 }
                 if cam_ref.needs_analytics {
-                    self.acquire(ResourceId::AnalyticsBranch(cam_ref.camera_id))
-                        .await?;
+                    if let Err(e) = self.acquire(ResourceId::AnalyticsBranch(cam_ref.camera_id)).await {
+                        tracing::error!(pipeline_id = %pipeline.id, camera_id = %cam_ref.camera_id,
+                            error = %e, "Failed to acquire analytics branch during recovery — continuing");
+                    }
                 }
             }
             for &source_id in &pipeline.source_refs {
-                self.acquire(ResourceId::Source(source_id)).await?;
+                if let Err(e) = self.acquire(ResourceId::Source(source_id)).await {
+                    tracing::error!(pipeline_id = %pipeline.id, source_id = %source_id,
+                        error = %e, "Failed to acquire source during recovery — continuing");
+                }
             }
         }
 
