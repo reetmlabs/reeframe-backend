@@ -7,6 +7,7 @@ pub mod merge_clips;
 pub mod ptz_move;
 pub mod render_notification;
 pub mod set_stream_quality;
+pub mod skip;
 pub mod snapshot;
 pub mod start_recording;
 pub mod stop_recording;

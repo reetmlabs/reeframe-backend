@@ -414,6 +414,9 @@ pub enum ActionConfig {
     SetStreamQuality(SetStreamQualityConfig),
     /// Pulse an alarm output relay on a camera or NVR.
     TriggerAlarmOutput(TriggerAlarmOutputConfig),
+    /// No-op: does nothing and always succeeds. Useful as a condition
+    /// branch's terminus when no real action is needed.
+    Skip,
 }
 
 impl ActionConfig {
@@ -437,6 +440,7 @@ impl ActionConfig {
             Self::StopRecording(_) => "stop_recording",
             Self::SetStreamQuality(_) => "set_stream_quality",
             Self::TriggerAlarmOutput(_) => "trigger_alarm_output",
+            Self::Skip => "skip",
         }
     }
 }

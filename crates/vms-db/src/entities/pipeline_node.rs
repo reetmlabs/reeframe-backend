@@ -53,6 +53,8 @@ pub enum ActionType {
     SetStreamQuality,
     #[sea_orm(string_value = "trigger_alarm_output")]
     TriggerAlarmOutput,
+    #[sea_orm(string_value = "skip")]
+    Skip,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]

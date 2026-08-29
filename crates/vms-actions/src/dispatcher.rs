@@ -12,8 +12,8 @@ use vms_media::{MediaManager, RingBufferManager};
 
 use crate::handlers::{
     compress, delay, encrypt, extract_clip, merge_clips, ptz_move, render_notification,
-    set_stream_quality, snapshot, start_recording, stop_recording, transcode, trigger_alarm_output,
-    watermark,
+    set_stream_quality, skip, snapshot, start_recording, stop_recording, transcode,
+    trigger_alarm_output, watermark,
 };
 
 // -- ActionContext --
@@ -93,6 +93,7 @@ impl ActionDispatcher {
             ActionConfig::TriggerAlarmOutput(cfg) => {
                 trigger_alarm_output::execute(node_id, cfg, input, ctx).await
             }
+            ActionConfig::Skip => skip::execute(node_id).await,
         }
     }
 }

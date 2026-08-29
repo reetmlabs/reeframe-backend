@@ -838,6 +838,7 @@ fn action_type_from_config(cfg: &ActionConfig) -> pipeline_node::ActionType {
         ActionConfig::StopRecording(_) => Db::StopRecording,
         ActionConfig::SetStreamQuality(_) => Db::SetStreamQuality,
         ActionConfig::TriggerAlarmOutput(_) => Db::TriggerAlarmOutput,
+        ActionConfig::Skip => Db::Skip,
     }
 }
 
@@ -863,7 +864,8 @@ fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid> {
         | ActionConfig::Watermark(_)
         | ActionConfig::RenderNotification(_)
         | ActionConfig::Delay(_)
-        | ActionConfig::TriggerAlarmOutput(_) => None,
+        | ActionConfig::TriggerAlarmOutput(_)
+        | ActionConfig::Skip => None,
     }
 }
 
@@ -1396,6 +1398,10 @@ mod tests {
         ActionConfig::Delay(DelayConfig { duration_secs: 5 })
     }
 
+    fn skip_config() -> ActionConfig {
+        ActionConfig::Skip
+    }
+
     #[test]
     fn action_node_requires_action_config() {
         let result = validate_create_shape(&CoreNodeType::Action, &None, &None, None, &None);
@@ -1515,6 +1521,10 @@ mod tests {
         assert_eq!(
             action_type_from_config(&delay_config()),
             pipeline_node::ActionType::Delay
+        );
+        assert_eq!(
+            action_type_from_config(&skip_config()),
+            pipeline_node::ActionType::Skip
         );
         assert_eq!(
             node_type_from_db(&node_type_to_db(&CoreNodeType::Condition)),
@@ -1856,6 +1866,7 @@ mod tests {
     #[test]
     fn camera_id_from_action_config_returns_none_for_artifact_only_actions() {
         assert_eq!(camera_id_from_action_config(&delay_config()), None);
+        assert_eq!(camera_id_from_action_config(&skip_config()), None);
     }
 
     #[test]
