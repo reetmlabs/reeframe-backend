@@ -15,6 +15,7 @@ use vms_core::{
     pipeline::CompiledPipeline, Event, ScheduleMode, StatMetric, SystemSignal, TopicKey,
     TriggerConfig, TriggerContext, TriggerType, VmsError,
 };
+use vms_db::repos::PipelineRepo;
 
 use crate::{
     pipeline_registry::RegistrySnapshot, time_helpers, EventBus, PipelineExecutor, PipelineRegistry,
@@ -32,6 +33,11 @@ pub struct TriggerEvaluator {
     registry: Arc<PipelineRegistry>,
     event_bus: Arc<EventBus>,
     executor: Option<Arc<PipelineExecutor>>,
+    /// `None` only in the test-only constructor — production always has one,
+    /// used to persist [`build_event_context`]/filter-eval failures so a bad
+    /// filter is visible via the trigger's own API representation instead of
+    /// only a `tracing::warn!` line.
+    pipeline_repo: Option<PipelineRepo>,
     /// Holds the cron scheduler after `start_schedulers` is called.
     cron_scheduler: Mutex<Option<JobScheduler>>,
     /// JoinHandles for all spawned interval trigger tasks.
@@ -50,11 +56,13 @@ impl TriggerEvaluator {
         registry: Arc<PipelineRegistry>,
         event_bus: Arc<EventBus>,
         executor: Arc<PipelineExecutor>,
+        pipeline_repo: PipelineRepo,
     ) -> Arc<Self> {
         Arc::new(Self {
             registry,
             event_bus,
             executor: Some(executor),
+            pipeline_repo: Some(pipeline_repo),
             cron_scheduler: Mutex::new(None),
             interval_tasks: std::sync::Mutex::new(Vec::new()),
             stat_cooldowns: DashMap::new(),
@@ -73,6 +81,7 @@ impl TriggerEvaluator {
             registry,
             event_bus,
             executor: None,
+            pipeline_repo: None,
             cron_scheduler: Mutex::new(None),
             interval_tasks: std::sync::Mutex::new(Vec::new()),
             stat_cooldowns: DashMap::new(),
@@ -325,7 +334,7 @@ impl TriggerEvaluator {
                 loop {
                     tokio::select! {
                         result = rx.recv() => match result {
-                            Ok(event) => ev.evaluate_event(&TopicKey::System, &event),
+                            Ok(event) => ev.evaluate_event(&TopicKey::System, &event).await,
                             Err(RecvError::Lagged(n)) => {
                                 tracing::warn!(
                                     missed = n,
@@ -351,7 +360,7 @@ impl TriggerEvaluator {
                 loop {
                     tokio::select! {
                         result = rx.recv() => match result {
-                            Ok(event) => ev.evaluate_event(&TopicKey::Camera(cam_id), &event),
+                            Ok(event) => ev.evaluate_event(&TopicKey::Camera(cam_id), &event).await,
                             Err(RecvError::Lagged(n)) => {
                                 tracing::warn!(missed = n, %cam_id, "camera event listener lagged");
                             }
@@ -372,7 +381,7 @@ impl TriggerEvaluator {
                 loop {
                     tokio::select! {
                         result = rx.recv() => match result {
-                            Ok(event) => ev.evaluate_event(&TopicKey::Source(src_id), &event),
+                            Ok(event) => ev.evaluate_event(&TopicKey::Source(src_id), &event).await,
                             Err(RecvError::Lagged(n)) => {
                                 tracing::warn!(missed = n, %src_id, "source event listener lagged");
                             }
@@ -393,7 +402,7 @@ impl TriggerEvaluator {
     ///
     /// Uses the pre-built trigger index for O(1) dispatch — only pipelines with
     /// a matching `(topic, trigger_type)` entry are examined.
-    fn evaluate_event(&self, topic: &TopicKey, event: &Event) {
+    async fn evaluate_event(&self, topic: &TopicKey, event: &Event) {
         let snapshot = self.registry.snapshot();
 
         let trigger_type = match topic {
@@ -438,8 +447,14 @@ impl TriggerEvaluator {
                     if let Some(expr) = filter {
                         let ctx = build_event_context(event);
                         match eval_boolean_with_context(expr, &ctx) {
-                            Ok(true) => {}
-                            Ok(false) => continue,
+                            Ok(matched) => {
+                                if trigger.last_error.is_some() {
+                                    self.clear_trigger_error(trigger_id).await;
+                                }
+                                if !matched {
+                                    continue;
+                                }
+                            }
                             Err(e) => {
                                 tracing::warn!(
                                     pipeline_id = %pipeline_id,
@@ -447,6 +462,9 @@ impl TriggerEvaluator {
                                     error       = %e,
                                     "trigger filter expression failed — skipping"
                                 );
+                                if trigger.last_error.as_deref() != Some(e.to_string().as_str()) {
+                                    self.set_trigger_error(trigger_id, e.to_string()).await;
+                                }
                                 continue;
                             }
                         }
@@ -622,6 +640,29 @@ impl TriggerEvaluator {
 
     // -- Pipeline dispatch --
 
+    /// Persist a filter-evaluation failure so it's visible via the
+    /// trigger's own API representation instead of only a log line. A no-op
+    /// in test builds, where no [`PipelineRepo`] is wired.
+    async fn set_trigger_error(&self, trigger_id: Uuid, error: String) {
+        let Some(repo) = &self.pipeline_repo else {
+            return;
+        };
+        if let Err(e) = repo.set_trigger_error(trigger_id, Some(error)).await {
+            tracing::warn!(%trigger_id, error = %e, "failed to persist trigger filter error");
+        }
+    }
+
+    /// Clear a previously recorded filter-evaluation failure once the
+    /// filter evaluates successfully again.
+    async fn clear_trigger_error(&self, trigger_id: Uuid) {
+        let Some(repo) = &self.pipeline_repo else {
+            return;
+        };
+        if let Err(e) = repo.set_trigger_error(trigger_id, None).await {
+            tracing::warn!(%trigger_id, error = %e, "failed to clear trigger filter error");
+        }
+    }
+
     /// Dispatch a pipeline run for the given trigger context.
     ///
     /// Looks up the pipeline in the registry and spawns an async task that
@@ -671,6 +712,8 @@ fn build_event_context(event: &Event) -> HashMapContext {
         EvalValue::String(event.event_type.clone()),
     )
     .ok();
+    ctx.set_value("event.topic".into(), EvalValue::String(event.topic.clone()))
+        .ok();
 
     if let serde_json::Value::Object(map) = &event.payload {
         for (k, v) in map {
@@ -735,6 +778,17 @@ mod tests {
         assert_eq!(result, Ok(true));
     }
 
+    // A filter referencing event.topic must resolve, not error out with
+    // VariableIdentifierNotFound (regression: topic was never added to the
+    // eval context).
+    #[test]
+    fn event_context_filter_matches_on_topic() {
+        let event = make_event("object_detected", json!({"label": "person"}));
+        let ctx = build_event_context(&event);
+        let result = eval_boolean_with_context(r#"event.topic == "camera/test/event""#, &ctx);
+        assert_eq!(result, Ok(true));
+    }
+
     // A filter that does not match should return false, not an error.
     #[test]
     fn event_context_filter_does_not_match() {
@@ -789,6 +843,8 @@ mod tests {
                     sustained_secs,
                     cooldown_secs,
                 },
+                last_error: None,
+                last_error_at: None,
             }],
             camera_refs: vec![],
             source_refs: vec![],

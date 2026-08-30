@@ -698,6 +698,8 @@ impl PipelineRepo {
             config: Set(serde_json::to_value(&input.config)?),
             enabled: Set(input.enabled),
             created_at: Set(now()),
+            last_error: Set(None),
+            last_error_at: Set(None),
         }
         .insert(&self.db)
         .await
@@ -717,6 +719,31 @@ impl PipelineRepo {
             return Ok(None);
         };
         trigger_from_db(m).map(Some)
+    }
+
+    /// Record (or clear, passing `None`) a trigger's most recent
+    /// filter-evaluation failure, so a bad `evalexpr` filter is visible via
+    /// the trigger's own API representation instead of only a
+    /// `tracing::warn!` line. Silently no-ops if the trigger has since been
+    /// deleted — the evaluator's next tick will simply stop reporting it.
+    pub async fn set_trigger_error(
+        &self,
+        trigger_id: Uuid,
+        error: Option<String>,
+    ) -> Result<(), VmsError> {
+        let Some(existing) = pipeline_trigger::Entity::find_by_id(trigger_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+        else {
+            return Ok(());
+        };
+
+        let mut active: pipeline_trigger::ActiveModel = existing.into();
+        active.last_error_at = Set(error.is_some().then(now));
+        active.last_error = Set(error);
+        active.update(&self.db).await.map_err(db_err)?;
+        Ok(())
     }
 
     /// Partial update. `config` cannot change trigger type (see
@@ -1409,6 +1436,8 @@ fn trigger_from_db(m: pipeline_trigger::Model) -> Result<PipelineTrigger, VmsErr
         camera_id: m.camera_id,
         config,
         enabled: m.enabled,
+        last_error: m.last_error,
+        last_error_at: m.last_error_at.map(|dt| dt.with_timezone(&chrono::Utc)),
     })
 }
 
@@ -1876,6 +1905,8 @@ mod tests {
             camera_id,
             config,
             enabled,
+            last_error: None,
+            last_error_at: None,
         }
     }
 
@@ -2117,8 +2148,59 @@ mod tests {
             .await
             .unwrap();
 
-        repo.delete_triggers_for_pipeline(pipeline_id).await.unwrap();
+        repo.delete_triggers_for_pipeline(pipeline_id)
+            .await
+            .unwrap();
 
         assert!(repo.load_triggers(pipeline_id).await.unwrap().is_empty());
+    }
+
+    // -- set_trigger_error --
+
+    #[tokio::test]
+    async fn set_trigger_error_records_message_and_timestamp() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let trigger = repo
+            .create_trigger(pipeline_id, manual_trigger())
+            .await
+            .unwrap();
+        assert_eq!(trigger.last_error, None);
+
+        repo.set_trigger_error(trigger.id, Some("boom".into()))
+            .await
+            .unwrap();
+
+        let reloaded = repo.get_trigger(trigger.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.last_error.as_deref(), Some("boom"));
+        assert!(reloaded.last_error_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn set_trigger_error_with_none_clears_it() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let trigger = repo
+            .create_trigger(pipeline_id, manual_trigger())
+            .await
+            .unwrap();
+        repo.set_trigger_error(trigger.id, Some("boom".into()))
+            .await
+            .unwrap();
+
+        repo.set_trigger_error(trigger.id, None).await.unwrap();
+
+        let reloaded = repo.get_trigger(trigger.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.last_error, None);
+        assert_eq!(reloaded.last_error_at, None);
+    }
+
+    #[tokio::test]
+    async fn set_trigger_error_on_deleted_trigger_is_a_noop() {
+        let repo = test_repo().await;
+        let result = repo
+            .set_trigger_error(Uuid::new_v4(), Some("boom".into()))
+            .await;
+        assert!(result.is_ok());
     }
 }

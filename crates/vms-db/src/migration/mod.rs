@@ -29,6 +29,7 @@ mod m20260101_000026_create_events;
 mod m20260101_000027_add_camera_retention_policy;
 mod m20260101_000028_create_daily_recording_coverage;
 mod m20260101_000029_add_desired_recording;
+mod m20260101_000030_add_pipeline_trigger_last_error;
 
 pub struct Migrator;
 
@@ -65,6 +66,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000027_add_camera_retention_policy::Migration),
             Box::new(m20260101_000028_create_daily_recording_coverage::Migration),
             Box::new(m20260101_000029_add_desired_recording::Migration),
+            Box::new(m20260101_000030_add_pipeline_trigger_last_error::Migration),
         ]
     }
 }

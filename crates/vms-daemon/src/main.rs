@@ -528,6 +528,7 @@ async fn main() -> anyhow::Result<()> {
         pipeline_registry.clone(),
         event_bus.clone(),
         pipeline_executor,
+        pipeline_repo.clone(),
     );
 
     trigger_evaluator.clone().start_event_listener();

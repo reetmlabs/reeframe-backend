@@ -22,6 +22,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -169,6 +170,10 @@ pub struct PipelineTrigger {
     /// Whether this trigger is currently active.  Disabled triggers are loaded
     /// but skipped by the Trigger Manager.
     pub enabled: bool,
+    /// Message from the most recent filter-evaluation failure (bad syntax,
+    /// unknown identifier); `None` once the filter evaluates successfully.
+    pub last_error: Option<String>,
+    pub last_error_at: Option<DateTime<Utc>>,
 }
 
 // -- Compiled forms held in the registry --

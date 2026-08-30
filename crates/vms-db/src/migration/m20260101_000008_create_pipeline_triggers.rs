@@ -125,4 +125,6 @@ pub enum PipelineTrigger {
     Config,
     Enabled,
     CreatedAt,
+    LastError,
+    LastErrorAt,
 }
