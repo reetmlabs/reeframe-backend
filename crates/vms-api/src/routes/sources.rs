@@ -169,7 +169,14 @@ pub async fn delete_source(
 ) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
+
+    // pipeline_triggers.source_id is ON DELETE RESTRICT, so any trigger still
+    // pointing at this source must be dropped first, same as a deleted
+    // trigger_root node drops its pipeline's triggers.
+    state.pipeline_repo.delete_triggers_for_source(id).await?;
     state.source_repo.delete(id).await?;
+    state.pipeline_registry.reload().await?;
+
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }

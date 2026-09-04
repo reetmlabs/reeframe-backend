@@ -866,6 +866,21 @@ impl PipelineRepo {
         }
         Ok(())
     }
+
+    /// Deletes every trigger row referencing `source_id`, across all
+    /// pipelines — called before deleting a source, since `pipeline_triggers.
+    /// source_id` is `ON DELETE RESTRICT` and would otherwise reject it.
+    pub async fn delete_triggers_for_source(&self, source_id: Uuid) -> Result<(), VmsError> {
+        let triggers = pipeline_trigger::Entity::find()
+            .filter(pipeline_trigger::Column::SourceId.eq(source_id))
+            .all(&self.db)
+            .await
+            .map_err(db_err)?;
+        for t in triggers {
+            self.delete_trigger(t.id).await?;
+        }
+        Ok(())
+    }
 }
 
 // -- DB-to-domain translation --
