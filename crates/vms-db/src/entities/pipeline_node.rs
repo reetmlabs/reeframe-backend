@@ -66,12 +66,14 @@ pub struct Model {
     pub node_type: NodeType,
     /// Only populated for `Action` and `DeviceControl` nodes.
     pub action_type: Option<ActionType>,
-    /// FK to destinations; required for `Transport` nodes.
+    /// FK to destinations; only meaningful for `Transport` nodes, which may
+    /// still leave it unset while the node is a work in progress.
     pub destination_id: Option<Uuid>,
     /// FK to contact_lists; optional for messaging transport nodes.
     pub contact_list_id: Option<Uuid>,
     /// Action or transport configuration serialised as JSONB.
-    /// For `Action` nodes this deserialises to `ActionConfig`.
+    /// For `Action`/`DeviceControl` nodes this deserialises to `ActionConfig`,
+    /// or is JSON null if not yet configured.
     /// For `Transport` nodes this deserialises to `TransportConfig`.
     /// For `Condition` nodes this contains `{ "condition_expr": "..." }`.
     pub config: Json,

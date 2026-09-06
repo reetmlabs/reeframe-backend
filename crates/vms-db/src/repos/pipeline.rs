@@ -1038,41 +1038,38 @@ fn config_json_for(
     condition_expr: &Option<String>,
 ) -> Result<serde_json::Value, VmsError> {
     let value = match node_type {
-        CoreNodeType::Action | CoreNodeType::DeviceControl => serde_json::to_value(
-            action_config
-                .as_ref()
-                .expect("validated: action_config present"),
-        )?,
+        // `action_config` may be absent (node not fully configured yet) —
+        // stored as JSON null, which `node_from_db` reads back as `None`
+        // rather than trying to deserialize it as an `ActionConfig`.
+        CoreNodeType::Action | CoreNodeType::DeviceControl => match action_config {
+            Some(ac) => serde_json::to_value(ac)?,
+            None => serde_json::Value::Null,
+        },
         CoreNodeType::Transport => {
             serde_json::to_value(transport_config.clone().unwrap_or_default())?
         }
-        CoreNodeType::Condition => serde_json::json!({
-            "condition_expr": condition_expr.as_ref().expect("validated: condition_expr present"),
-        }),
+        CoreNodeType::Condition => serde_json::json!({ "condition_expr": condition_expr }),
         CoreNodeType::TriggerRoot | CoreNodeType::Fork => serde_json::json!({}),
     };
     Ok(value)
 }
 
-/// Rules 6 and 7 from the `PipelineDag` doc comment, plus the requirement
-/// that a node only carries the one config shape its type actually uses —
-/// checked eagerly here instead of only failing much later when the
-/// pipeline's DAG is compiled.
+/// Rule 7 from the `PipelineDag` doc comment: a node must only carry the one
+/// config shape its type actually uses. A node missing a value it'll
+/// eventually need (e.g. an empty `condition_expr`, no `destination_id`) is
+/// deliberately *not* checked here — that's a legitimate work-in-progress
+/// state while a pipeline is being edited, not a shape violation. Rule 6
+/// (exactly one trigger_root) is checked by the caller instead, since it
+/// depends on sibling nodes already in the pipeline.
 fn validate_create_shape(
     node_type: &CoreNodeType,
     action_config: &Option<ActionConfig>,
     transport_config: &Option<TransportConfig>,
-    destination_id: Option<Uuid>,
+    _destination_id: Option<Uuid>,
     condition_expr: &Option<String>,
 ) -> Result<(), VmsError> {
     match node_type {
         CoreNodeType::Action | CoreNodeType::DeviceControl => {
-            if action_config.is_none() {
-                return Err(VmsError::DagValidation(format!(
-                    "{} node requires action_config",
-                    node_type.as_str()
-                )));
-            }
             if transport_config.is_some() || condition_expr.is_some() {
                 return Err(VmsError::DagValidation(format!(
                     "{} node must not set transport_config or condition_expr",
@@ -1081,11 +1078,6 @@ fn validate_create_shape(
             }
         }
         CoreNodeType::Transport => {
-            if destination_id.is_none() {
-                return Err(VmsError::DagValidation(
-                    "transport node requires destination_id".into(),
-                ));
-            }
             if action_config.is_some() || condition_expr.is_some() {
                 return Err(VmsError::DagValidation(
                     "transport node must not set action_config or condition_expr".into(),
@@ -1093,14 +1085,6 @@ fn validate_create_shape(
             }
         }
         CoreNodeType::Condition => {
-            if !condition_expr
-                .as_deref()
-                .is_some_and(|e| !e.trim().is_empty())
-            {
-                return Err(VmsError::DagValidation(
-                    "condition node requires a non-empty condition_expr".into(),
-                ));
-            }
             if action_config.is_some() || transport_config.is_some() {
                 return Err(VmsError::DagValidation(
                     "condition node must not set action_config or transport_config".into(),
@@ -1145,18 +1129,11 @@ fn validate_update_shape(
             node_type.as_str()
         )));
     }
-    if let Some(expr) = condition_expr {
-        if !matches!(node_type, CoreNodeType::Condition) {
-            return Err(VmsError::DagValidation(format!(
-                "{} node does not accept condition_expr",
-                node_type.as_str()
-            )));
-        }
-        if expr.trim().is_empty() {
-            return Err(VmsError::DagValidation(
-                "condition_expr must not be empty".into(),
-            ));
-        }
+    if condition_expr.is_some() && !matches!(node_type, CoreNodeType::Condition) {
+        return Err(VmsError::DagValidation(format!(
+            "{} node does not accept condition_expr",
+            node_type.as_str()
+        )));
     }
     Ok(())
 }
@@ -1167,10 +1144,14 @@ fn node_from_db(m: pipeline_node::Model) -> Result<PipelineNode, VmsError> {
     // The config JSON column stores different payloads depending on node_type.
     let (action_config, transport_config, condition_expr) = match node_type {
         CoreNodeType::Action | CoreNodeType::DeviceControl => {
-            let ac = serde_json::from_value::<ActionConfig>(m.config).map_err(|e| {
-                VmsError::Serialization(format!("node {}: action_config: {e}", m.id))
-            })?;
-            (Some(ac), None, None)
+            if m.config.is_null() {
+                (None, None, None)
+            } else {
+                let ac = serde_json::from_value::<ActionConfig>(m.config).map_err(|e| {
+                    VmsError::Serialization(format!("node {}: action_config: {e}", m.id))
+                })?;
+                (Some(ac), None, None)
+            }
         }
         CoreNodeType::Transport => {
             let tc = serde_json::from_value::<TransportConfig>(m.config).map_err(|e| {
@@ -1493,9 +1474,9 @@ mod tests {
     }
 
     #[test]
-    fn action_node_requires_action_config() {
+    fn action_node_without_action_config_passes() {
         let result = validate_create_shape(&CoreNodeType::Action, &None, &None, None, &None);
-        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1523,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_node_requires_destination_id() {
+    fn transport_node_without_destination_id_passes() {
         let result = validate_create_shape(
             &CoreNodeType::Transport,
             &None,
@@ -1531,7 +1512,7 @@ mod tests {
             None,
             &None,
         );
-        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1547,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn condition_node_requires_non_empty_expr() {
+    fn condition_node_without_expr_passes() {
         let empty = validate_create_shape(
             &CoreNodeType::Condition,
             &None,
@@ -1555,10 +1536,10 @@ mod tests {
             None,
             &Some("   ".into()),
         );
-        assert!(matches!(empty, Err(VmsError::DagValidation(_))));
+        assert!(empty.is_ok());
 
         let missing = validate_create_shape(&CoreNodeType::Condition, &None, &None, None, &None);
-        assert!(matches!(missing, Err(VmsError::DagValidation(_))));
+        assert!(missing.is_ok());
     }
 
     #[test]
@@ -1600,10 +1581,10 @@ mod tests {
     }
 
     #[test]
-    fn update_rejects_blanking_condition_expr_to_whitespace() {
+    fn update_allows_setting_condition_expr_to_whitespace() {
         let result =
             validate_update_shape(&CoreNodeType::Condition, &None, &None, &Some("  ".into()));
-        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1638,6 +1619,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value, serde_json::json!({ "condition_expr": "x > 1" }));
+    }
+
+    #[test]
+    fn config_json_for_condition_without_expr_is_null_expr() {
+        let value = config_json_for(&CoreNodeType::Condition, &None, &None, &None).unwrap();
+        assert_eq!(value, serde_json::json!({ "condition_expr": null }));
+    }
+
+    #[test]
+    fn config_json_for_action_without_action_config_is_null() {
+        let value = config_json_for(&CoreNodeType::Action, &None, &None, &None).unwrap();
+        assert_eq!(value, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn node_from_db_reads_null_action_config_as_none() {
+        let model = pipeline_node::Model {
+            id: Uuid::new_v4(),
+            pipeline_id: Uuid::new_v4(),
+            node_type: node_type_to_db(&CoreNodeType::Action),
+            action_type: None,
+            destination_id: None,
+            contact_list_id: None,
+            config: serde_json::Value::Null,
+            label: None,
+            pos_x: None,
+            pos_y: None,
+            created_at: now(),
+        };
+        let node = node_from_db(model).unwrap();
+        assert!(node.action_config.is_none());
     }
 
     // -- validate_new_edge --
