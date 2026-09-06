@@ -5,6 +5,8 @@
 //! wherever a pipeline's validity needs checking, rather than reimplemented
 //! per call site.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use uuid::Uuid;
 use vms_core::pipeline::{NodeType as CoreNodeType, PipelineDag, PipelineEdge, PipelineNode};
 
@@ -172,6 +174,62 @@ pub fn check_structural_violations(
     }
 }
 
+/// A node that exists in the pipeline but can't be reached by walking
+/// outgoing edges from the trigger root. Deliberately a dedicated check
+/// rather than a side effect of `PipelineDag::compile`: today, compiling a
+/// pipeline with a disconnected node only fails by accident, mislabeled as
+/// either "wrong number of root nodes" (if the disconnected piece is
+/// acyclic — it contributes its own parentless node) or "pipeline contains
+/// a cycle" (if it isn't) — neither message names the actual problem.
+///
+/// Only runs when there's exactly one `trigger_root` node to walk from; with
+/// zero or more than one, "reachable from the root" isn't well-defined, and
+/// that's already reported by `check_structural_violations` instead.
+pub fn check_disconnected(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Vec<ValidationIssue> {
+    let roots: Vec<&PipelineNode> = nodes
+        .iter()
+        .filter(|n| n.node_type == CoreNodeType::TriggerRoot)
+        .collect();
+    let root = match roots.len() {
+        1 => roots[0],
+        _ => return Vec::new(),
+    };
+
+    let mut adjacency: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for edge in edges {
+        adjacency
+            .entry(edge.from_node_id)
+            .or_default()
+            .push(edge.to_node_id);
+    }
+
+    let mut reached: HashSet<Uuid> = HashSet::new();
+    reached.insert(root.id);
+    let mut queue: VecDeque<Uuid> = VecDeque::from([root.id]);
+    while let Some(id) = queue.pop_front() {
+        for &child in adjacency.get(&id).into_iter().flatten() {
+            if reached.insert(child) {
+                queue.push_back(child);
+            }
+        }
+    }
+
+    nodes
+        .iter()
+        .filter(|n| !reached.contains(&n.id))
+        .map(|n| {
+            ValidationIssue::new(
+                ValidationCategory::Disconnected,
+                Some(n.id),
+                format!(
+                    "{} node is not reachable from the trigger root",
+                    n.node_type.as_str()
+                ),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +364,57 @@ mod tests {
         let issues = check_structural_violations(&[root, transport, leaf], &edges);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].category, ValidationCategory::StructuralViolation);
+    }
+
+    #[test]
+    fn fully_connected_pipeline_has_no_disconnected_nodes() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let action = base_node(CoreNodeType::Action);
+        let edges = [edge(root.id, action.id, CoreEdgeType::Default)];
+        assert!(check_disconnected(&[root, action], &edges).is_empty());
+    }
+
+    #[test]
+    fn an_orphan_node_is_flagged_as_disconnected() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let action = base_node(CoreNodeType::Action);
+        let orphan = base_node(CoreNodeType::Fork);
+        let edges = [edge(root.id, action.id, CoreEdgeType::Default)];
+
+        let issues = check_disconnected(&[root, action, orphan.clone()], &edges);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::Disconnected);
+        assert_eq!(issues[0].severity, ValidationSeverity::Warning);
+        assert_eq!(issues[0].node_id, Some(orphan.id));
+    }
+
+    #[test]
+    fn an_orphan_cycle_is_flagged_as_disconnected_not_just_a_cycle() {
+        // Two nodes that only reference each other, wired to nothing else —
+        // disconnected *and* cyclic. Both facts are true and worth reporting;
+        // this check specifically must not stay silent about disconnection
+        // just because a cycle also exists.
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let a = base_node(CoreNodeType::Fork);
+        let b = base_node(CoreNodeType::Fork);
+        let edges = [
+            edge(a.id, b.id, CoreEdgeType::Default),
+            edge(b.id, a.id, CoreEdgeType::Default),
+        ];
+
+        let issues = check_disconnected(&[root, a.clone(), b.clone()], &edges);
+        let flagged: HashSet<Uuid> = issues.iter().filter_map(|i| i.node_id).collect();
+        assert_eq!(flagged, HashSet::from([a.id, b.id]));
+    }
+
+    #[test]
+    fn skips_entirely_without_exactly_one_trigger_root() {
+        let a = base_node(CoreNodeType::Fork);
+        let b = base_node(CoreNodeType::Fork);
+        assert!(check_disconnected(&[a, b], &[]).is_empty());
+
+        let root1 = base_node(CoreNodeType::TriggerRoot);
+        let root2 = base_node(CoreNodeType::TriggerRoot);
+        assert!(check_disconnected(&[root1, root2], &[]).is_empty());
     }
 }
