@@ -366,6 +366,7 @@ impl PipelineRepo {
             &node_type,
             &input.action_config,
             &input.transport_config,
+            &input.destination_id,
             &input.condition_expr,
         )?;
         if let Some(Some(dest_id)) = input.destination_id {
@@ -1065,14 +1066,15 @@ fn validate_create_shape(
     node_type: &CoreNodeType,
     action_config: &Option<ActionConfig>,
     transport_config: &Option<TransportConfig>,
-    _destination_id: Option<Uuid>,
+    destination_id: Option<Uuid>,
     condition_expr: &Option<String>,
 ) -> Result<(), VmsError> {
     match node_type {
         CoreNodeType::Action | CoreNodeType::DeviceControl => {
-            if transport_config.is_some() || condition_expr.is_some() {
+            if transport_config.is_some() || condition_expr.is_some() || destination_id.is_some()
+            {
                 return Err(VmsError::DagValidation(format!(
-                    "{} node must not set transport_config or condition_expr",
+                    "{} node must not set transport_config, condition_expr, or destination_id",
                     node_type.as_str()
                 )));
             }
@@ -1085,14 +1087,19 @@ fn validate_create_shape(
             }
         }
         CoreNodeType::Condition => {
-            if action_config.is_some() || transport_config.is_some() {
+            if action_config.is_some() || transport_config.is_some() || destination_id.is_some() {
                 return Err(VmsError::DagValidation(
-                    "condition node must not set action_config or transport_config".into(),
+                    "condition node must not set action_config, transport_config, or destination_id"
+                        .into(),
                 ));
             }
         }
         CoreNodeType::TriggerRoot | CoreNodeType::Fork => {
-            if action_config.is_some() || transport_config.is_some() || condition_expr.is_some() {
+            if action_config.is_some()
+                || transport_config.is_some()
+                || condition_expr.is_some()
+                || destination_id.is_some()
+            {
                 return Err(VmsError::DagValidation(format!(
                     "{} node must not set any config",
                     node_type.as_str()
@@ -1106,10 +1113,14 @@ fn validate_create_shape(
 /// Same idea as `validate_create_shape`, but for a partial update: fields
 /// left unset (`None`) are always fine — this only rejects a field that
 /// *was* provided but doesn't belong to the node's (immutable) type.
+/// `destination_id` is the doubly-`Option`al update shape (see `UpdateNode`):
+/// only a *provided* value (`Some(Some(_))`) is shape-checked — explicitly
+/// clearing it (`Some(None)`) is always fine, on any node type.
 fn validate_update_shape(
     node_type: &CoreNodeType,
     action_config: &Option<ActionConfig>,
     transport_config: &Option<TransportConfig>,
+    destination_id: &Option<Option<Uuid>>,
     condition_expr: &Option<String>,
 ) -> Result<(), VmsError> {
     if action_config.is_some()
@@ -1126,6 +1137,12 @@ fn validate_update_shape(
     if transport_config.is_some() && !matches!(node_type, CoreNodeType::Transport) {
         return Err(VmsError::DagValidation(format!(
             "{} node does not accept transport_config",
+            node_type.as_str()
+        )));
+    }
+    if matches!(destination_id, Some(Some(_))) && !matches!(node_type, CoreNodeType::Transport) {
+        return Err(VmsError::DagValidation(format!(
+            "{} node does not accept destination_id",
             node_type.as_str()
         )));
     }
@@ -1492,6 +1509,18 @@ mod tests {
     }
 
     #[test]
+    fn action_node_rejects_destination_id() {
+        let result = validate_create_shape(
+            &CoreNodeType::Action,
+            &Some(delay_config()),
+            &None,
+            Some(Uuid::new_v4()),
+            &None,
+        );
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
     fn valid_action_node_passes() {
         let result = validate_create_shape(
             &CoreNodeType::Action,
@@ -1570,20 +1599,50 @@ mod tests {
             &Some(delay_config()),
             &None,
             &None,
+            &None,
         );
         assert!(matches!(result, Err(VmsError::DagValidation(_))));
     }
 
     #[test]
     fn update_allows_leaving_every_field_unset() {
-        let result = validate_update_shape(&CoreNodeType::Action, &None, &None, &None);
+        let result = validate_update_shape(&CoreNodeType::Action, &None, &None, &None, &None);
         assert!(result.is_ok());
     }
 
     #[test]
     fn update_allows_setting_condition_expr_to_whitespace() {
-        let result =
-            validate_update_shape(&CoreNodeType::Condition, &None, &None, &Some("  ".into()));
+        let result = validate_update_shape(
+            &CoreNodeType::Condition,
+            &None,
+            &None,
+            &None,
+            &Some("  ".into()),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn update_rejects_destination_id_on_a_non_transport_node() {
+        let result = validate_update_shape(
+            &CoreNodeType::Action,
+            &None,
+            &None,
+            &Some(Some(Uuid::new_v4())),
+            &None,
+        );
+        assert!(matches!(result, Err(VmsError::DagValidation(_))));
+    }
+
+    #[test]
+    fn update_allows_clearing_destination_id_on_any_node_type() {
+        let result = validate_update_shape(
+            &CoreNodeType::Action,
+            &None,
+            &None,
+            &Some(None),
+            &None,
+        );
         assert!(result.is_ok());
     }
 
