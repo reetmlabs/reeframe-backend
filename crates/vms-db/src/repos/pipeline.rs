@@ -21,6 +21,10 @@ use crate::entities::{
     pipeline_source_ref, pipeline_trigger, source,
 };
 
+use super::pipeline_validation::{
+    check_config_completeness, check_config_shape, check_dangling_camera_references,
+    check_disconnected, check_structural_violations, ValidationIssue,
+};
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
 
@@ -881,6 +885,34 @@ impl PipelineRepo {
             self.delete_trigger(t.id).await?;
         }
         Ok(())
+    }
+
+    // -- Pipeline validation --
+
+    /// Every problem currently found with `pipeline_id`'s definition, across
+    /// all five categories (see `pipeline_validation`). This is the one
+    /// place that combines them — callers never run the individual checks
+    /// themselves.
+    pub async fn validate_pipeline(
+        &self,
+        pipeline_id: Uuid,
+    ) -> Result<Vec<ValidationIssue>, VmsError> {
+        let nodes = self.load_nodes(pipeline_id).await?;
+        let edges = self.load_edges(pipeline_id).await?;
+        let camera_ids: HashSet<Uuid> = camera::Entity::find()
+            .all(&self.db)
+            .await
+            .map_err(db_err)?
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+
+        let mut issues = check_config_completeness(&nodes);
+        issues.extend(check_config_shape(&nodes));
+        issues.extend(check_structural_violations(&nodes, &edges));
+        issues.extend(check_disconnected(&nodes, &edges));
+        issues.extend(check_dangling_camera_references(&nodes, &camera_ids));
+        Ok(issues)
     }
 }
 
@@ -2289,5 +2321,157 @@ mod tests {
             .set_trigger_error(Uuid::new_v4(), Some("boom".into()))
             .await;
         assert!(result.is_ok());
+    }
+
+    // -- validate_pipeline --
+
+    fn bare_node(node_type: CoreNodeType) -> CreateNode {
+        CreateNode {
+            node_type,
+            action_config: None,
+            transport_config: None,
+            destination_id: None,
+            contact_list_id: None,
+            condition_expr: None,
+            label: None,
+            pos_x: None,
+            pos_y: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_pipeline_reports_all_five_categories_at_once() {
+        use crate::repos::pipeline_validation::ValidationCategory;
+
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let root = repo
+            .create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
+            .await
+            .unwrap();
+
+        // Incomplete: no destination_id set yet.
+        let transport = repo
+            .create_node(pipeline_id, bare_node(CoreNodeType::Transport))
+            .await
+            .unwrap();
+
+        // Dangling: references a camera that existed when the node was
+        // created (so recompute_refs' own FK-guarded pipeline_camera_ref
+        // write succeeds) but is deleted afterward — the real-world way
+        // this happens, not something creatable directly.
+        let camera = camera::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            name: Set("test cam".into()),
+            description: Set(None),
+            rtsp_url: Set("rtsp://example/test".into()),
+            sub_rtsp_url: Set(None),
+            codec: Set(None),
+            manufacturer: Set(None),
+            model: Set(None),
+            username: Set(None),
+            password_enc: Set(None),
+            extra_config: Set(serde_json::json!({})),
+            ring_buffer_duration_secs: Set(30),
+            ring_buffer_storage: Set(camera::RingBufferStorage::Memory),
+            enabled: Set(true),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+            retention_days: Set(None),
+            retention_disk_threshold_percent: Set(None),
+            desired_recording: Set(false),
+        }
+        .insert(&repo.db)
+        .await
+        .unwrap();
+
+        let action = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    action_config: Some(extract_clip_config(Some(camera.id))),
+                    ..bare_node(CoreNodeType::Action)
+                },
+            )
+            .await
+            .unwrap();
+
+        camera::Entity::delete_by_id(camera.id)
+            .exec(&repo.db)
+            .await
+            .unwrap();
+
+        repo.create_edge(
+            pipeline_id,
+            CreateEdge {
+                from_node_id: root.id,
+                to_node_id: transport.id,
+                edge_type: CoreEdgeType::Default,
+            },
+        )
+        .await
+        .unwrap();
+        repo.create_edge(
+            pipeline_id,
+            CreateEdge {
+                from_node_id: root.id,
+                to_node_id: action.id,
+                edge_type: CoreEdgeType::Default,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Malformed + disconnected: a pre-existing bad record inserted
+        // directly, bypassing validate_create_shape entirely — the
+        // wrong-shape check it performs can't be produced through the repo
+        // API at all, so this simulates a row that predates that check
+        // existing. Left with no edges, so it's also unreachable from the
+        // root, and being an extra parentless node it independently trips
+        // PipelineDag::compile's root-count rule too.
+        let dest = destination::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            name: Set("test".into()),
+            description: Set(None),
+            dest_type: Set(destination::DestinationType::Local),
+            config: Set(serde_json::json!({})),
+            enabled: Set(true),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&repo.db)
+        .await
+        .unwrap();
+
+        pipeline_node::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            pipeline_id: Set(pipeline_id),
+            node_type: Set(node_type_to_db(&CoreNodeType::Condition)),
+            action_type: Set(None),
+            destination_id: Set(Some(dest.id)),
+            contact_list_id: Set(None),
+            config: Set(serde_json::json!({ "condition_expr": "x > 1" })),
+            label: Set(None),
+            pos_x: Set(None),
+            pos_y: Set(None),
+            created_at: Set(now()),
+        }
+        .insert(&repo.db)
+        .await
+        .unwrap();
+
+        let issues = repo.validate_pipeline(pipeline_id).await.unwrap();
+        let categories: HashSet<ValidationCategory> = issues.iter().map(|i| i.category).collect();
+        assert_eq!(
+            categories,
+            HashSet::from([
+                ValidationCategory::ConfigIncomplete,
+                ValidationCategory::ConfigMalformed,
+                ValidationCategory::StructuralViolation,
+                ValidationCategory::Disconnected,
+                ValidationCategory::DanglingCameraReference,
+            ])
+        );
     }
 }

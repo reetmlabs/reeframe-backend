@@ -21,7 +21,7 @@ pub enum ValidationSeverity {
 }
 
 /// What kind of problem a `ValidationIssue` describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValidationCategory {
     /// A required field for the node's type hasn't been set yet.
     ConfigIncomplete,
