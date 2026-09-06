@@ -6,7 +6,7 @@
 //! per call site.
 
 use uuid::Uuid;
-use vms_core::pipeline::{NodeType as CoreNodeType, PipelineNode};
+use vms_core::pipeline::{NodeType as CoreNodeType, PipelineDag, PipelineEdge, PipelineNode};
 
 /// How serious a `ValidationIssue` is. `Error` should block a pipeline from
 /// being enabled; `Warning` should not.
@@ -150,9 +150,32 @@ pub fn check_config_shape(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
     issues
 }
 
+/// DAG-level structural rules: exactly one trigger_root node, no cycles,
+/// condition nodes with exactly one true/false outgoing edge each,
+/// transport/device-control nodes as leaves. Reuses `PipelineDag::compile`
+/// rather than re-deriving these rules — it already enforces them
+/// correctly, this just turns a compile failure into a validation issue
+/// instead of a hard error. Not node-specific — `PipelineDag::compile`
+/// fails on the first rule it finds violated, so at most one issue is ever
+/// produced here, with no particular node attached.
+pub fn check_structural_violations(
+    nodes: &[PipelineNode],
+    edges: &[PipelineEdge],
+) -> Vec<ValidationIssue> {
+    match PipelineDag::compile(nodes.to_vec(), edges.to_vec()) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![ValidationIssue::new(
+            ValidationCategory::StructuralViolation,
+            None,
+            e.to_string(),
+        )],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vms_core::pipeline::EdgeType as CoreEdgeType;
 
     fn base_node(node_type: CoreNodeType) -> PipelineNode {
         PipelineNode {
@@ -219,5 +242,69 @@ mod tests {
     fn well_shaped_but_incomplete_node_is_not_malformed() {
         let node = base_node(CoreNodeType::Transport);
         assert!(check_config_shape(&[node]).is_empty());
+    }
+
+    fn edge(from: Uuid, to: Uuid, edge_type: CoreEdgeType) -> PipelineEdge {
+        PipelineEdge {
+            id: Uuid::new_v4(),
+            pipeline_id: Uuid::new_v4(),
+            from_node_id: from,
+            to_node_id: to,
+            edge_type,
+        }
+    }
+
+    #[test]
+    fn well_formed_pipeline_has_no_structural_violations() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let mut action = base_node(CoreNodeType::Action);
+        action.action_config = Some(vms_core::action::ActionConfig::Skip);
+
+        let edges = [edge(root.id, action.id, CoreEdgeType::Default)];
+        assert!(check_structural_violations(&[root, action], &edges).is_empty());
+    }
+
+    #[test]
+    fn missing_trigger_root_is_a_structural_violation() {
+        let mut action = base_node(CoreNodeType::Action);
+        action.action_config = Some(vms_core::action::ActionConfig::Skip);
+
+        let issues = check_structural_violations(&[action], &[]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::StructuralViolation);
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, None);
+    }
+
+    #[test]
+    fn a_cycle_is_a_structural_violation() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let a = base_node(CoreNodeType::Fork);
+        let b = base_node(CoreNodeType::Fork);
+
+        let edges = [
+            edge(root.id, a.id, CoreEdgeType::Default),
+            edge(a.id, b.id, CoreEdgeType::Default),
+            edge(b.id, a.id, CoreEdgeType::Default),
+        ];
+        let issues = check_structural_violations(&[root, a, b], &edges);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::StructuralViolation);
+    }
+
+    #[test]
+    fn a_transport_node_with_an_outgoing_edge_is_a_structural_violation() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let mut transport = base_node(CoreNodeType::Transport);
+        transport.destination_id = Some(Uuid::new_v4());
+        let leaf = base_node(CoreNodeType::Fork);
+
+        let edges = [
+            edge(root.id, transport.id, CoreEdgeType::Default),
+            edge(transport.id, leaf.id, CoreEdgeType::Default),
+        ];
+        let issues = check_structural_violations(&[root, transport, leaf], &edges);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::StructuralViolation);
     }
 }
