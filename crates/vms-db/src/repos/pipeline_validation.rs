@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 use vms_core::pipeline::{NodeType as CoreNodeType, PipelineDag, PipelineEdge, PipelineNode};
 
+use super::pipeline::camera_id_from_action_config;
+
 /// How serious a `ValidationIssue` is. `Error` should block a pipeline from
 /// being enabled; `Warning` should not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +232,36 @@ pub fn check_disconnected(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Vec
         .collect()
 }
 
+/// An action node's `camera_id` (extract-clip, snapshot, PTZ move,
+/// start/stop recording, set-stream-quality) pointing at a camera that no
+/// longer exists. The only reference type that can go dangling with no
+/// protection at any other layer — it's a plain UUID inside a JSON config
+/// blob, unlike `destination_id`/trigger-level `camera_id` (FK-guarded) or
+/// `contact_list_id` (cleared automatically on delete).
+///
+/// Takes the set of currently-existing camera IDs rather than a DB handle,
+/// so it stays a plain, synchronously-testable function — fetching that set
+/// is the caller's job.
+pub fn check_dangling_camera_references(
+    nodes: &[PipelineNode],
+    existing_camera_ids: &HashSet<Uuid>,
+) -> Vec<ValidationIssue> {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let camera_id = camera_id_from_action_config(node.action_config.as_ref()?)?;
+            if existing_camera_ids.contains(&camera_id) {
+                return None;
+            }
+            Some(ValidationIssue::new(
+                ValidationCategory::DanglingCameraReference,
+                Some(node.id),
+                format!("references camera {camera_id}, which no longer exists"),
+            ))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +448,60 @@ mod tests {
         let root1 = base_node(CoreNodeType::TriggerRoot);
         let root2 = base_node(CoreNodeType::TriggerRoot);
         assert!(check_disconnected(&[root1, root2], &[]).is_empty());
+    }
+
+    fn snapshot_config(camera_id: Option<Uuid>) -> vms_core::action::ActionConfig {
+        vms_core::action::ActionConfig::Snapshot(vms_core::action::SnapshotConfig {
+            format: "jpeg".into(),
+            quality: 90,
+            camera_id,
+        })
+    }
+
+    #[test]
+    fn action_node_referencing_a_missing_camera_is_flagged() {
+        let missing_camera = Uuid::new_v4();
+        let mut node = base_node(CoreNodeType::Action);
+        node.action_config = Some(snapshot_config(Some(missing_camera)));
+
+        let issues = check_dangling_camera_references(&[node.clone()], &HashSet::new());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].category,
+            ValidationCategory::DanglingCameraReference
+        );
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, Some(node.id));
+    }
+
+    #[test]
+    fn action_node_referencing_an_existing_camera_is_not_flagged() {
+        let existing_camera = Uuid::new_v4();
+        let mut node = base_node(CoreNodeType::Action);
+        node.action_config = Some(snapshot_config(Some(existing_camera)));
+
+        let issues = check_dangling_camera_references(
+            &[node],
+            &HashSet::from([existing_camera]),
+        );
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn action_node_with_inherited_camera_is_not_flagged() {
+        // `camera_id: None` inherits from the TriggerContext at execution
+        // time — nothing to check here, and definitely not "dangling".
+        let mut node = base_node(CoreNodeType::Action);
+        node.action_config = Some(snapshot_config(None));
+
+        assert!(check_dangling_camera_references(&[node], &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn non_camera_scoped_action_is_not_flagged() {
+        let mut node = base_node(CoreNodeType::Action);
+        node.action_config = Some(vms_core::action::ActionConfig::Skip);
+
+        assert!(check_dangling_camera_references(&[node], &HashSet::new()).is_empty());
     }
 }

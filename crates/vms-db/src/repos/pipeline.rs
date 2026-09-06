@@ -937,8 +937,9 @@ fn action_type_from_config(cfg: &ActionConfig) -> pipeline_node::ActionType {
 /// `trigger_alarm_output` addresses a relay by `output_id`, not a camera).
 /// Written as an exhaustive match rather than a wildcard fallback so adding
 /// a camera-scoped variant later forces a decision here instead of silently
-/// defaulting to "no camera".
-fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid> {
+/// defaulting to "no camera". Also used by `pipeline_validation`'s dangling-
+/// camera-reference check.
+pub(super) fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid> {
     match config {
         ActionConfig::ExtractClip(c) => c.camera_id,
         ActionConfig::Snapshot(c) => c.camera_id,
