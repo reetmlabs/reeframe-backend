@@ -26,6 +26,10 @@ pub struct Model {
     pub created_by: Option<Uuid>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
+    /// Serialized `Vec<pipeline_validation::ValidationIssue>` from the most
+    /// recent `PipelineRepo::revalidate` call — recomputed on every node/
+    /// edge/trigger save and on enable, never on read.
+    pub validation_issues: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

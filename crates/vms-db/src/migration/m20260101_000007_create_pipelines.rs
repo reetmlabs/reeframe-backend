@@ -63,4 +63,5 @@ pub enum Pipeline {
     CreatedBy,
     CreatedAt,
     UpdatedAt,
+    ValidationIssues,
 }

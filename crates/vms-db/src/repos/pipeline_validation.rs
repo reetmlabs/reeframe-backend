@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vms_core::pipeline::{NodeType as CoreNodeType, PipelineDag, PipelineEdge, PipelineNode};
 
@@ -14,14 +15,16 @@ use super::pipeline::camera_id_from_action_config;
 
 /// How serious a `ValidationIssue` is. `Error` should block a pipeline from
 /// being enabled; `Warning` should not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ValidationSeverity {
     Error,
     Warning,
 }
 
 /// What kind of problem a `ValidationIssue` describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ValidationCategory {
     /// A required field for the node's type hasn't been set yet.
     ConfigIncomplete,
@@ -45,7 +48,7 @@ impl ValidationCategory {
 }
 
 /// One problem found with a pipeline, naming which node (if any) it's about.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationIssue {
     pub category: ValidationCategory,
     pub severity: ValidationSeverity,

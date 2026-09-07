@@ -121,6 +121,7 @@ impl PipelineRepo {
             created_by: Set(None),
             created_at: Set(ts),
             updated_at: Set(ts),
+            validation_issues: Set(serde_json::json!([])),
         }
         .insert(&self.db)
         .await
@@ -912,6 +913,30 @@ impl PipelineRepo {
         issues.extend(check_structural_violations(&nodes, &edges));
         issues.extend(check_disconnected(&nodes, &edges));
         issues.extend(check_dangling_camera_references(&nodes, &camera_ids));
+        Ok(issues)
+    }
+
+    /// Recomputes `pipeline_id`'s validation issues and persists them, so a
+    /// later read (e.g. listing every pipeline) never has to re-run graph
+    /// analysis. Called after every save — node/edge/trigger create/update/
+    /// delete, anything that could change the pipeline's shape — and again
+    /// specifically when a pipeline is enabled, to catch drift since the
+    /// last save (e.g. a referenced camera deleted in the meantime). A
+    /// no-op, returning an empty list, if the pipeline no longer exists.
+    pub async fn revalidate(&self, pipeline_id: Uuid) -> Result<Vec<ValidationIssue>, VmsError> {
+        let issues = self.validate_pipeline(pipeline_id).await?;
+
+        let Some(existing) = pipeline::Entity::find_by_id(pipeline_id)
+            .one(&self.db)
+            .await
+            .map_err(db_err)?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let mut active: ActiveModel = existing.into();
+        active.validation_issues = Set(serde_json::to_value(&issues)?);
+        active.update(&self.db).await.map_err(db_err)?;
         Ok(issues)
     }
 }
@@ -2473,5 +2498,36 @@ mod tests {
                 ValidationCategory::DanglingCameraReference,
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn revalidate_persists_issues_onto_the_pipeline_row() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        // No nodes at all yet — missing trigger_root is a structural violation.
+        let issues = repo.revalidate(pipeline_id).await.unwrap();
+        assert_eq!(issues.len(), 1);
+
+        let stored = repo.get(pipeline_id).await.unwrap().unwrap();
+        let stored_issues: Vec<crate::repos::pipeline_validation::ValidationIssue> =
+            serde_json::from_value(stored.validation_issues).unwrap();
+        assert_eq!(stored_issues, issues);
+    }
+
+    #[tokio::test]
+    async fn revalidate_on_a_missing_pipeline_is_a_noop() {
+        let repo = test_repo().await;
+        let issues = repo.revalidate(Uuid::new_v4()).await.unwrap();
+        assert!(issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_freshly_created_pipeline_has_no_stored_issues() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let stored = repo.get(pipeline_id).await.unwrap().unwrap();
+        assert_eq!(stored.validation_issues, serde_json::json!([]));
     }
 }
