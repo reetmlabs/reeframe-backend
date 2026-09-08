@@ -23,7 +23,8 @@ use crate::entities::{
 
 use super::pipeline_validation::{
     check_config_completeness, check_config_shape, check_dangling_camera_references,
-    check_disconnected, check_structural_violations, ValidationIssue, ValidationSeverity,
+    check_disconnected, check_structural_violations, check_unresolved_references, ValidationIssue,
+    ValidationSeverity,
 };
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
@@ -998,6 +999,7 @@ impl PipelineRepo {
     ) -> Result<Vec<ValidationIssue>, VmsError> {
         let nodes = self.load_nodes(pipeline_id).await?;
         let edges = self.load_edges(pipeline_id).await?;
+        let triggers = self.load_triggers(pipeline_id).await?;
         let camera_ids: HashSet<Uuid> = camera::Entity::find()
             .all(&self.db)
             .await
@@ -1011,6 +1013,7 @@ impl PipelineRepo {
         issues.extend(check_structural_violations(&nodes, &edges));
         issues.extend(check_disconnected(&nodes, &edges));
         issues.extend(check_dangling_camera_references(&nodes, &camera_ids));
+        issues.extend(check_unresolved_references(&triggers));
         Ok(issues)
     }
 
@@ -3024,5 +3027,55 @@ mod tests {
         assert_eq!(repo.mark_source_disabled(source_id).await.unwrap().len(), 1);
         // Already marked — nothing left to change.
         assert_eq!(repo.mark_source_disabled(source_id).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn enable_is_blocked_once_its_trigger_source_is_disabled() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let source_id = test_source(&repo, true).await;
+
+        let root = repo
+            .create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
+            .await
+            .unwrap();
+        let action = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    action_config: Some(vms_core::action::ActionConfig::Skip),
+                    ..bare_node(CoreNodeType::Action)
+                },
+            )
+            .await
+            .unwrap();
+        repo.create_edge(
+            pipeline_id,
+            CreateEdge {
+                from_node_id: root.id,
+                to_node_id: action.id,
+                edge_type: CoreEdgeType::Default,
+            },
+        )
+        .await
+        .unwrap();
+        repo.create_trigger(pipeline_id, event_trigger(Some(source_id)))
+            .await
+            .unwrap();
+
+        // Complete and valid on its own — confirm it enables before the
+        // source is touched, then disable again to test the actual case.
+        assert!(matches!(
+            repo.set_enabled(pipeline_id, true).await.unwrap(),
+            EnableOutcome::Applied
+        ));
+        repo.set_enabled(pipeline_id, false).await.unwrap();
+
+        repo.mark_source_disabled(source_id).await.unwrap();
+
+        assert!(matches!(
+            repo.set_enabled(pipeline_id, true).await.unwrap(),
+            EnableOutcome::BlockedByErrors(_)
+        ));
     }
 }

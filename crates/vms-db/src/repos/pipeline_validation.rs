@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vms_core::pipeline::{NodeType as CoreNodeType, PipelineDag, PipelineEdge, PipelineNode};
+use vms_core::pipeline::{
+    NodeType as CoreNodeType, PipelineDag, PipelineEdge, PipelineNode, PipelineTrigger,
+};
 
 use super::pipeline::camera_id_from_action_config;
 
@@ -36,6 +38,8 @@ pub enum ValidationCategory {
     StructuralViolation,
     /// An action node's `camera_id` points at a camera that no longer exists.
     DanglingCameraReference,
+    /// A trigger's source was deleted or disabled.
+    UnresolvedReference,
 }
 
 impl ValidationCategory {
@@ -286,6 +290,27 @@ pub fn check_dangling_camera_references(
         .collect()
 }
 
+/// A trigger whose source was deleted or disabled, per its own persisted
+/// `unresolved_reference` flag — set and cleared by source lifecycle events
+/// (`PipelineRepo::unlink_deleted_source`/`mark_source_disabled`/
+/// `clear_source_unresolved`), not re-derived here.
+pub fn check_unresolved_references(triggers: &[PipelineTrigger]) -> Vec<ValidationIssue> {
+    triggers
+        .iter()
+        .filter(|t| t.unresolved_reference)
+        .map(|t| {
+            ValidationIssue::new(
+                ValidationCategory::UnresolvedReference,
+                None,
+                format!(
+                    "trigger {} references a source that no longer exists or is disabled",
+                    t.id
+                ),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +552,39 @@ mod tests {
         node.action_config = Some(vms_core::action::ActionConfig::Skip);
 
         assert!(check_dangling_camera_references(&[node], &HashSet::new()).is_empty());
+    }
+
+    fn base_trigger() -> PipelineTrigger {
+        PipelineTrigger {
+            id: Uuid::new_v4(),
+            pipeline_id: Uuid::new_v4(),
+            trigger_type: vms_core::trigger::TriggerType::Manual,
+            source_id: None,
+            camera_id: None,
+            config: vms_core::trigger::TriggerConfig::Manual {
+                parameter_schema: None,
+            },
+            enabled: true,
+            last_error: None,
+            last_error_at: None,
+            unresolved_reference: false,
+        }
+    }
+
+    #[test]
+    fn unresolved_trigger_is_flagged_as_an_error() {
+        let mut trigger = base_trigger();
+        trigger.unresolved_reference = true;
+
+        let issues = check_unresolved_references(&[trigger.clone()]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::UnresolvedReference);
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+    }
+
+    #[test]
+    fn resolved_trigger_is_not_flagged() {
+        let trigger = base_trigger();
+        assert!(check_unresolved_references(&[trigger]).is_empty());
     }
 }
