@@ -498,6 +498,7 @@ impl PipelineRepo {
         .await
         .map_err(db_err)?;
 
+        self.revalidate(pipeline_id).await?;
         Ok(edge_from_db(model))
     }
 
@@ -541,9 +542,11 @@ impl PipelineRepo {
             &other_edges,
         )?;
 
+        let pipeline_id = existing.pipeline_id;
         let mut active: pipeline_edge::ActiveModel = existing.into();
         active.edge_type = Set(edge_type_to_db(&input.edge_type));
         let updated = active.update(&self.db).await.map_err(db_err)?;
+        self.revalidate(pipeline_id).await?;
         Ok(edge_from_db(updated))
     }
 
@@ -553,7 +556,9 @@ impl PipelineRepo {
             .await
             .map_err(db_err)?
             .ok_or(VmsError::EdgeNotFound(edge_id))?;
+        let pipeline_id = edge.pipeline_id;
         edge.delete(&self.db).await.map_err(db_err)?;
+        self.revalidate(pipeline_id).await?;
         Ok(())
     }
 
@@ -671,7 +676,9 @@ impl PipelineRepo {
             .map_err(db_err)?;
         }
 
-        txn.commit().await.map_err(db_err)
+        txn.commit().await.map_err(db_err)?;
+        self.revalidate(pipeline_id).await?;
+        Ok(())
     }
 
     // -- Trigger CRUD --
@@ -916,13 +923,9 @@ impl PipelineRepo {
         Ok(issues)
     }
 
-    /// Recomputes `pipeline_id`'s validation issues and persists them, so a
-    /// later read (e.g. listing every pipeline) never has to re-run graph
-    /// analysis. Called after every save — node/edge/trigger create/update/
-    /// delete, anything that could change the pipeline's shape — and again
-    /// specifically when a pipeline is enabled, to catch drift since the
-    /// last save (e.g. a referenced camera deleted in the meantime). A
-    /// no-op, returning an empty list, if the pipeline no longer exists.
+    /// Recomputes and persists `pipeline_id`'s validation issues, so a read
+    /// never has to re-run graph analysis. A no-op returning an empty list
+    /// if the pipeline no longer exists.
     pub async fn revalidate(&self, pipeline_id: Uuid) -> Result<Vec<ValidationIssue>, VmsError> {
         let issues = self.validate_pipeline(pipeline_id).await?;
 
@@ -2529,5 +2532,111 @@ mod tests {
 
         let stored = repo.get(pipeline_id).await.unwrap().unwrap();
         assert_eq!(stored.validation_issues, serde_json::json!([]));
+    }
+
+    async fn stored_issue_count(repo: &PipelineRepo, pipeline_id: Uuid) -> usize {
+        let stored = repo.get(pipeline_id).await.unwrap().unwrap();
+        let issues: Vec<crate::repos::pipeline_validation::ValidationIssue> =
+            serde_json::from_value(stored.validation_issues).unwrap();
+        issues.len()
+    }
+
+    async fn stored_categories(
+        repo: &PipelineRepo,
+        pipeline_id: Uuid,
+    ) -> HashSet<crate::repos::pipeline_validation::ValidationCategory> {
+        let stored = repo.get(pipeline_id).await.unwrap().unwrap();
+        let issues: Vec<crate::repos::pipeline_validation::ValidationIssue> =
+            serde_json::from_value(stored.validation_issues).unwrap();
+        issues.into_iter().map(|i| i.category).collect()
+    }
+
+    #[tokio::test]
+    async fn creating_a_node_automatically_updates_stored_validation() {
+        use crate::repos::pipeline_validation::ValidationCategory;
+
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        // Incomplete Transport node — never calling repo.revalidate()
+        // directly, so this only passes if create_node triggers it itself.
+        repo.create_node(pipeline_id, bare_node(CoreNodeType::Transport))
+            .await
+            .unwrap();
+        assert!(stored_categories(&repo, pipeline_id)
+            .await
+            .contains(&ValidationCategory::ConfigIncomplete));
+
+        // Adding a trigger_root changes the picture again: with a valid
+        // root now in place, the still-unwired Transport becomes
+        // "disconnected" instead — a category that could only appear after
+        // this second create_node call re-ran validation.
+        repo.create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
+            .await
+            .unwrap();
+        assert!(stored_categories(&repo, pipeline_id)
+            .await
+            .contains(&ValidationCategory::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn edge_crud_automatically_updates_stored_validation() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let dest = destination::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            name: Set("test".into()),
+            description: Set(None),
+            dest_type: Set(destination::DestinationType::Local),
+            config: Set(serde_json::json!({})),
+            enabled: Set(true),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&repo.db)
+        .await
+        .unwrap();
+
+        let root = repo
+            .create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
+            .await
+            .unwrap();
+        let transport = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(dest.id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+
+        // Both nodes are individually complete but nothing wires them
+        // together yet — some number of issues, not asserting exactly how
+        // many (both the disconnected Transport and the extra parentless
+        // node trip separate checks).
+        let disconnected_count = stored_issue_count(&repo, pipeline_id).await;
+        assert!(disconnected_count > 0);
+
+        let edge = repo
+            .create_edge(
+                pipeline_id,
+                CreateEdge {
+                    from_node_id: root.id,
+                    to_node_id: transport.id,
+                    edge_type: CoreEdgeType::Default,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored_issue_count(&repo, pipeline_id).await, 0);
+
+        repo.delete_edge(edge.id).await.unwrap();
+        assert_eq!(
+            stored_issue_count(&repo, pipeline_id).await,
+            disconnected_count
+        );
     }
 }
