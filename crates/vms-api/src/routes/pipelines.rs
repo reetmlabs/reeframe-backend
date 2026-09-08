@@ -6,7 +6,7 @@ use vms_db::{
         pipeline::{self, PipelineType},
         pipeline_run, run_node_result,
     },
-    repos::pipeline::{CreatePipeline, UpdatePipeline},
+    repos::pipeline::{CreatePipeline, EnableOutcome, UpdatePipeline},
     repos::{ValidationCategory, ValidationIssue, ValidationSeverity},
 };
 
@@ -278,8 +278,9 @@ pub async fn delete_pipeline(
 pub async fn enable_pipeline(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<PipelineDto>, ApiError> {
-    set_enabled(req, depot, true).await
+    res: &mut Response,
+) -> Result<(), ApiError> {
+    set_enabled(req, depot, res, true).await
 }
 
 /// POST /pipelines/:id/disable
@@ -287,15 +288,24 @@ pub async fn enable_pipeline(
 pub async fn disable_pipeline(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<PipelineDto>, ApiError> {
-    set_enabled(req, depot, false).await
+    res: &mut Response,
+) -> Result<(), ApiError> {
+    set_enabled(req, depot, res, false).await
+}
+
+/// Body returned instead of the pipeline when enabling is refused.
+#[derive(Serialize)]
+struct EnableBlockedDto {
+    error: &'static str,
+    issues: Vec<ValidationIssueDto>,
 }
 
 async fn set_enabled(
     req: &mut Request,
     depot: &mut Depot,
+    res: &mut Response,
     enabled: bool,
-) -> Result<Json<PipelineDto>, ApiError> {
+) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
 
@@ -305,16 +315,25 @@ async fn set_enabled(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("pipeline {id} not found")))?;
 
-    state.pipeline_repo.set_enabled(id, enabled).await?;
-    state.pipeline_registry.reload().await?;
-
-    let updated = state
-        .pipeline_repo
-        .get(id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("pipeline {id} not found")))?;
-
-    Ok(Json(PipelineDto::from(updated)))
+    match state.pipeline_repo.set_enabled(id, enabled).await? {
+        EnableOutcome::BlockedByErrors(issues) => {
+            res.status_code(StatusCode::CONFLICT);
+            res.render(Json(EnableBlockedDto {
+                error: "pipeline has validation errors and cannot be enabled",
+                issues: issues.into_iter().map(ValidationIssueDto::from).collect(),
+            }));
+        }
+        EnableOutcome::Applied => {
+            state.pipeline_registry.reload().await?;
+            let updated = state
+                .pipeline_repo
+                .get(id)
+                .await?
+                .ok_or_else(|| ApiError::not_found(format!("pipeline {id} not found")))?;
+            res.render(Json(PipelineDto::from(updated)));
+        }
+    }
+    Ok(())
 }
 
 /// POST /pipelines/:id/trigger
