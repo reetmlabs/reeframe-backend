@@ -157,47 +157,18 @@ pub fn check_config_shape(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
     issues
 }
 
-/// DAG-level structural rules: exactly one trigger_root node, no cycles,
-/// condition nodes with exactly one true/false outgoing edge each,
-/// transport/device-control nodes as leaves. Reuses `PipelineDag::compile`
-/// rather than re-deriving these rules — it already enforces them
-/// correctly, this just turns a compile failure into a validation issue
-/// instead of a hard error. Not node-specific — `PipelineDag::compile`
-/// fails on the first rule it finds violated, so at most one issue is ever
-/// produced here, with no particular node attached.
-pub fn check_structural_violations(
-    nodes: &[PipelineNode],
-    edges: &[PipelineEdge],
-) -> Vec<ValidationIssue> {
-    match PipelineDag::compile(nodes.to_vec(), edges.to_vec()) {
-        Ok(_) => Vec::new(),
-        Err(e) => vec![ValidationIssue::new(
-            ValidationCategory::StructuralViolation,
-            None,
-            e.to_string(),
-        )],
-    }
-}
-
-/// A node that exists in the pipeline but can't be reached by walking
-/// outgoing edges from the trigger root. Deliberately a dedicated check
-/// rather than a side effect of `PipelineDag::compile`: today, compiling a
-/// pipeline with a disconnected node only fails by accident, mislabeled as
-/// either "wrong number of root nodes" (if the disconnected piece is
-/// acyclic — it contributes its own parentless node) or "pipeline contains
-/// a cycle" (if it isn't) — neither message names the actual problem.
-///
-/// Only runs when there's exactly one `trigger_root` node to walk from; with
-/// zero or more than one, "reachable from the root" isn't well-defined, and
-/// that's already reported by `check_structural_violations` instead.
-pub fn check_disconnected(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Vec<ValidationIssue> {
+/// IDs reachable from the pipeline's trigger root by walking outgoing
+/// edges, including the root itself. `None` if there isn't exactly one
+/// `trigger_root` node — reachability isn't well-defined in that case, and
+/// that's `check_structural_violations`' problem to report instead.
+fn reachable_from_root(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Option<HashSet<Uuid>> {
     let roots: Vec<&PipelineNode> = nodes
         .iter()
         .filter(|n| n.node_type == CoreNodeType::TriggerRoot)
         .collect();
     let root = match roots.len() {
         1 => roots[0],
-        _ => return Vec::new(),
+        _ => return None,
     };
 
     let mut adjacency: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
@@ -218,6 +189,59 @@ pub fn check_disconnected(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Vec
             }
         }
     }
+    Some(reached)
+}
+
+/// DAG-level structural rules: exactly one trigger_root node, no cycles,
+/// condition nodes with exactly one true/false outgoing edge each,
+/// transport/device-control nodes as leaves. Reuses `PipelineDag::compile`
+/// rather than re-deriving these rules. Only checked against the subgraph
+/// reachable from the trigger root (see `reachable_from_root`) — an
+/// unrelated disconnected node is `check_disconnected`'s problem to report,
+/// not grounds for a spurious "wrong root count" or "cycle" here too.
+pub fn check_structural_violations(
+    nodes: &[PipelineNode],
+    edges: &[PipelineEdge],
+) -> Vec<ValidationIssue> {
+    let (nodes, edges) = match reachable_from_root(nodes, edges) {
+        Some(reached) => (
+            nodes
+                .iter()
+                .filter(|n| reached.contains(&n.id))
+                .cloned()
+                .collect(),
+            edges
+                .iter()
+                .filter(|e| reached.contains(&e.from_node_id) && reached.contains(&e.to_node_id))
+                .cloned()
+                .collect(),
+        ),
+        // Zero or multiple trigger_root nodes — there's no well-defined
+        // reachable subgraph, so let compile() report that directly.
+        None => (nodes.to_vec(), edges.to_vec()),
+    };
+
+    match PipelineDag::compile(nodes, edges) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![ValidationIssue::new(
+            ValidationCategory::StructuralViolation,
+            None,
+            e.to_string(),
+        )],
+    }
+}
+
+/// A node that exists in the pipeline but can't be reached by walking
+/// outgoing edges from the trigger root. Deliberately a dedicated check
+/// rather than a side effect of `PipelineDag::compile`: today, compiling a
+/// pipeline with a disconnected node only fails by accident, mislabeled as
+/// either "wrong number of root nodes" (if the disconnected piece is
+/// acyclic — it contributes its own parentless node) or "pipeline contains
+/// a cycle" (if it isn't) — neither message names the actual problem.
+pub fn check_disconnected(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Vec<ValidationIssue> {
+    let Some(reached) = reachable_from_root(nodes, edges) else {
+        return Vec::new();
+    };
 
     nodes
         .iter()

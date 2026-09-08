@@ -23,7 +23,7 @@ use crate::entities::{
 
 use super::pipeline_validation::{
     check_config_completeness, check_config_shape, check_dangling_camera_references,
-    check_disconnected, check_structural_violations, ValidationIssue,
+    check_disconnected, check_structural_violations, ValidationIssue, ValidationSeverity,
 };
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
@@ -39,6 +39,14 @@ pub struct CreatePipeline {
 pub struct UpdatePipeline {
     pub name: Option<String>,
     pub description: Option<Option<String>>,
+}
+
+/// Result of `PipelineRepo::set_enabled`.
+pub enum EnableOutcome {
+    /// The `enabled` flag was written as requested.
+    Applied,
+    /// Turning on was refused — these are the blocking errors found.
+    BlockedByErrors(Vec<ValidationIssue>),
 }
 
 pub struct CreateNode {
@@ -163,11 +171,25 @@ impl PipelineRepo {
         Ok(())
     }
 
-    /// Enable or disable a pipeline. Callers should follow this with
-    /// `PipelineRegistry::reload()` to reconcile resource ref-counts.
-    /// Revalidates on enable (not disable), to catch drift since the
-    /// pipeline's last save — e.g. a referenced camera deleted since then.
-    pub async fn set_enabled(&self, id: Uuid, enabled: bool) -> Result<(), VmsError> {
+    /// Disable always succeeds and skips revalidation — there's no reason to
+    /// block turning something off. Enable revalidates first (catching
+    /// drift since the pipeline's last save, e.g. a referenced camera
+    /// deleted since then) and refuses if any error-severity issue is
+    /// found, leaving `enabled` untouched.
+    pub async fn set_enabled(&self, id: Uuid, enabled: bool) -> Result<EnableOutcome, VmsError> {
+        if enabled {
+            let issues = self.validate_pipeline(id).await?;
+            self.persist_validation_issues(id, &issues).await?;
+
+            let errors: Vec<ValidationIssue> = issues
+                .into_iter()
+                .filter(|i| i.severity == ValidationSeverity::Error)
+                .collect();
+            if !errors.is_empty() {
+                return Ok(EnableOutcome::BlockedByErrors(errors));
+            }
+        }
+
         ActiveModel {
             id: Set(id),
             enabled: Set(enabled),
@@ -178,10 +200,7 @@ impl PipelineRepo {
         .await
         .map_err(db_err)?;
 
-        if enabled {
-            self.revalidate(id).await?;
-        }
-        Ok(())
+        Ok(EnableOutcome::Applied)
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<(), VmsError> {
@@ -934,19 +953,31 @@ impl PipelineRepo {
     /// if the pipeline no longer exists.
     pub async fn revalidate(&self, pipeline_id: Uuid) -> Result<Vec<ValidationIssue>, VmsError> {
         let issues = self.validate_pipeline(pipeline_id).await?;
+        self.persist_validation_issues(pipeline_id, &issues).await?;
+        Ok(issues)
+    }
 
+    /// Writes an already-computed issue list onto the pipeline row, without
+    /// recomputing it — shared by `revalidate` and `set_enabled`, which
+    /// needs the issues in hand before it decides whether to also flip the
+    /// `enabled` flag. A no-op if the pipeline no longer exists.
+    async fn persist_validation_issues(
+        &self,
+        pipeline_id: Uuid,
+        issues: &[ValidationIssue],
+    ) -> Result<(), VmsError> {
         let Some(existing) = pipeline::Entity::find_by_id(pipeline_id)
             .one(&self.db)
             .await
             .map_err(db_err)?
         else {
-            return Ok(Vec::new());
+            return Ok(());
         };
 
         let mut active: ActiveModel = existing.into();
-        active.validation_issues = Set(serde_json::to_value(&issues)?);
+        active.validation_issues = Set(serde_json::to_value(issues)?);
         active.update(&self.db).await.map_err(db_err)?;
-        Ok(issues)
+        Ok(())
     }
 }
 
@@ -2526,9 +2557,14 @@ mod tests {
 
     #[tokio::test]
     async fn revalidate_on_a_missing_pipeline_is_a_noop() {
+        // "No-op" means no row gets written — the returned issues aren't
+        // necessarily empty, since validate_pipeline still computes against
+        // an (empty) node list and reports the resulting structural
+        // violation regardless of whether a pipeline backs it.
         let repo = test_repo().await;
-        let issues = repo.revalidate(Uuid::new_v4()).await.unwrap();
-        assert!(issues.is_empty());
+        let missing_id = Uuid::new_v4();
+        assert!(repo.revalidate(missing_id).await.is_ok());
+        assert!(repo.get(missing_id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2710,7 +2746,75 @@ mod tests {
             .unwrap();
         assert_eq!(stored_issue_count(&repo, pipeline_id).await, 0);
 
-        repo.set_enabled(pipeline_id, true).await.unwrap();
+        let outcome = repo.set_enabled(pipeline_id, true).await.unwrap();
+        assert!(matches!(outcome, EnableOutcome::BlockedByErrors(_)));
         assert_eq!(stored_issue_count(&repo, pipeline_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn enabling_with_only_warnings_succeeds() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        // root -> wired is a complete, valid pipeline on its own; the
+        // second action node is left unwired so its only problem is being
+        // disconnected — a warning, not an error.
+        let root = repo
+            .create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
+            .await
+            .unwrap();
+        let wired = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    action_config: Some(vms_core::action::ActionConfig::Skip),
+                    ..bare_node(CoreNodeType::Action)
+                },
+            )
+            .await
+            .unwrap();
+        repo.create_edge(
+            pipeline_id,
+            CreateEdge {
+                from_node_id: root.id,
+                to_node_id: wired.id,
+                edge_type: CoreEdgeType::Default,
+            },
+        )
+        .await
+        .unwrap();
+        repo.create_node(
+            pipeline_id,
+            CreateNode {
+                action_config: Some(vms_core::action::ActionConfig::Skip),
+                ..bare_node(CoreNodeType::Action)
+            },
+        )
+        .await
+        .unwrap();
+
+        let outcome = repo.set_enabled(pipeline_id, true).await.unwrap();
+        assert!(matches!(outcome, EnableOutcome::Applied));
+        assert!(repo.get(pipeline_id).await.unwrap().unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn enabling_blocked_by_errors_leaves_the_flag_untouched() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        // No nodes at all — a structural-violation error.
+        let outcome = repo.set_enabled(pipeline_id, true).await.unwrap();
+        assert!(matches!(outcome, EnableOutcome::BlockedByErrors(_)));
+        assert!(!repo.get(pipeline_id).await.unwrap().unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn disabling_always_succeeds_regardless_of_errors() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let outcome = repo.set_enabled(pipeline_id, false).await.unwrap();
+        assert!(matches!(outcome, EnableOutcome::Applied));
     }
 }
