@@ -294,7 +294,7 @@ pub fn check_dangling_camera_references(
 /// `unresolved_reference` flag — set and cleared by source lifecycle events
 /// (`PipelineRepo::unlink_deleted_source`/`mark_source_disabled`/
 /// `clear_source_unresolved`), not re-derived here.
-pub fn check_unresolved_references(triggers: &[PipelineTrigger]) -> Vec<ValidationIssue> {
+pub fn check_unresolved_trigger_references(triggers: &[PipelineTrigger]) -> Vec<ValidationIssue> {
     triggers
         .iter()
         .filter(|t| t.unresolved_reference)
@@ -306,6 +306,25 @@ pub fn check_unresolved_references(triggers: &[PipelineTrigger]) -> Vec<Validati
                     "trigger {} references a source that no longer exists or is disabled",
                     t.id
                 ),
+            )
+        })
+        .collect()
+}
+
+/// A node whose destination was deleted or disabled, per its own persisted
+/// `unresolved_reference` flag — set and cleared by destination lifecycle
+/// events (`PipelineRepo::unlink_deleted_destination`/
+/// `mark_destination_disabled`/`clear_destination_unresolved`), not
+/// re-derived here.
+pub fn check_unresolved_node_references(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
+    nodes
+        .iter()
+        .filter(|n| n.unresolved_reference)
+        .map(|n| {
+            ValidationIssue::new(
+                ValidationCategory::UnresolvedReference,
+                Some(n.id),
+                "node references a destination that no longer exists or is disabled",
             )
         })
         .collect()
@@ -577,7 +596,7 @@ mod tests {
         let mut trigger = base_trigger();
         trigger.unresolved_reference = true;
 
-        let issues = check_unresolved_references(&[trigger.clone()]);
+        let issues = check_unresolved_trigger_references(&[trigger.clone()]);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].category, ValidationCategory::UnresolvedReference);
         assert_eq!(issues[0].severity, ValidationSeverity::Error);
@@ -586,6 +605,24 @@ mod tests {
     #[test]
     fn resolved_trigger_is_not_flagged() {
         let trigger = base_trigger();
-        assert!(check_unresolved_references(&[trigger]).is_empty());
+        assert!(check_unresolved_trigger_references(&[trigger]).is_empty());
+    }
+
+    #[test]
+    fn unresolved_node_is_flagged_as_an_error() {
+        let mut node = base_node(CoreNodeType::Transport);
+        node.unresolved_reference = true;
+
+        let issues = check_unresolved_node_references(&[node.clone()]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::UnresolvedReference);
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, Some(node.id));
+    }
+
+    #[test]
+    fn resolved_node_is_not_flagged() {
+        let node = base_node(CoreNodeType::Transport);
+        assert!(check_unresolved_node_references(&[node]).is_empty());
     }
 }

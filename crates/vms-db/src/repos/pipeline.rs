@@ -23,8 +23,8 @@ use crate::entities::{
 
 use super::pipeline_validation::{
     check_config_completeness, check_config_shape, check_dangling_camera_references,
-    check_disconnected, check_structural_violations, check_unresolved_references, ValidationIssue,
-    ValidationSeverity,
+    check_disconnected, check_structural_violations, check_unresolved_node_references,
+    check_unresolved_trigger_references, ValidationIssue, ValidationSeverity,
 };
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
@@ -1100,7 +1100,8 @@ impl PipelineRepo {
         issues.extend(check_structural_violations(&nodes, &edges));
         issues.extend(check_disconnected(&nodes, &edges));
         issues.extend(check_dangling_camera_references(&nodes, &camera_ids));
-        issues.extend(check_unresolved_references(&triggers));
+        issues.extend(check_unresolved_trigger_references(&triggers));
+        issues.extend(check_unresolved_node_references(&nodes));
         Ok(issues)
     }
 
@@ -3460,5 +3461,52 @@ mod tests {
             repo.mark_destination_disabled(dest_id).await.unwrap().len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn enable_is_blocked_once_its_transport_nodes_destination_is_disabled() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let dest_id = test_destination(&repo, true).await;
+
+        let root = repo
+            .create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
+            .await
+            .unwrap();
+        let transport = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(dest_id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        repo.create_edge(
+            pipeline_id,
+            CreateEdge {
+                from_node_id: root.id,
+                to_node_id: transport.id,
+                edge_type: CoreEdgeType::Default,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Complete and valid on its own — confirm it enables before the
+        // destination is touched, then disable again to test the actual case.
+        assert!(matches!(
+            repo.set_enabled(pipeline_id, true).await.unwrap(),
+            EnableOutcome::Applied
+        ));
+        repo.set_enabled(pipeline_id, false).await.unwrap();
+
+        repo.mark_destination_disabled(dest_id).await.unwrap();
+
+        assert!(matches!(
+            repo.set_enabled(pipeline_id, true).await.unwrap(),
+            EnableOutcome::BlockedByErrors(_)
+        ));
     }
 }
