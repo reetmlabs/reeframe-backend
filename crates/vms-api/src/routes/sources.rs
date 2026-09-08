@@ -154,15 +154,32 @@ pub async fn get_source(req: &mut Request, depot: &mut Depot) -> Result<Json<Sou
     Ok(Json(SourceDto::from(source)))
 }
 
+/// Response for `PATCH /sources/{id}`: the updated source, plus any
+/// triggers whose unresolved-reference status changed as a side effect of
+/// this update (only non-empty when `enabled` was flipped).
+#[derive(Serialize)]
+struct UpdateSourceResponse {
+    #[serde(flatten)]
+    source: SourceDto,
+    affected_triggers: Vec<AffectedTriggerDto>,
+}
+
 /// PATCH /sources/{id}
 #[handler]
 pub async fn update_source(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<SourceDto>, ApiError> {
+) -> Result<Json<UpdateSourceResponse>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let body: UpdateSourceBody = parse_body(req).await?;
+
+    let was_enabled = state
+        .source_repo
+        .get(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("source {id} not found")))?
+        .enabled;
 
     let input = UpdateSource {
         name: body.name,
@@ -173,7 +190,19 @@ pub async fn update_source(
     };
 
     let source = state.source_repo.update(id, input).await?;
-    Ok(Json(SourceDto::from(source)))
+
+    // Only a real enabled/disabled transition marks or clears dependent
+    // triggers — every other field change leaves them alone.
+    let affected = match (was_enabled, source.enabled) {
+        (true, false) => state.pipeline_repo.mark_source_disabled(id).await?,
+        (false, true) => state.pipeline_repo.clear_source_unresolved(id).await?,
+        _ => Vec::new(),
+    };
+
+    Ok(Json(UpdateSourceResponse {
+        source: SourceDto::from(source),
+        affected_triggers: affected.into_iter().map(AffectedTriggerDto::from).collect(),
+    }))
 }
 
 /// DELETE /sources/{id}
