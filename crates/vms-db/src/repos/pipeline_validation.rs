@@ -192,13 +192,10 @@ fn reachable_from_root(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Option
     Some(reached)
 }
 
-/// DAG-level structural rules: exactly one trigger_root node, no cycles,
-/// condition nodes with exactly one true/false outgoing edge each,
-/// transport/device-control nodes as leaves. Reuses `PipelineDag::compile`
-/// rather than re-deriving these rules. Only checked against the subgraph
-/// reachable from the trigger root (see `reachable_from_root`) — an
-/// unrelated disconnected node is `check_disconnected`'s problem to report,
-/// not grounds for a spurious "wrong root count" or "cycle" here too.
+/// DAG-level structural rules, reusing `PipelineDag::compile` rather than
+/// re-deriving them. Checked only against the subgraph reachable from the
+/// trigger root, so an unrelated disconnected node doesn't also masquerade
+/// as a "wrong root count" or "cycle" here.
 pub fn check_structural_violations(
     nodes: &[PipelineNode],
     edges: &[PipelineEdge],

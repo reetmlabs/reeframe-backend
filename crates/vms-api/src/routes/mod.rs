@@ -237,6 +237,9 @@ fn protected_routes() -> Router {
                         .push(Router::with_path("disable").post(pipelines::disable_pipeline))
                         .push(Router::with_path("trigger").post(pipelines::trigger_pipeline))
                         .push(
+                            Router::with_path("validation").get(pipelines::get_pipeline_validation),
+                        )
+                        .push(
                             Router::with_path("runs")
                                 .get(pipelines::list_runs)
                                 .push(Router::with_path("{run_id}").get(pipelines::get_run)),

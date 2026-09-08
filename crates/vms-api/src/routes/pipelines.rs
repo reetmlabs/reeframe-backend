@@ -7,6 +7,7 @@ use vms_db::{
         pipeline_run, run_node_result,
     },
     repos::pipeline::{CreatePipeline, UpdatePipeline},
+    repos::{ValidationCategory, ValidationIssue, ValidationSeverity},
 };
 
 use crate::{
@@ -25,10 +26,25 @@ pub struct PipelineDto {
     pub enabled: bool,
     pub created_at: chrono::DateTime<chrono::FixedOffset>,
     pub updated_at: chrono::DateTime<chrono::FixedOffset>,
+    pub validation_error_count: usize,
+    pub validation_warning_count: usize,
 }
 
 impl From<pipeline::Model> for PipelineDto {
     fn from(m: pipeline::Model) -> Self {
+        // Already computed and stored by PipelineRepo::revalidate — just
+        // counting, no graph analysis on this (hot, list-heavy) path.
+        let issues: Vec<ValidationIssue> =
+            serde_json::from_value(m.validation_issues).unwrap_or_default();
+        let validation_error_count = issues
+            .iter()
+            .filter(|i| i.severity == ValidationSeverity::Error)
+            .count();
+        let validation_warning_count = issues
+            .iter()
+            .filter(|i| i.severity == ValidationSeverity::Warning)
+            .count();
+
         Self {
             id: m.id,
             name: m.name,
@@ -37,6 +53,29 @@ impl From<pipeline::Model> for PipelineDto {
             enabled: m.enabled,
             created_at: m.created_at,
             updated_at: m.updated_at,
+            validation_error_count,
+            validation_warning_count,
+        }
+    }
+}
+
+/// One problem with a pipeline's current definition, as reported by
+/// `GET /pipelines/{id}/validation`.
+#[derive(Serialize)]
+pub struct ValidationIssueDto {
+    pub node_id: Option<Uuid>,
+    pub category: ValidationCategory,
+    pub severity: ValidationSeverity,
+    pub message: String,
+}
+
+impl From<ValidationIssue> for ValidationIssueDto {
+    fn from(i: ValidationIssue) -> Self {
+        Self {
+            node_id: i.node_id,
+            category: i.category,
+            severity: i.severity,
+            message: i.message,
         }
     }
 }
@@ -296,6 +335,29 @@ pub async fn trigger_pipeline(
 
     res.status_code(StatusCode::ACCEPTED);
     Ok(())
+}
+
+/// GET /pipelines/:id/validation
+#[handler]
+pub async fn get_pipeline_validation(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<Vec<ValidationIssueDto>>, ApiError> {
+    let state = depot.obtain::<AppState>().expect("AppState not in depot");
+    let id = parse_id(req)?;
+
+    let pipeline = state
+        .pipeline_repo
+        .get(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("pipeline {id} not found")))?;
+
+    let issues: Vec<ValidationIssue> = serde_json::from_value(pipeline.validation_issues)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(
+        issues.into_iter().map(ValidationIssueDto::from).collect(),
+    ))
 }
 
 /// GET /pipelines/:id/runs

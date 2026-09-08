@@ -171,11 +171,9 @@ impl PipelineRepo {
         Ok(())
     }
 
-    /// Disable always succeeds and skips revalidation — there's no reason to
-    /// block turning something off. Enable revalidates first (catching
-    /// drift since the pipeline's last save, e.g. a referenced camera
-    /// deleted since then) and refuses if any error-severity issue is
-    /// found, leaving `enabled` untouched.
+    /// Disable always succeeds unconditionally. Enable revalidates first and
+    /// refuses (leaving `enabled` untouched) if any error-severity issue is
+    /// found.
     pub async fn set_enabled(&self, id: Uuid, enabled: bool) -> Result<EnableOutcome, VmsError> {
         if enabled {
             let issues = self.validate_pipeline(id).await?;
@@ -2557,10 +2555,7 @@ mod tests {
 
     #[tokio::test]
     async fn revalidate_on_a_missing_pipeline_is_a_noop() {
-        // "No-op" means no row gets written — the returned issues aren't
-        // necessarily empty, since validate_pipeline still computes against
-        // an (empty) node list and reports the resulting structural
-        // violation regardless of whether a pipeline backs it.
+        // "No-op" means no row gets written, not that issues comes back empty.
         let repo = test_repo().await;
         let missing_id = Uuid::new_v4();
         assert!(repo.revalidate(missing_id).await.is_ok());
@@ -2609,10 +2604,8 @@ mod tests {
             .await
             .contains(&ValidationCategory::ConfigIncomplete));
 
-        // Adding a trigger_root changes the picture again: with a valid
-        // root now in place, the still-unwired Transport becomes
-        // "disconnected" instead — a category that could only appear after
-        // this second create_node call re-ran validation.
+        // Disconnected only appears once a root exists to be unreachable
+        // from — proves this second create_node call re-ran validation too.
         repo.create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
             .await
             .unwrap();
@@ -2655,10 +2648,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Both nodes are individually complete but nothing wires them
-        // together yet — some number of issues, not asserting exactly how
-        // many (both the disconnected Transport and the extra parentless
-        // node trip separate checks).
+        // Not asserting the exact count — both the disconnected node and
+        // the extra parentless node trip their own separate checks.
         let disconnected_count = stored_issue_count(&repo, pipeline_id).await;
         assert!(disconnected_count > 0);
 
