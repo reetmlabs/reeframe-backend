@@ -165,6 +165,8 @@ impl PipelineRepo {
 
     /// Enable or disable a pipeline. Callers should follow this with
     /// `PipelineRegistry::reload()` to reconcile resource ref-counts.
+    /// Revalidates on enable (not disable), to catch drift since the
+    /// pipeline's last save — e.g. a referenced camera deleted since then.
     pub async fn set_enabled(&self, id: Uuid, enabled: bool) -> Result<(), VmsError> {
         ActiveModel {
             id: Set(id),
@@ -175,6 +177,10 @@ impl PipelineRepo {
         .update(&self.db)
         .await
         .map_err(db_err)?;
+
+        if enabled {
+            self.revalidate(id).await?;
+        }
         Ok(())
     }
 
@@ -2638,5 +2644,73 @@ mod tests {
             stored_issue_count(&repo, pipeline_id).await,
             disconnected_count
         );
+    }
+
+    #[tokio::test]
+    async fn enabling_catches_drift_since_the_last_save() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let camera = camera::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            name: Set("test cam".into()),
+            description: Set(None),
+            rtsp_url: Set("rtsp://example/test".into()),
+            sub_rtsp_url: Set(None),
+            codec: Set(None),
+            manufacturer: Set(None),
+            model: Set(None),
+            username: Set(None),
+            password_enc: Set(None),
+            extra_config: Set(serde_json::json!({})),
+            ring_buffer_duration_secs: Set(30),
+            ring_buffer_storage: Set(camera::RingBufferStorage::Memory),
+            enabled: Set(true),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+            retention_days: Set(None),
+            retention_disk_threshold_percent: Set(None),
+            desired_recording: Set(false),
+        }
+        .insert(&repo.db)
+        .await
+        .unwrap();
+
+        let root = repo
+            .create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
+            .await
+            .unwrap();
+        let action = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    action_config: Some(extract_clip_config(Some(camera.id))),
+                    ..bare_node(CoreNodeType::Action)
+                },
+            )
+            .await
+            .unwrap();
+        repo.create_edge(
+            pipeline_id,
+            CreateEdge {
+                from_node_id: root.id,
+                to_node_id: action.id,
+                edge_type: CoreEdgeType::Default,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored_issue_count(&repo, pipeline_id).await, 0);
+
+        // The camera is deleted without touching this pipeline again — its
+        // stored issues stay stale until something re-checks them.
+        camera::Entity::delete_by_id(camera.id)
+            .exec(&repo.db)
+            .await
+            .unwrap();
+        assert_eq!(stored_issue_count(&repo, pipeline_id).await, 0);
+
+        repo.set_enabled(pipeline_id, true).await.unwrap();
+        assert_eq!(stored_issue_count(&repo, pipeline_id).await, 1);
     }
 }
