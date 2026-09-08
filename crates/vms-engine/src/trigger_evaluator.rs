@@ -451,6 +451,10 @@ impl TriggerEvaluator {
                                 if trigger.last_error.is_some() {
                                     self.clear_trigger_error(trigger_id).await;
                                 }
+                                tracing::info!(
+                                    %pipeline_id, %trigger_id, matched,
+                                    "Trigger condition evaluated",
+                                );
                                 if !matched {
                                     continue;
                                 }
@@ -688,10 +692,18 @@ impl TriggerEvaluator {
             return;
         };
 
+        tracing::info!(
+            pipeline_id  = %ctx.pipeline_id,
+            trigger_id   = %ctx.trigger_id,
+            trigger_type = ?ctx.trigger_type,
+            fired_at     = %ctx.fired_at,
+            "Pipeline trigger fired",
+        );
+
         tokio::spawn(async move {
-            if let Err(e) = executor.execute(ctx, pipeline).await {
-                tracing::error!(error = %e, "Pipeline execution failed");
-            }
+            // execute() already logs its own run-scoped outcome (with
+            // run_id) — no need for a second, less-correlated echo here.
+            let _ = executor.execute(ctx, pipeline).await;
         });
     }
 }
