@@ -11,6 +11,22 @@ use crate::{
     state::AppState,
 };
 
+/// A node left with an unresolved reference by a destination delete/disable.
+#[derive(Serialize)]
+struct AffectedNodeDto {
+    node_id: Uuid,
+    pipeline_id: Uuid,
+}
+
+impl From<vms_core::pipeline::PipelineNode> for AffectedNodeDto {
+    fn from(n: vms_core::pipeline::PipelineNode) -> Self {
+        Self {
+            node_id: n.id,
+            pipeline_id: n.pipeline_id,
+        }
+    }
+}
+
 // -- Credential masking --
 
 const CREDENTIAL_FIELDS: &[&str] = &[
@@ -139,15 +155,32 @@ pub async fn get_destination(
     Ok(Json(DestinationDto::from(dest)))
 }
 
+/// Response for `PATCH /destinations/{id}`: the updated destination, plus
+/// any nodes whose unresolved-reference status changed as a side effect of
+/// this update (only non-empty when `enabled` was flipped).
+#[derive(Serialize)]
+struct UpdateDestinationResponse {
+    #[serde(flatten)]
+    destination: DestinationDto,
+    affected_nodes: Vec<AffectedNodeDto>,
+}
+
 /// PATCH /destinations/{id}
 #[handler]
 pub async fn update_destination(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<DestinationDto>, ApiError> {
+) -> Result<Json<UpdateDestinationResponse>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let body: UpdateDestinationBody = parse_body(req).await?;
+
+    let was_enabled = state
+        .dest_repo
+        .get(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("destination {id} not found")))?
+        .enabled;
 
     let input = UpdateDestination {
         name: body.name,
@@ -158,7 +191,19 @@ pub async fn update_destination(
     };
 
     let dest = state.dest_repo.update(id, input).await?;
-    Ok(Json(DestinationDto::from(dest)))
+
+    // Only a real enabled/disabled transition marks or clears dependent
+    // nodes — every other field change leaves them alone.
+    let affected = match (was_enabled, dest.enabled) {
+        (true, false) => state.pipeline_repo.mark_destination_disabled(id).await?,
+        (false, true) => state.pipeline_repo.clear_destination_unresolved(id).await?,
+        _ => Vec::new(),
+    };
+
+    Ok(Json(UpdateDestinationResponse {
+        destination: DestinationDto::from(dest),
+        affected_nodes: affected.into_iter().map(AffectedNodeDto::from).collect(),
+    }))
 }
 
 /// DELETE /destinations/{id}
@@ -170,7 +215,17 @@ pub async fn delete_destination(
 ) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
+
+    // Nodes that pointed at this destination aren't dropped or left
+    // blocking the delete — they're unlinked and marked unresolved instead.
+    let affected = state.pipeline_repo.unlink_deleted_destination(id).await?;
     state.dest_repo.delete(id).await?;
-    res.status_code(StatusCode::NO_CONTENT);
+
+    res.render(Json(
+        affected
+            .into_iter()
+            .map(AffectedNodeDto::from)
+            .collect::<Vec<_>>(),
+    ));
     Ok(())
 }

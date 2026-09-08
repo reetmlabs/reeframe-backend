@@ -1007,10 +1007,77 @@ impl PipelineRepo {
         Ok(updated)
     }
 
+    /// Called before deleting a destination: clears `destination_id` and
+    /// marks `unresolved_reference` on every node that pointed at it,
+    /// scoped to the individual node rather than the whole pipeline.
+    /// Returns the affected nodes.
+    pub async fn unlink_deleted_destination(
+        &self,
+        destination_id: Uuid,
+    ) -> Result<Vec<PipelineNode>, VmsError> {
+        let nodes = pipeline_node::Entity::find()
+            .filter(pipeline_node::Column::DestinationId.eq(destination_id))
+            .all(&self.db)
+            .await
+            .map_err(db_err)?;
+
+        let mut updated = Vec::with_capacity(nodes.len());
+        for n in nodes {
+            let mut active: pipeline_node::ActiveModel = n.into();
+            active.destination_id = Set(None);
+            active.unresolved_reference = Set(true);
+            let saved = active.update(&self.db).await.map_err(db_err)?;
+            updated.push(node_from_db(saved)?);
+        }
+        Ok(updated)
+    }
+
+    /// Marks every node currently pointing at `destination_id` as having an
+    /// unresolved reference, without touching `destination_id` itself — the
+    /// destination still exists, just disabled. Returns the affected nodes.
+    pub async fn mark_destination_disabled(
+        &self,
+        destination_id: Uuid,
+    ) -> Result<Vec<PipelineNode>, VmsError> {
+        self.set_destination_unresolved(destination_id, true).await
+    }
+
+    /// Clears the unresolved-reference status on every node currently
+    /// pointing at `destination_id` — called when the destination is
+    /// re-enabled. Returns the affected nodes.
+    pub async fn clear_destination_unresolved(
+        &self,
+        destination_id: Uuid,
+    ) -> Result<Vec<PipelineNode>, VmsError> {
+        self.set_destination_unresolved(destination_id, false).await
+    }
+
+    async fn set_destination_unresolved(
+        &self,
+        destination_id: Uuid,
+        unresolved: bool,
+    ) -> Result<Vec<PipelineNode>, VmsError> {
+        let nodes = pipeline_node::Entity::find()
+            .filter(pipeline_node::Column::DestinationId.eq(destination_id))
+            .filter(pipeline_node::Column::UnresolvedReference.ne(unresolved))
+            .all(&self.db)
+            .await
+            .map_err(db_err)?;
+
+        let mut updated = Vec::with_capacity(nodes.len());
+        for n in nodes {
+            let mut active: pipeline_node::ActiveModel = n.into();
+            active.unresolved_reference = Set(unresolved);
+            let saved = active.update(&self.db).await.map_err(db_err)?;
+            updated.push(node_from_db(saved)?);
+        }
+        Ok(updated)
+    }
+
     // -- Pipeline validation --
 
     /// Every problem currently found with `pipeline_id`'s definition, across
-    /// all five categories (see `pipeline_validation`). This is the one
+    /// all six categories (see `pipeline_validation`). This is the one
     /// place that combines them — callers never run the individual checks
     /// themselves.
     pub async fn validate_pipeline(
@@ -3268,5 +3335,130 @@ mod tests {
             .await
             .unwrap();
         assert!(updated.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn unlink_deleted_destination_marks_and_unlinks_referencing_nodes() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let dest_id = test_destination(&repo, true).await;
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(dest_id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+
+        let affected = repo.unlink_deleted_destination(dest_id).await.unwrap();
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0].id, node.id);
+
+        let reloaded = repo.get_node(node.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.destination_id, None);
+        assert!(reloaded.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn mark_destination_disabled_keeps_destination_id_and_marks_unresolved() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let dest_id = test_destination(&repo, true).await;
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(dest_id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+
+        let affected = repo.mark_destination_disabled(dest_id).await.unwrap();
+        assert_eq!(affected.len(), 1);
+
+        let reloaded = repo.get_node(node.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.destination_id, Some(dest_id));
+        assert!(reloaded.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn clear_destination_unresolved_clears_only_that_destinations_nodes() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let dest_id = test_destination(&repo, true).await;
+        let other_dest_id = test_destination(&repo, true).await;
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(dest_id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        let other_node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(other_dest_id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        repo.mark_destination_disabled(dest_id).await.unwrap();
+        repo.mark_destination_disabled(other_dest_id).await.unwrap();
+
+        let cleared = repo.clear_destination_unresolved(dest_id).await.unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].id, node.id);
+
+        assert!(
+            !repo
+                .get_node(node.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unresolved_reference
+        );
+        assert!(
+            repo.get_node(other_node.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unresolved_reference
+        );
+    }
+
+    #[tokio::test]
+    async fn set_destination_unresolved_is_idempotent() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let dest_id = test_destination(&repo, true).await;
+        repo.create_node(
+            pipeline_id,
+            CreateNode {
+                destination_id: Some(dest_id),
+                ..bare_node(CoreNodeType::Transport)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            repo.mark_destination_disabled(dest_id).await.unwrap().len(),
+            1
+        );
+        // Already marked — nothing left to change.
+        assert_eq!(
+            repo.mark_destination_disabled(dest_id).await.unwrap().len(),
+            0
+        );
     }
 }
