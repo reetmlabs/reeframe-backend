@@ -605,6 +605,16 @@ impl TriggerEvaluator {
                 let key = (pipeline.id, trigger.id);
 
                 if operator.evaluate(actual, *threshold) {
+                    // Logged only on the rising/falling edge, not every poll
+                    // — this runs continuously for the daemon's lifetime, so
+                    // logging every evaluation would flood the timeline
+                    // rather than inform it.
+                    if !self.stat_sustained.contains_key(&key) {
+                        tracing::info!(
+                            pipeline_id = %pipeline.id, trigger_id = %trigger.id, actual,
+                            "Stat trigger condition became true",
+                        );
+                    }
                     // Record the first instant the condition was observed true.
                     let observed_at = *self.stat_sustained.entry(key).or_insert(now);
 
@@ -633,10 +643,13 @@ impl TriggerEvaluator {
                             });
                         }
                     }
-                } else {
+                } else if self.stat_sustained.remove(&key).is_some() {
                     // Condition no longer met — reset sustained clock so the
                     // next rising edge requires a fresh sustained period.
-                    self.stat_sustained.remove(&key);
+                    tracing::info!(
+                        pipeline_id = %pipeline.id, trigger_id = %trigger.id, actual,
+                        "Stat trigger condition no longer met — sustained timer reset",
+                    );
                 }
             }
         }
