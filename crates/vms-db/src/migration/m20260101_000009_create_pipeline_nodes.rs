@@ -98,4 +98,5 @@ pub enum PipelineNode {
     PosX,
     PosY,
     CreatedAt,
+    UnresolvedReference,
 }

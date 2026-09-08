@@ -84,6 +84,10 @@ pub struct Model {
     /// Vertical canvas position (UI only, ignored at runtime).
     pub pos_y: Option<f64>,
     pub created_at: DateTimeWithTimeZone,
+    /// Set when `destination_id`'s destination is deleted or disabled,
+    /// instead of this row being dropped or the delete/disable being
+    /// blocked.
+    pub unresolved_reference: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

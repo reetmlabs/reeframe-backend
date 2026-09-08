@@ -329,6 +329,7 @@ mod tests {
             label: None,
             pos_x: None,
             pos_y: None,
+            unresolved_reference: false,
         }
     }
 

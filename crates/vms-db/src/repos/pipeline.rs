@@ -312,8 +312,10 @@ impl PipelineRepo {
             input.destination_id,
             &input.condition_expr,
         )?;
+        let mut unresolved_reference = false;
         if let Some(dest_id) = input.destination_id {
-            self.require_destination_exists(dest_id).await?;
+            let dest = self.require_destination_exists(dest_id).await?;
+            unresolved_reference = !dest.enabled;
         }
         if let Some(cl_id) = input.contact_list_id {
             self.require_contact_list_exists(cl_id).await?;
@@ -353,6 +355,7 @@ impl PipelineRepo {
             pos_x: Set(input.pos_x),
             pos_y: Set(input.pos_y),
             created_at: Set(now()),
+            unresolved_reference: Set(unresolved_reference),
         }
         .insert(&self.db)
         .await
@@ -398,8 +401,17 @@ impl PipelineRepo {
             &input.destination_id,
             &input.condition_expr,
         )?;
-        if let Some(Some(dest_id)) = input.destination_id {
-            self.require_destination_exists(dest_id).await?;
+        // Only recompute unresolved_reference when destination_id is
+        // actually being changed by this call, same rationale as
+        // update_trigger's source_id handling.
+        let mut new_unresolved_reference = None;
+        match input.destination_id {
+            Some(Some(dest_id)) => {
+                let dest = self.require_destination_exists(dest_id).await?;
+                new_unresolved_reference = Some(!dest.enabled);
+            }
+            Some(None) => new_unresolved_reference = Some(false),
+            None => {}
         }
         if let Some(Some(cl_id)) = input.contact_list_id {
             self.require_contact_list_exists(cl_id).await?;
@@ -429,6 +441,9 @@ impl PipelineRepo {
 
         if let Some(v) = input.destination_id {
             active.destination_id = Set(v);
+        }
+        if let Some(v) = new_unresolved_reference {
+            active.unresolved_reference = Set(v);
         }
         if let Some(v) = input.contact_list_id {
             active.contact_list_id = Set(v);
@@ -610,12 +625,17 @@ impl PipelineRepo {
     // `destination_id`/`contact_list_id` too since it's the exact same bug
     // shape.
 
-    async fn require_destination_exists(&self, destination_id: Uuid) -> Result<(), VmsError> {
+    /// Returns the destination row so callers can also check `enabled` — a
+    /// node created or repointed against a disabled destination is still
+    /// allowed, just immediately marked `unresolved_reference`.
+    async fn require_destination_exists(
+        &self,
+        destination_id: Uuid,
+    ) -> Result<destination::Model, VmsError> {
         destination::Entity::find_by_id(destination_id)
             .one(&self.db)
             .await
             .map_err(db_err)?
-            .map(|_| ())
             .ok_or(VmsError::DestinationNotFound(destination_id))
     }
 
@@ -1366,6 +1386,7 @@ fn node_from_db(m: pipeline_node::Model) -> Result<PipelineNode, VmsError> {
         label: m.label,
         pos_x: m.pos_x,
         pos_y: m.pos_y,
+        unresolved_reference: m.unresolved_reference,
     })
 }
 
@@ -1874,6 +1895,7 @@ mod tests {
             pos_x: None,
             pos_y: None,
             created_at: now(),
+            unresolved_reference: false,
         };
         let node = node_from_db(model).unwrap();
         assert!(node.action_config.is_none());
@@ -1894,6 +1916,7 @@ mod tests {
             label: None,
             pos_x: None,
             pos_y: None,
+            unresolved_reference: false,
         }
     }
 
@@ -2475,6 +2498,21 @@ mod tests {
         }
     }
 
+    /// An `UpdateNode` that leaves every field untouched — start from this
+    /// and override just the field(s) a test cares about.
+    fn bare_update_node() -> UpdateNode {
+        UpdateNode {
+            action_config: None,
+            transport_config: None,
+            destination_id: None,
+            contact_list_id: None,
+            condition_expr: None,
+            label: None,
+            pos_x: None,
+            pos_y: None,
+        }
+    }
+
     #[tokio::test]
     async fn validate_pipeline_reports_all_five_categories_at_once() {
         use crate::repos::pipeline_validation::ValidationCategory;
@@ -2592,6 +2630,7 @@ mod tests {
             pos_x: Set(None),
             pos_y: Set(None),
             created_at: Set(now()),
+            unresolved_reference: Set(false),
         }
         .insert(&repo.db)
         .await
@@ -3077,5 +3116,157 @@ mod tests {
             repo.set_enabled(pipeline_id, true).await.unwrap(),
             EnableOutcome::BlockedByErrors(_)
         ));
+    }
+
+    // -- destination lifecycle: create_node / update_node unresolved_reference --
+
+    async fn test_destination(repo: &PipelineRepo, enabled: bool) -> Uuid {
+        let id = Uuid::new_v4();
+        destination::ActiveModel {
+            id: Set(id),
+            name: Set("test destination".into()),
+            description: Set(None),
+            dest_type: Set(destination::DestinationType::Local),
+            config: Set(serde_json::json!({})),
+            enabled: Set(enabled),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&repo.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn creating_a_transport_node_against_a_disabled_destination_is_immediately_unresolved() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let dest_id = test_destination(&repo, false).await;
+
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(dest_id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(node.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn creating_a_transport_node_against_an_enabled_destination_is_not_unresolved() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let dest_id = test_destination(&repo, true).await;
+
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(dest_id),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!node.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn repointing_a_node_to_a_disabled_destination_marks_it_unresolved() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let enabled_dest = test_destination(&repo, true).await;
+        let disabled_dest = test_destination(&repo, false).await;
+
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(enabled_dest),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!node.unresolved_reference);
+
+        let updated = repo
+            .update_node(
+                node.id,
+                UpdateNode {
+                    destination_id: Some(Some(disabled_dest)),
+                    ..bare_update_node()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(updated.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn clearing_a_nodes_destination_id_clears_unresolved_reference() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let disabled_dest = test_destination(&repo, false).await;
+
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(disabled_dest),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(node.unresolved_reference);
+
+        let updated = repo
+            .update_node(
+                node.id,
+                UpdateNode {
+                    destination_id: Some(None),
+                    ..bare_update_node()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!updated.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn updating_unrelated_fields_leaves_unresolved_reference_untouched() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let disabled_dest = test_destination(&repo, false).await;
+
+        let node = repo
+            .create_node(
+                pipeline_id,
+                CreateNode {
+                    destination_id: Some(disabled_dest),
+                    ..bare_node(CoreNodeType::Transport)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(node.unresolved_reference);
+
+        let updated = repo
+            .update_node(
+                node.id,
+                UpdateNode {
+                    label: Some(Some("renamed".into())),
+                    ..bare_update_node()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(updated.unresolved_reference);
     }
 }

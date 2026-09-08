@@ -135,6 +135,10 @@ pub struct PipelineNode {
     pub pos_x: Option<f64>,
     /// Vertical canvas position (ignored at runtime, used by the UI only).
     pub pos_y: Option<f64>,
+    /// Set when `destination_id`'s destination is deleted or disabled,
+    /// instead of this row being dropped or the delete/disable being
+    /// blocked.
+    pub unresolved_reference: bool,
 }
 
 /// A raw pipeline edge row loaded from the database before compilation.
@@ -527,6 +531,7 @@ mod tests {
             label: Some("Root".into()),
             pos_x: None,
             pos_y: None,
+            unresolved_reference: false,
         }
     }
 
@@ -543,6 +548,7 @@ mod tests {
             label: None,
             pos_x: None,
             pos_y: None,
+            unresolved_reference: false,
         }
     }
 
@@ -587,6 +593,7 @@ mod tests {
             label: None,
             pos_x: None,
             pos_y: None,
+            unresolved_reference: false,
         };
         let b_id = Uuid::new_v4();
         let mut b = a.clone();
@@ -616,6 +623,7 @@ mod tests {
             label: None,
             pos_x: None,
             pos_y: None,
+            unresolved_reference: false,
         };
         let e = edge(pid, root.id, bad_transport.id);
         let result = PipelineDag::compile(vec![root, bad_transport], vec![e]);
@@ -654,6 +662,7 @@ mod tests {
             label: None,
             pos_x: None,
             pos_y: None,
+            unresolved_reference: false,
         };
         let leaf = transport_node(pid, Uuid::new_v4());
         let e1 = edge(pid, root.id, cond.id);
