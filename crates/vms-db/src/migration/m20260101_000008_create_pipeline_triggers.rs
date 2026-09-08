@@ -127,4 +127,5 @@ pub enum PipelineTrigger {
     CreatedAt,
     LastError,
     LastErrorAt,
+    UnresolvedReference,
 }

@@ -627,12 +627,14 @@ impl PipelineRepo {
             .ok_or(VmsError::ContactListNotFound(contact_list_id))
     }
 
-    async fn require_source_exists(&self, source_id: Uuid) -> Result<(), VmsError> {
+    /// Returns the source row so callers can also check `enabled` — a
+    /// trigger created or repointed against a disabled source is still
+    /// allowed, just immediately marked `unresolved_reference`.
+    async fn require_source_exists(&self, source_id: Uuid) -> Result<source::Model, VmsError> {
         source::Entity::find_by_id(source_id)
             .one(&self.db)
             .await
             .map_err(db_err)?
-            .map(|_| ())
             .ok_or(VmsError::SourceNotFound(source_id))
     }
 
@@ -716,8 +718,10 @@ impl PipelineRepo {
         input: CreateTrigger,
     ) -> Result<PipelineTrigger, VmsError> {
         validate_trigger_shape(&input.config, input.source_id, input.camera_id)?;
+        let mut unresolved_reference = false;
         if let Some(src_id) = input.source_id {
-            self.require_source_exists(src_id).await?;
+            let source = self.require_source_exists(src_id).await?;
+            unresolved_reference = !source.enabled;
         }
         let camera_id = effective_camera_id(&input.config, input.camera_id);
         if let Some(cam_id) = camera_id {
@@ -736,6 +740,7 @@ impl PipelineRepo {
             created_at: Set(now()),
             last_error: Set(None),
             last_error_at: Set(None),
+            unresolved_reference: Set(unresolved_reference),
         }
         .insert(&self.db)
         .await
@@ -820,8 +825,15 @@ impl PipelineRepo {
             effective_source_id,
             effective_camera_id_input,
         )?;
+        // Only recompute unresolved_reference when source_id is actually
+        // being changed by this call — an update that leaves it alone
+        // shouldn't clear or reassert a status set by something else.
+        let mut new_unresolved_reference = None;
         if let Some(src_id) = effective_source_id {
-            self.require_source_exists(src_id).await?;
+            let source = self.require_source_exists(src_id).await?;
+            if input.source_id.is_some() {
+                new_unresolved_reference = Some(!source.enabled);
+            }
         }
         let derived_camera_id = effective_camera_id(&effective_config, effective_camera_id_input);
         if let Some(cam_id) = derived_camera_id {
@@ -834,6 +846,9 @@ impl PipelineRepo {
         }
         if let Some(v) = input.source_id {
             active.source_id = Set(v);
+        }
+        if let Some(v) = new_unresolved_reference {
+            active.unresolved_reference = Set(v);
         }
         active.camera_id = Set(derived_camera_id);
         if let Some(v) = input.enabled {
@@ -903,19 +918,72 @@ impl PipelineRepo {
         Ok(())
     }
 
-    /// Deletes every trigger row referencing `source_id`, across all
-    /// pipelines — called before deleting a source, since `pipeline_triggers.
-    /// source_id` is `ON DELETE RESTRICT` and would otherwise reject it.
-    pub async fn delete_triggers_for_source(&self, source_id: Uuid) -> Result<(), VmsError> {
+    /// Called before deleting a source: clears `source_id` and marks
+    /// `unresolved_reference` on every trigger that pointed at it, instead
+    /// of deleting those trigger rows (which used to cascade here) or
+    /// letting `source_id`'s `ON DELETE RESTRICT` reject the delete. Returns
+    /// the affected trigger IDs.
+    pub async fn unlink_deleted_source(
+        &self,
+        source_id: Uuid,
+    ) -> Result<Vec<PipelineTrigger>, VmsError> {
         let triggers = pipeline_trigger::Entity::find()
             .filter(pipeline_trigger::Column::SourceId.eq(source_id))
             .all(&self.db)
             .await
             .map_err(db_err)?;
+
+        let mut updated = Vec::with_capacity(triggers.len());
         for t in triggers {
-            self.delete_trigger(t.id).await?;
+            let mut active: pipeline_trigger::ActiveModel = t.into();
+            active.source_id = Set(None);
+            active.unresolved_reference = Set(true);
+            let saved = active.update(&self.db).await.map_err(db_err)?;
+            updated.push(trigger_from_db(saved)?);
         }
-        Ok(())
+        Ok(updated)
+    }
+
+    /// Marks every trigger currently pointing at `source_id` as having an
+    /// unresolved reference, without touching `source_id` itself — the
+    /// source still exists, just disabled. Returns the affected triggers.
+    pub async fn mark_source_disabled(
+        &self,
+        source_id: Uuid,
+    ) -> Result<Vec<PipelineTrigger>, VmsError> {
+        self.set_source_unresolved(source_id, true).await
+    }
+
+    /// Clears the unresolved-reference status on every trigger currently
+    /// pointing at `source_id` — called when the source is re-enabled.
+    /// Returns the affected triggers.
+    pub async fn clear_source_unresolved(
+        &self,
+        source_id: Uuid,
+    ) -> Result<Vec<PipelineTrigger>, VmsError> {
+        self.set_source_unresolved(source_id, false).await
+    }
+
+    async fn set_source_unresolved(
+        &self,
+        source_id: Uuid,
+        unresolved: bool,
+    ) -> Result<Vec<PipelineTrigger>, VmsError> {
+        let triggers = pipeline_trigger::Entity::find()
+            .filter(pipeline_trigger::Column::SourceId.eq(source_id))
+            .filter(pipeline_trigger::Column::UnresolvedReference.ne(unresolved))
+            .all(&self.db)
+            .await
+            .map_err(db_err)?;
+
+        let mut updated = Vec::with_capacity(triggers.len());
+        for t in triggers {
+            let mut active: pipeline_trigger::ActiveModel = t.into();
+            active.unresolved_reference = Set(unresolved);
+            let saved = active.update(&self.db).await.map_err(db_err)?;
+            updated.push(trigger_from_db(saved)?);
+        }
+        Ok(updated)
     }
 
     // -- Pipeline validation --
@@ -1547,6 +1615,7 @@ fn trigger_from_db(m: pipeline_trigger::Model) -> Result<PipelineTrigger, VmsErr
         enabled: m.enabled,
         last_error: m.last_error,
         last_error_at: m.last_error_at.map(|dt| dt.with_timezone(&chrono::Utc)),
+        unresolved_reference: m.unresolved_reference,
     })
 }
 
@@ -2089,6 +2158,7 @@ mod tests {
             enabled,
             last_error: None,
             last_error_at: None,
+            unresolved_reference: false,
         }
     }
 
@@ -2807,5 +2877,152 @@ mod tests {
 
         let outcome = repo.set_enabled(pipeline_id, false).await.unwrap();
         assert!(matches!(outcome, EnableOutcome::Applied));
+    }
+
+    // -- source lifecycle: unlink_deleted_source / mark_source_disabled / clear_source_unresolved --
+
+    async fn test_source(repo: &PipelineRepo, enabled: bool) -> Uuid {
+        let id = Uuid::new_v4();
+        source::ActiveModel {
+            id: Set(id),
+            name: Set("test source".into()),
+            description: Set(None),
+            source_type: Set(source::SourceType::Mqtt),
+            config: Set(serde_json::json!({})),
+            enabled: Set(enabled),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&repo.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    fn event_trigger(source_id: Option<Uuid>) -> CreateTrigger {
+        CreateTrigger {
+            config: TriggerConfig::Event {
+                filter: None,
+                duration_secs: None,
+            },
+            source_id,
+            camera_id: None,
+            enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn creating_a_trigger_against_a_disabled_source_is_immediately_unresolved() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let source_id = test_source(&repo, false).await;
+
+        let trigger = repo
+            .create_trigger(pipeline_id, event_trigger(Some(source_id)))
+            .await
+            .unwrap();
+        assert!(trigger.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn creating_a_trigger_against_an_enabled_source_is_not_unresolved() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let source_id = test_source(&repo, true).await;
+
+        let trigger = repo
+            .create_trigger(pipeline_id, event_trigger(Some(source_id)))
+            .await
+            .unwrap();
+        assert!(!trigger.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn unlink_deleted_source_marks_and_unlinks_referencing_triggers() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let source_id = test_source(&repo, true).await;
+        let trigger = repo
+            .create_trigger(pipeline_id, event_trigger(Some(source_id)))
+            .await
+            .unwrap();
+
+        let affected = repo.unlink_deleted_source(source_id).await.unwrap();
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0].id, trigger.id);
+
+        let reloaded = repo.get_trigger(trigger.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.source_id, None);
+        assert!(reloaded.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn mark_source_disabled_keeps_source_id_and_marks_unresolved() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let source_id = test_source(&repo, true).await;
+        let trigger = repo
+            .create_trigger(pipeline_id, event_trigger(Some(source_id)))
+            .await
+            .unwrap();
+
+        let affected = repo.mark_source_disabled(source_id).await.unwrap();
+        assert_eq!(affected.len(), 1);
+
+        let reloaded = repo.get_trigger(trigger.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.source_id, Some(source_id));
+        assert!(reloaded.unresolved_reference);
+    }
+
+    #[tokio::test]
+    async fn clear_source_unresolved_clears_only_that_sources_triggers() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let source_id = test_source(&repo, true).await;
+        let other_source_id = test_source(&repo, true).await;
+        let trigger = repo
+            .create_trigger(pipeline_id, event_trigger(Some(source_id)))
+            .await
+            .unwrap();
+        let other_trigger = repo
+            .create_trigger(pipeline_id, event_trigger(Some(other_source_id)))
+            .await
+            .unwrap();
+        repo.mark_source_disabled(source_id).await.unwrap();
+        repo.mark_source_disabled(other_source_id).await.unwrap();
+
+        let cleared = repo.clear_source_unresolved(source_id).await.unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].id, trigger.id);
+
+        assert!(
+            !repo
+                .get_trigger(trigger.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unresolved_reference
+        );
+        assert!(
+            repo.get_trigger(other_trigger.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unresolved_reference
+        );
+    }
+
+    #[tokio::test]
+    async fn set_source_unresolved_is_idempotent() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let source_id = test_source(&repo, true).await;
+        repo.create_trigger(pipeline_id, event_trigger(Some(source_id)))
+            .await
+            .unwrap();
+
+        assert_eq!(repo.mark_source_disabled(source_id).await.unwrap().len(), 1);
+        // Already marked — nothing left to change.
+        assert_eq!(repo.mark_source_disabled(source_id).await.unwrap().len(), 0);
     }
 }

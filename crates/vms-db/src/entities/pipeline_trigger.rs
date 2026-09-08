@@ -36,6 +36,9 @@ pub struct Model {
     /// unknown identifier); `None` once the filter evaluates successfully.
     pub last_error: Option<String>,
     pub last_error_at: Option<DateTimeWithTimeZone>,
+    /// Set when `source_id`'s source is deleted or disabled, instead of
+    /// this row being dropped or the delete/disable being blocked.
+    pub unresolved_reference: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

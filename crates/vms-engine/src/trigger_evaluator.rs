@@ -845,6 +845,7 @@ mod tests {
                 },
                 last_error: None,
                 last_error_at: None,
+                unresolved_reference: false,
             }],
             camera_refs: vec![],
             source_refs: vec![],

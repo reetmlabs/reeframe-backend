@@ -31,6 +31,7 @@ mod m20260101_000028_create_daily_recording_coverage;
 mod m20260101_000029_add_desired_recording;
 mod m20260101_000030_add_pipeline_trigger_last_error;
 mod m20260101_000031_add_pipeline_validation_issues;
+mod m20260101_000032_add_pipeline_trigger_unresolved_reference;
 
 pub struct Migrator;
 
@@ -69,6 +70,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000029_add_desired_recording::Migration),
             Box::new(m20260101_000030_add_pipeline_trigger_last_error::Migration),
             Box::new(m20260101_000031_add_pipeline_validation_issues::Migration),
+            Box::new(m20260101_000032_add_pipeline_trigger_unresolved_reference::Migration),
         ]
     }
 }

@@ -11,6 +11,22 @@ use crate::{
     state::AppState,
 };
 
+/// A trigger left with an unresolved reference by a source delete/disable.
+#[derive(Serialize)]
+struct AffectedTriggerDto {
+    trigger_id: Uuid,
+    pipeline_id: Uuid,
+}
+
+impl From<vms_core::pipeline::PipelineTrigger> for AffectedTriggerDto {
+    fn from(t: vms_core::pipeline::PipelineTrigger) -> Self {
+        Self {
+            trigger_id: t.id,
+            pipeline_id: t.pipeline_id,
+        }
+    }
+}
+
 // -- Credential masking --
 
 /// Keys whose values are masked with `"***"` in GET responses.
@@ -170,13 +186,17 @@ pub async fn delete_source(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
 
-    // pipeline_triggers.source_id is ON DELETE RESTRICT, so any trigger still
-    // pointing at this source must be dropped first, same as a deleted
-    // trigger_root node drops its pipeline's triggers.
-    state.pipeline_repo.delete_triggers_for_source(id).await?;
+    // Triggers that pointed at this source aren't dropped or left blocking
+    // the delete — they're unlinked and marked unresolved instead.
+    let affected = state.pipeline_repo.unlink_deleted_source(id).await?;
     state.source_repo.delete(id).await?;
     state.pipeline_registry.reload().await?;
 
-    res.status_code(StatusCode::NO_CONTENT);
+    res.render(Json(
+        affected
+            .into_iter()
+            .map(AffectedTriggerDto::from)
+            .collect::<Vec<_>>(),
+    ));
     Ok(())
 }
