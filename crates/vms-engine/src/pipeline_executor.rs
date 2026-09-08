@@ -137,6 +137,8 @@ impl PipelineExecutor {
             .await;
 
         // -- 4. Finalise run --
+        // Every step here logs at info, failures included — this is the
+        // execution timeline operators tail, not an error-alerting channel.
         match &outcome {
             Ok(()) => {
                 self.repo
@@ -150,7 +152,7 @@ impl PipelineExecutor {
                     .finish_run(run_id, RunStatus::Failed, Some(e.to_string()))
                     .await?;
                 self.metrics.record_pipeline_run("failed");
-                tracing::error!(
+                tracing::info!(
                     %run_id,
                     pipeline_id = %pipeline.id,
                     error       = %e,
@@ -184,7 +186,7 @@ impl PipelineExecutor {
         &self,
         dag: &vms_core::pipeline::PipelineDag,
         ctx: &TriggerContext,
-        _run_id: Uuid,
+        run_id: Uuid,
         result_ids: &HashMap<NodeId, Uuid>,
         action_ctx: &ActionContext,
         dest_repo: &DestinationRepo,
@@ -221,6 +223,12 @@ impl PipelineExecutor {
                             None,
                         )
                         .await?;
+                    tracing::info!(
+                        %run_id,
+                        %node_id,
+                        node_type = ?dag.nodes[&node_id].node_type,
+                        "Node skipped",
+                    );
 
                     // Propagate: skipped counts as "finalised" for children.
                     for &child in &dag.adjacency[&node_id] {
@@ -237,6 +245,7 @@ impl PipelineExecutor {
                 self.repo.start_node_result(result_id).await?;
 
                 let node = dag.nodes[&node_id].clone();
+                tracing::info!(%run_id, %node_id, node_type = ?node.node_type, "Node started");
                 let parent_outputs: Vec<NodeOutput> = dag.parents[&node_id]
                     .iter()
                     .filter_map(|pid| outputs.get(pid))
@@ -285,6 +294,13 @@ impl PipelineExecutor {
                         Some(error_msg.clone()),
                     )
                     .await?;
+                tracing::info!(
+                    %run_id,
+                    %node_id,
+                    node_type = ?node.node_type,
+                    error = %error_msg,
+                    "Node failed",
+                );
                 join_set.abort_all();
                 return Err(VmsError::Config(format!(
                     "node {node_id} failed: {error_msg}"
@@ -307,6 +323,7 @@ impl PipelineExecutor {
             self.repo
                 .finish_node_result(result_id, NodeResultStatus::Completed, output_json, None)
                 .await?;
+            tracing::info!(%run_id, %node_id, node_type = ?node.node_type, "Node completed");
 
             for &child in &dag.adjacency[&node_id] {
                 // Check if child is active based on result of condition node
