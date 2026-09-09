@@ -188,31 +188,17 @@ impl ResourceManager {
         match action {
             Action::Ready => Ok(()),
 
-            Action::Start => match self.start(&id).await {
-                Ok(()) => {
-                    if let Some(mut e) = self.entries.get_mut(&id) {
-                        e.state = ResourceState::Running;
-                        e.started_at = Some(Utc::now());
-                        e.last_error = None;
-                    }
-                    if let Some(tx) = self.state_watches.get(&id) {
-                        let _ = tx.send(ResourceState::Running);
-                    }
-                    tracing::info!(resource = ?id, "Resource started");
-                    Ok(())
+            Action::Start => {
+                let result = self.start_and_record(&id).await;
+                if let Some(tx) = self.state_watches.get(&id) {
+                    let state = match &result {
+                        Ok(()) => ResourceState::Running,
+                        Err(err) => ResourceState::Error(err.to_string()),
+                    };
+                    let _ = tx.send(state);
                 }
-                Err(err) => {
-                    if let Some(mut e) = self.entries.get_mut(&id) {
-                        e.state = ResourceState::Error(err.to_string());
-                        e.last_error = Some(err.to_string());
-                    }
-                    if let Some(tx) = self.state_watches.get(&id) {
-                        let _ = tx.send(ResourceState::Error(err.to_string()));
-                    }
-                    tracing::error!(resource = ?id, error = %err, "Resource failed to start");
-                    Err(err)
-                }
-            },
+                result
+            }
 
             Action::Wait(mut rx) => loop {
                 rx.changed()
@@ -267,6 +253,71 @@ impl ResourceManager {
         }
 
         Ok(())
+    }
+
+    /// Runs `start()` for `id` and records the resulting `Running`/`Error` state.
+    /// Shared by [`Self::acquire`]'s first-caller path and [`Self::enable_source`],
+    /// which both need to start a resource and persist the outcome the same way.
+    async fn start_and_record(&self, id: &ResourceId) -> Result<(), VmsError> {
+        match self.start(id).await {
+            Ok(()) => {
+                if let Some(mut e) = self.entries.get_mut(id) {
+                    e.state = ResourceState::Running;
+                    e.started_at = Some(Utc::now());
+                    e.last_error = None;
+                }
+                tracing::info!(resource = ?id, "Resource started");
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(mut e) = self.entries.get_mut(id) {
+                    e.state = ResourceState::Error(err.to_string());
+                    e.last_error = Some(err.to_string());
+                }
+                tracing::error!(resource = ?id, error = %err, "Resource failed to start");
+                Err(err)
+            }
+        }
+    }
+
+    // -- Source enabled/disabled hard gate --
+
+    /// Stops a source's resource outright, independent of its ref count, and
+    /// leaves it unable to be reacquired (see the enabled check in
+    /// [`Self::start_source`]) until [`Self::enable_source`] is called for it.
+    /// Call whenever a source's `enabled` flag flips to `false`.
+    pub async fn disable_source(&self, source_id: Uuid) {
+        let id = ResourceId::Source(source_id);
+        let running = matches!(
+            self.entries.get(&id).map(|e| e.state.clone()),
+            Some(ResourceState::Running) | Some(ResourceState::Starting)
+        );
+        if running {
+            if let Err(e) = self.stop(&id).await {
+                tracing::error!(%source_id, error = %e,
+                    "Failed to stop source during disable — continuing");
+            }
+        }
+        if let Some(mut e) = self.entries.get_mut(&id) {
+            e.state = ResourceState::Stopped;
+            e.started_at = None;
+        }
+    }
+
+    /// Lifts the hard gate set by [`Self::disable_source`] and restarts the
+    /// resource if it's still referenced by an enabled pipeline. A no-op if
+    /// nothing currently references it — it starts on the next `acquire` instead.
+    pub async fn enable_source(&self, source_id: Uuid) -> Result<(), VmsError> {
+        let id = ResourceId::Source(source_id);
+        let still_referenced = self
+            .entries
+            .get(&id)
+            .map(|e| e.ref_count > 0)
+            .unwrap_or(false);
+        if !still_referenced {
+            return Ok(());
+        }
+        self.start_and_record(&id).await
     }
 
     // -- Start / stop dispatch --
@@ -329,6 +380,11 @@ impl ResourceManager {
         let Some(src) = self.sources.get_decrypted(source_id).await? else {
             return Err(VmsError::SourceNotFound(source_id));
         };
+        if !src.enabled {
+            return Err(VmsError::Conflict(format!(
+                "source {source_id} is disabled"
+            )));
+        }
         self.source_manager
             .start(source_id, source_type_from_db(src.source_type), src.config)
             .await
