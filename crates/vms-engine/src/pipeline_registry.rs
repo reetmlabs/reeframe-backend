@@ -61,7 +61,8 @@ impl PipelineRegistry {
 
     /// Populate the registry from DB. Call once at daemon startup before serving requests.
     pub async fn load(&self) -> Result<(), VmsError> {
-        self.reload().await
+        self.reload().await?;
+        Ok(())
     }
 
     /// Re-fetch all enabled pipelines from DB and atomically swap in a fresh snapshot.
@@ -70,9 +71,12 @@ impl PipelineRegistry {
     /// skipped — the reload always succeeds as long as the DB query itself succeeds.
     /// Callers (API mutation handlers) should invoke this after any change to a
     /// pipeline, its nodes, edges, or triggers.
-    pub async fn reload(&self) -> Result<(), VmsError> {
+    ///
+    /// Returns the snapshot that was in effect just before the swap, so a caller
+    /// can diff it against the new one to reconcile resource ref-counts.
+    pub async fn reload(&self) -> Result<Arc<RegistrySnapshot>, VmsError> {
         let Some(repo) = &self.repo else {
-            return Ok(());
+            return Ok(self.store.load_full());
         };
         let rows = repo.list_enabled().await?;
         let mut pipelines = HashMap::with_capacity(rows.len());
@@ -102,7 +106,7 @@ impl PipelineRegistry {
         let loaded = pipelines.len();
         let skipped = rows.len() - loaded;
         let trigger_index = build_trigger_index(&pipelines);
-        self.store.store(Arc::new(RegistrySnapshot {
+        let previous = self.store.swap(Arc::new(RegistrySnapshot {
             pipelines,
             trigger_index,
         }));
@@ -113,7 +117,7 @@ impl PipelineRegistry {
             tracing::info!(loaded, "Pipeline registry reloaded");
         }
 
-        Ok(())
+        Ok(previous)
     }
 
     /// Look up a single compiled pipeline by UUID.
@@ -184,4 +188,20 @@ fn build_trigger_index(
     }
 
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reload_without_a_repo_returns_the_current_snapshot_unchanged() {
+        let registry = PipelineRegistry::new_test(vec![]);
+        let before = registry.snapshot();
+
+        let previous = registry.reload().await.unwrap();
+
+        assert!(Arc::ptr_eq(&previous, &before));
+        assert!(Arc::ptr_eq(&registry.snapshot(), &before));
+    }
 }
