@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sea_orm::DatabaseConnection;
+use vms_core::VmsError;
 use vms_db::{
     ApiKeyRepo, CameraRepo, ContactListRepo, ContactRepo, DailyRecordingCoverageRepo,
     DestinationRepo, EventsRepo, ExportJobRepo, PipelineRepo, PipelineRunRepo, RecordingRepo,
@@ -74,4 +75,18 @@ pub struct AppState {
     pub trigger_evaluator: Arc<TriggerEvaluator>,
     pub stat_monitor: Arc<StatMonitor>,
     pub metrics: Arc<Metrics>,
+}
+
+impl AppState {
+    /// Reloads the pipeline registry and reconciles resource ref-counts against
+    /// the change, in one call. Every handler that mutates a pipeline's nodes,
+    /// edges, or triggers, a pipeline's own enabled state, or a source/destination
+    /// a pipeline depends on, must call this after the mutation instead of
+    /// touching `pipeline_registry`/`resource_manager` directly.
+    pub async fn refresh_pipelines(&self) -> Result<(), VmsError> {
+        let old = self.pipeline_registry.reload().await?;
+        let new = self.pipeline_registry.snapshot();
+        self.resource_manager.sync(&old, &new).await;
+        Ok(())
+    }
 }

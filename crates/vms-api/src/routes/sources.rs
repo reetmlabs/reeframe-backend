@@ -192,12 +192,20 @@ pub async fn update_source(
     let source = state.source_repo.update(id, input).await?;
 
     // Only a real enabled/disabled transition marks or clears dependent
-    // triggers — every other field change leaves them alone.
+    // triggers, and hard-gates the source's resource — every other field
+    // change leaves them alone.
     let affected = match (was_enabled, source.enabled) {
-        (true, false) => state.pipeline_repo.mark_source_disabled(id).await?,
-        (false, true) => state.pipeline_repo.clear_source_unresolved(id).await?,
+        (true, false) => {
+            state.resource_manager.disable_source(id).await;
+            state.pipeline_repo.mark_source_disabled(id).await?
+        }
+        (false, true) => {
+            state.resource_manager.enable_source(id).await?;
+            state.pipeline_repo.clear_source_unresolved(id).await?
+        }
         _ => Vec::new(),
     };
+    state.refresh_pipelines().await?;
 
     Ok(Json(UpdateSourceResponse {
         source: SourceDto::from(source),
@@ -219,7 +227,7 @@ pub async fn delete_source(
     // the delete — they're unlinked and marked unresolved instead.
     let affected = state.pipeline_repo.unlink_deleted_source(id).await?;
     state.source_repo.delete(id).await?;
-    state.pipeline_registry.reload().await?;
+    state.refresh_pipelines().await?;
 
     res.render(Json(
         affected

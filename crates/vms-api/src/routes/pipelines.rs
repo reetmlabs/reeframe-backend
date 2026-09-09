@@ -267,7 +267,7 @@ pub async fn delete_pipeline(
     state.pipeline_repo.delete(id).await?;
 
     // Remove from registry if it was enabled.
-    state.pipeline_registry.reload().await?;
+    state.refresh_pipelines().await?;
 
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
@@ -324,7 +324,7 @@ async fn set_enabled(
             }));
         }
         EnableOutcome::Applied => {
-            state.pipeline_registry.reload().await?;
+            state.refresh_pipelines().await?;
             let updated = state
                 .pipeline_repo
                 .get(id)
