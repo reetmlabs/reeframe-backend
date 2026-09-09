@@ -420,7 +420,7 @@ where
 /// `Fork` passes the first parent output through with this node's ID.
 /// `Action` and `DeviceControl` are dispatched through [`ActionDispatcher`].
 /// `Transport` looks up the destination from `dest_repo` and dispatches to
-/// [`TransportDispatcher`].
+/// [`TransportDispatcher`], retrying on failure via [`dispatch_with_retry`].
 pub(crate) async fn execute_node(
     node: &PipelineNode,
     parent_outputs: &[NodeOutput],
@@ -509,13 +509,15 @@ pub(crate) async fn execute_node(
                 map.remove(&(run_id, node_id));
             });
 
-            TransportDispatcher::dispatch(
-                node.id,
-                &dest,
-                node.transport_config.as_ref(),
-                &input,
-                Some(&progress_tx),
-            )
+            dispatch_with_retry(run_id, node_id, || {
+                TransportDispatcher::dispatch(
+                    node.id,
+                    &dest,
+                    node.transport_config.as_ref(),
+                    &input,
+                    Some(&progress_tx),
+                )
+            })
             .await
         }
     }
