@@ -370,6 +370,46 @@ pub(crate) fn child_is_active(
     }
 }
 
+// -- Transport delivery retry --
+
+/// Attempts before a Transport node's delivery gives up: 1 initial try
+/// plus 2 retries.
+const TRANSPORT_MAX_ATTEMPTS: u32 = 3;
+
+/// Delay before the first retry; doubles after each subsequent failure.
+const TRANSPORT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Calls `attempt` up to [`TRANSPORT_MAX_ATTEMPTS`] times with exponential
+/// backoff, retrying blindly (no failure classification) since a Transport
+/// node is always a DAG leaf with nothing else waiting on it. Returns the
+/// first successful output, or the last failed one once attempts are
+/// exhausted.
+async fn dispatch_with_retry<F, Fut>(run_id: Uuid, node_id: NodeId, mut attempt: F) -> NodeOutput
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = NodeOutput>,
+{
+    let mut delay = TRANSPORT_RETRY_BACKOFF;
+    for attempt_num in 1..=TRANSPORT_MAX_ATTEMPTS {
+        let output = attempt().await;
+        if output.success {
+            tracing::info!(%run_id, %node_id, attempt = attempt_num, "Transport delivery succeeded");
+            return output;
+        }
+        tracing::info!(
+            %run_id, %node_id, attempt = attempt_num, max_attempts = TRANSPORT_MAX_ATTEMPTS,
+            error = ?output.error,
+            "Transport delivery attempt failed",
+        );
+        if attempt_num == TRANSPORT_MAX_ATTEMPTS {
+            return output;
+        }
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+    }
+    unreachable!("the loop above always returns by the final attempt");
+}
+
 // -- Node execution --
 
 /// Execute a single pipeline node and return its [`NodeOutput`].
@@ -723,5 +763,61 @@ mod tests {
         let root_id = root.id;
         let dag = PipelineDag::compile(vec![root, transport], vec![e]).unwrap();
         assert_eq!(dag.root_id, root_id);
+    }
+
+    // -- dispatch_with_retry --
+
+    #[tokio::test(start_paused = true)]
+    async fn returns_immediately_on_first_success() {
+        let node_id = Uuid::new_v4();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let output = dispatch_with_retry(Uuid::new_v4(), node_id, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { NodeOutput::success(node_id) }
+        })
+        .await;
+
+        assert!(output.success);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn succeeds_after_transient_failures_within_the_attempt_cap() {
+        let node_id = Uuid::new_v4();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let output = dispatch_with_retry(Uuid::new_v4(), node_id, || {
+            let attempt_num = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if attempt_num < 2 {
+                    NodeOutput::failure(node_id, "transient")
+                } else {
+                    NodeOutput::success(node_id)
+                }
+            }
+        })
+        .await;
+
+        assert!(output.success);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gives_up_after_exhausting_the_attempt_cap() {
+        let node_id = Uuid::new_v4();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let output = dispatch_with_retry(Uuid::new_v4(), node_id, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { NodeOutput::failure(node_id, "permanent") }
+        })
+        .await;
+
+        assert!(!output.success);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            TRANSPORT_MAX_ATTEMPTS
+        );
     }
 }
