@@ -76,6 +76,7 @@ pub async fn create_trigger(
         )
         .await?;
 
+    state.refresh_pipelines().await?;
     res.status_code(StatusCode::CREATED);
     Ok(Json(trigger))
 }
@@ -136,6 +137,7 @@ pub async fn update_trigger(
         )
         .await?;
 
+    state.refresh_pipelines().await?;
     Ok(Json(trigger))
 }
 
@@ -151,6 +153,7 @@ pub async fn delete_trigger(
 
     require_trigger_in_pipeline(state, pipeline_id, trigger_id).await?;
     state.pipeline_repo.delete_trigger(trigger_id).await?;
+    state.refresh_pipelines().await?;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
