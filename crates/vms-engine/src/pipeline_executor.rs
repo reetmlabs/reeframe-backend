@@ -414,7 +414,9 @@ where
 
 /// Execute a single pipeline node and return its [`NodeOutput`].
 ///
-/// `TriggerRoot` seeds the output with trigger context metadata.
+/// `TriggerRoot` seeds the output with trigger context metadata, including
+/// the triggering Event's top-level payload fields as `event.*` (see
+/// [`flatten_event_payload`]) so a downstream `Condition` can reference them.
 /// `Condition` evaluates its `evalexpr` expression and stores the boolean
 /// result in `metadata["condition_result"]`.
 /// `Fork` passes the first parent output through with this node's ID.
