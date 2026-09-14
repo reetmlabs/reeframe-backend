@@ -586,6 +586,7 @@ pub(crate) fn build_condition_context(parent_outputs: &[NodeOutput]) -> HashMapC
 mod tests {
     use super::*;
     use vms_core::pipeline::{PipelineEdge, PipelineNode};
+    use vms_core::TriggerType;
 
     fn node(pid: Uuid, nt: NodeType) -> PipelineNode {
         PipelineNode {
@@ -616,6 +617,13 @@ mod tests {
 
     fn schedule_ctx(pid: Uuid) -> TriggerContext {
         TriggerContext::for_schedule(Uuid::new_v4(), pid)
+    }
+
+    fn event_ctx(pid: Uuid, payload: serde_json::Value) -> TriggerContext {
+        let mut ctx = TriggerContext::for_schedule(Uuid::new_v4(), pid);
+        ctx.trigger_type = TriggerType::Event;
+        ctx.event_payload = Some(payload);
+        ctx
     }
 
     fn action_ctx() -> ActionContext {
@@ -695,6 +703,57 @@ mod tests {
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["pipeline_id"], pid.to_string());
+    }
+
+    #[tokio::test]
+    async fn trigger_root_forwards_event_payload_as_event_fields() {
+        let pid = Uuid::new_v4();
+        let n = node(pid, NodeType::TriggerRoot);
+        let ctx = event_ctx(pid, serde_json::json!({"confidence": 0.92, "label": "person"}));
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(out.success);
+        assert_eq!(out.metadata["event.confidence"], 0.92);
+        assert_eq!(out.metadata["event.label"], "person");
+    }
+
+    #[tokio::test]
+    async fn trigger_root_skips_non_scalar_event_payload_fields() {
+        let pid = Uuid::new_v4();
+        let n = node(pid, NodeType::TriggerRoot);
+        let ctx = event_ctx(
+            pid,
+            serde_json::json!({"nested": {"a": 1}, "list": [1, 2], "score": 1}),
+        );
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(out.success);
+        assert!(out.metadata.get("event.nested").is_none());
+        assert!(out.metadata.get("event.list").is_none());
+        assert_eq!(out.metadata["event.score"], 1);
+    }
+
+    #[tokio::test]
+    async fn condition_after_event_trigger_can_reference_event_payload() {
+        let pid = Uuid::new_v4();
+        let root = node(pid, NodeType::TriggerRoot);
+        let ctx = event_ctx(pid, serde_json::json!({"confidence": 0.92}));
+        let dr = dest_repo().await;
+        let root_out = execute_node(&root, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
+
+        let mut cond = node(pid, NodeType::Condition);
+        cond.condition_expr = Some("event.confidence > 0.85".into());
+        let cond_out = execute_node(
+            &cond,
+            &[root_out],
+            &ctx,
+            &action_ctx(),
+            &dr,
+            &progress_map(),
+        )
+        .await;
+        assert!(cond_out.success);
+        assert_eq!(cond_out.metadata["condition_result"], true);
     }
 
     #[tokio::test]
