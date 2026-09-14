@@ -546,7 +546,9 @@ fn flatten_event_payload(
     for (k, v) in map {
         if matches!(
             v,
-            serde_json::Value::String(_) | serde_json::Value::Number(_) | serde_json::Value::Bool(_)
+            serde_json::Value::String(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::Bool(_)
         ) {
             out.insert(format!("event.{k}"), v.clone());
         }
@@ -711,7 +713,10 @@ mod tests {
     async fn trigger_root_forwards_event_payload_as_event_fields() {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::TriggerRoot);
-        let ctx = event_ctx(pid, serde_json::json!({"confidence": 0.92, "label": "person"}));
+        let ctx = event_ctx(
+            pid,
+            serde_json::json!({"confidence": 0.92, "label": "person"}),
+        );
         let dr = dest_repo().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
