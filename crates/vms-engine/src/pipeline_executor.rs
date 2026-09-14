@@ -430,13 +430,19 @@ pub(crate) async fn execute_node(
     progress_map: &Arc<DashMap<ProgressKey, TransferProgress>>,
 ) -> NodeOutput {
     match node.node_type {
-        NodeType::TriggerRoot => NodeOutput::success(node.id).with_metadata(serde_json::json!({
-            "trigger_type": format!("{:?}", ctx.trigger_type),
-            "camera_id":    ctx.camera_id,
-            "source_id":    ctx.source_id,
-            "pipeline_id":  ctx.pipeline_id.to_string(),
-            "fired_at":     ctx.fired_at.to_rfc3339(),
-        })),
+        NodeType::TriggerRoot => {
+            let mut metadata = serde_json::json!({
+                "trigger_type": format!("{:?}", ctx.trigger_type),
+                "camera_id":    ctx.camera_id,
+                "source_id":    ctx.source_id,
+                "pipeline_id":  ctx.pipeline_id.to_string(),
+                "fired_at":     ctx.fired_at.to_rfc3339(),
+            });
+            if let Some(map) = metadata.as_object_mut() {
+                map.extend(flatten_event_payload(ctx.event_payload.as_ref()));
+            }
+            NodeOutput::success(node.id).with_metadata(metadata)
+        }
 
         NodeType::Condition => {
             let expr = node.condition_expr.as_deref().unwrap_or("false");
@@ -521,6 +527,29 @@ pub(crate) async fn execute_node(
             .await
         }
     }
+}
+
+/// Flattens an `Event`'s top-level payload fields into `event.<key>` entries
+/// for `TriggerRoot`'s `NodeOutput.metadata`, so a `Condition` node right
+/// after an `Event` trigger sees the same fields the trigger's own `filter`
+/// saw. Mirrors `build_event_context`'s top-level-only, string/number/bool-only
+/// rule (nested objects/arrays are not supported yet).
+fn flatten_event_payload(
+    payload: Option<&serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let Some(serde_json::Value::Object(map)) = payload else {
+        return out;
+    };
+    for (k, v) in map {
+        if matches!(
+            v,
+            serde_json::Value::String(_) | serde_json::Value::Number(_) | serde_json::Value::Bool(_)
+        ) {
+            out.insert(format!("event.{k}"), v.clone());
+        }
+    }
+    out
 }
 
 /// Build an `evalexpr` context from the first parent's metadata so that
