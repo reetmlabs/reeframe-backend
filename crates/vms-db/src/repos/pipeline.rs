@@ -1326,8 +1326,7 @@ fn validate_create_shape(
 ) -> Result<(), VmsError> {
     match node_type {
         CoreNodeType::Action | CoreNodeType::DeviceControl => {
-            if transport_config.is_some() || condition_expr.is_some() || destination_id.is_some()
-            {
+            if transport_config.is_some() || condition_expr.is_some() || destination_id.is_some() {
                 return Err(VmsError::DagValidation(format!(
                     "{} node must not set transport_config, condition_expr, or destination_id",
                     node_type.as_str()
@@ -1893,13 +1892,7 @@ mod tests {
 
     #[test]
     fn update_allows_clearing_destination_id_on_any_node_type() {
-        let result = validate_update_shape(
-            &CoreNodeType::Action,
-            &None,
-            &None,
-            &Some(None),
-            &None,
-        );
+        let result = validate_update_shape(&CoreNodeType::Action, &None, &None, &Some(None), &None);
         assert!(result.is_ok());
     }
 

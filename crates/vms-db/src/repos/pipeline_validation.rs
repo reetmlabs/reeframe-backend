@@ -61,7 +61,11 @@ pub struct ValidationIssue {
 }
 
 impl ValidationIssue {
-    fn new(category: ValidationCategory, node_id: Option<Uuid>, message: impl Into<String>) -> Self {
+    fn new(
+        category: ValidationCategory,
+        node_id: Option<Uuid>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             severity: category.severity(),
             category,
@@ -549,10 +553,7 @@ mod tests {
         let mut node = base_node(CoreNodeType::Action);
         node.action_config = Some(snapshot_config(Some(existing_camera)));
 
-        let issues = check_dangling_camera_references(
-            &[node],
-            &HashSet::from([existing_camera]),
-        );
+        let issues = check_dangling_camera_references(&[node], &HashSet::from([existing_camera]));
         assert!(issues.is_empty());
     }
 
