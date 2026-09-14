@@ -532,10 +532,7 @@ pub(crate) async fn execute_node(
 }
 
 /// Flattens an `Event`'s top-level payload fields into `event.<key>` entries
-/// for `TriggerRoot`'s `NodeOutput.metadata`, so a `Condition` node right
-/// after an `Event` trigger sees the same fields the trigger's own `filter`
-/// saw. Mirrors `build_event_context`'s top-level-only, string/number/bool-only
-/// rule (nested objects/arrays are not supported yet).
+/// so a downstream `Condition` sees what the trigger's own `filter` saw.
 fn flatten_event_payload(
     payload: Option<&serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
