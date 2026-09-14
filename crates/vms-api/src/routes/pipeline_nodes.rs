@@ -121,6 +121,7 @@ pub async fn create_node(
             .await?;
     }
 
+    state.refresh_pipelines().await?;
     res.status_code(StatusCode::CREATED);
     Ok(Json(node))
 }
@@ -210,6 +211,7 @@ pub async fn update_node(
             .await?;
     }
 
+    state.refresh_pipelines().await?;
     Ok(Json(node))
 }
 
@@ -237,6 +239,7 @@ pub async fn delete_node(
             .delete_triggers_for_pipeline(pipeline_id)
             .await?;
     }
+    state.refresh_pipelines().await?;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }

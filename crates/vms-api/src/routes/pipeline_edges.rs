@@ -63,6 +63,7 @@ pub async fn create_edge(
         )
         .await?;
 
+    state.refresh_pipelines().await?;
     res.status_code(StatusCode::CREATED);
     Ok(Json(edge))
 }
@@ -120,6 +121,7 @@ pub async fn update_edge(
         )
         .await?;
 
+    state.refresh_pipelines().await?;
     Ok(Json(edge))
 }
 
@@ -135,6 +137,7 @@ pub async fn delete_edge(
 
     require_edge_in_pipeline(state, pipeline_id, edge_id).await?;
     state.pipeline_repo.delete_edge(edge_id).await?;
+    state.refresh_pipelines().await?;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }

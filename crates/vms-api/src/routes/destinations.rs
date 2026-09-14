@@ -199,6 +199,7 @@ pub async fn update_destination(
         (false, true) => state.pipeline_repo.clear_destination_unresolved(id).await?,
         _ => Vec::new(),
     };
+    state.refresh_pipelines().await?;
 
     Ok(Json(UpdateDestinationResponse {
         destination: DestinationDto::from(dest),
@@ -220,6 +221,7 @@ pub async fn delete_destination(
     // blocking the delete — they're unlinked and marked unresolved instead.
     let affected = state.pipeline_repo.unlink_deleted_destination(id).await?;
     state.dest_repo.delete(id).await?;
+    state.refresh_pipelines().await?;
 
     res.render(Json(
         affected
