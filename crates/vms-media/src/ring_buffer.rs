@@ -81,6 +81,15 @@ impl RingBuffer {
         self.frames.back().map(|f| f.pts)
     }
 
+    /// Grow `max_duration` to `min_duration` if it's larger than the current
+    /// value. Never shrinks — a smaller request keeps whatever history is
+    /// already buffered rather than discarding it.
+    pub fn grow_to(&mut self, min_duration: Duration) {
+        if min_duration > self.max_duration {
+            self.max_duration = min_duration;
+        }
+    }
+
     /// Number of frames currently in the buffer.
     pub fn len(&self) -> usize {
         self.frames.len()
@@ -115,8 +124,9 @@ impl RingBufferManager {
     ///
     /// Creates a [`RingBuffer`] sized to hold `duration_secs` of footage and
     /// attaches an appsink branch to the camera's live GStreamer tee. If the
-    /// camera is already being buffered this is a no-op.
-    ///
+    /// camera is already being buffered, its capacity is grown to
+    /// `duration_secs` instead — never shrunk, so a smaller `duration_secs`
+    /// from some other caller can't discard another caller's history.
     pub fn start(
         &self,
         camera_id: Uuid,
@@ -129,7 +139,11 @@ impl RingBufferManager {
             ));
         }
 
-        if self.buffers.contains_key(&camera_id) {
+        if let Some(existing) = self.buffers.get(&camera_id) {
+            existing
+                .lock()
+                .expect("ring buffer mutex poisoned")
+                .grow_to(Duration::from_secs(u64::from(duration_secs)));
             return Ok(());
         }
 
