@@ -774,6 +774,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn condition_forwards_parent_artifact() {
+        let pid = Uuid::new_v4();
+        let mut n = node(pid, NodeType::Condition);
+        n.condition_expr = Some("true".into());
+        let parent = NodeOutput::success(Uuid::new_v4())
+            .with_artifact(std::path::PathBuf::from("/tmp/clip.mp4"));
+        let ctx = schedule_ctx(pid);
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(out.success);
+        assert_eq!(
+            out.artifact_path,
+            Some(std::path::PathBuf::from("/tmp/clip.mp4"))
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_failure_does_not_forward_artifact() {
+        let pid = Uuid::new_v4();
+        let mut n = node(pid, NodeType::Condition);
+        n.condition_expr = Some(">>>".into());
+        let parent = NodeOutput::success(Uuid::new_v4())
+            .with_artifact(std::path::PathBuf::from("/tmp/clip.mp4"));
+        let ctx = schedule_ctx(pid);
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(!out.success);
+        assert_eq!(out.artifact_path, None);
+    }
+
+    #[tokio::test]
     async fn fork_passes_through_parent_metadata() {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::Fork);
