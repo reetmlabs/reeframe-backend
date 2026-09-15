@@ -22,9 +22,10 @@ use crate::entities::{
 };
 
 use super::pipeline_validation::{
-    check_config_completeness, check_config_shape, check_dangling_camera_references,
-    check_disconnected, check_structural_violations, check_unresolved_node_references,
-    check_unresolved_trigger_references, ValidationIssue, ValidationSeverity,
+    check_artifact_lineage, check_config_completeness, check_config_shape,
+    check_dangling_camera_references, check_disconnected, check_structural_violations,
+    check_unresolved_node_references, check_unresolved_trigger_references, ValidationIssue,
+    ValidationSeverity,
 };
 use super::{db_err, now};
 use crate::entities::pipeline::{self, ActiveModel, PipelineType};
@@ -1077,7 +1078,7 @@ impl PipelineRepo {
     // -- Pipeline validation --
 
     /// Every problem currently found with `pipeline_id`'s definition, across
-    /// all six categories (see `pipeline_validation`). This is the one
+    /// every category (see `pipeline_validation`). This is the one
     /// place that combines them — callers never run the individual checks
     /// themselves.
     pub async fn validate_pipeline(
@@ -1102,6 +1103,7 @@ impl PipelineRepo {
         issues.extend(check_dangling_camera_references(&nodes, &camera_ids));
         issues.extend(check_unresolved_trigger_references(&triggers));
         issues.extend(check_unresolved_node_references(&nodes));
+        issues.extend(check_artifact_lineage(&nodes, &edges));
         Ok(issues)
     }
 
