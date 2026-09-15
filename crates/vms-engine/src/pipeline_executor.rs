@@ -450,8 +450,21 @@ pub(crate) async fn execute_node(
             let expr = node.condition_expr.as_deref().unwrap_or("false");
             let eval_ctx = build_condition_context(parent_outputs);
             match evalexpr::eval_boolean_with_context(expr, &eval_ctx) {
-                Ok(result) => NodeOutput::success(node.id)
-                    .with_metadata(serde_json::json!({ "condition_result": result })),
+                // Forwards the parent's artifact_path/text (mirroring Fork)
+                // so an artifact can legitimately pass through a Condition.
+                Ok(result) => {
+                    let base = parent_outputs
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| NodeOutput::success(node.id));
+                    NodeOutput {
+                        node_id: node.id,
+                        metadata: serde_json::json!({ "condition_result": result }),
+                        success: true,
+                        error: None,
+                        ..base
+                    }
+                }
                 Err(e) => NodeOutput::failure(node.id, format!("condition eval failed: {e}")),
             }
         }
@@ -758,6 +771,37 @@ mod tests {
         .await;
         assert!(cond_out.success);
         assert_eq!(cond_out.metadata["condition_result"], true);
+    }
+
+    #[tokio::test]
+    async fn condition_forwards_parent_artifact() {
+        let pid = Uuid::new_v4();
+        let mut n = node(pid, NodeType::Condition);
+        n.condition_expr = Some("true".into());
+        let parent = NodeOutput::success(Uuid::new_v4())
+            .with_artifact(std::path::PathBuf::from("/tmp/clip.mp4"));
+        let ctx = schedule_ctx(pid);
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(out.success);
+        assert_eq!(
+            out.artifact_path,
+            Some(std::path::PathBuf::from("/tmp/clip.mp4"))
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_failure_does_not_forward_artifact() {
+        let pid = Uuid::new_v4();
+        let mut n = node(pid, NodeType::Condition);
+        n.condition_expr = Some(">>>".into());
+        let parent = NodeOutput::success(Uuid::new_v4())
+            .with_artifact(std::path::PathBuf::from("/tmp/clip.mp4"));
+        let ctx = schedule_ctx(pid);
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(!out.success);
+        assert_eq!(out.artifact_path, None);
     }
 
     #[tokio::test]
