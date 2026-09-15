@@ -627,4 +627,40 @@ mod tests {
 
         assert!(counts.is_empty());
     }
+
+    #[test]
+    fn ring_buffer_durations_maxes_across_pipelines_referencing_the_same_camera() {
+        let camera_id = Uuid::new_v4();
+        let cam_ref = |secs| PipelineCameraRef {
+            camera_id,
+            needs_ring_buffer: true,
+            needs_analytics: false,
+            ring_buffer_secs: secs,
+        };
+        let snapshot = snapshot_of(vec![
+            pipeline_with(vec![cam_ref(30)], vec![], vec![]),
+            pipeline_with(vec![cam_ref(90)], vec![], vec![]),
+        ]);
+
+        let durations = ring_buffer_durations(&snapshot);
+
+        assert_eq!(durations[&camera_id], 90);
+    }
+
+    #[test]
+    fn ring_buffer_durations_omits_cameras_that_dont_need_one() {
+        let camera_id = Uuid::new_v4();
+        let snapshot = snapshot_of(vec![pipeline_with(
+            vec![PipelineCameraRef {
+                camera_id,
+                needs_ring_buffer: false,
+                needs_analytics: false,
+                ring_buffer_secs: 0,
+            }],
+            vec![],
+            vec![],
+        )]);
+
+        assert!(ring_buffer_durations(&snapshot).is_empty());
+    }
 }

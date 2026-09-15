@@ -2391,6 +2391,70 @@ mod tests {
         assert!(refs[0].needs_ring_buffer);
     }
 
+    fn extract_clip_config_with_window(
+        camera_id: Option<Uuid>,
+        pre_event_secs: u32,
+        post_event_secs: u32,
+    ) -> ActionConfig {
+        ActionConfig::ExtractClip(vms_core::action::ExtractClipConfig {
+            pre_event_secs,
+            post_event_secs,
+            format: "mp4".into(),
+            camera_id,
+            use_manual_range: false,
+        })
+    }
+
+    #[test]
+    fn ring_buffer_secs_is_pre_plus_keyframe_margin_plus_post() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![action_node(extract_clip_config_with_window(
+            Some(cam),
+            5,
+            10,
+        ))];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].ring_buffer_secs,
+            5 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 10
+        );
+    }
+
+    #[test]
+    fn ring_buffer_secs_is_capped_at_the_maximum() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![action_node(extract_clip_config_with_window(
+            Some(cam),
+            600,
+            600,
+        ))];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].ring_buffer_secs,
+            vms_core::action::MAX_RING_BUFFER_SECS
+        );
+    }
+
+    #[test]
+    fn ring_buffer_secs_maxes_across_multiple_extract_clip_nodes_on_the_same_camera() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![
+            action_node(extract_clip_config_with_window(Some(cam), 1, 1)),
+            action_node(extract_clip_config_with_window(Some(cam), 20, 30)),
+        ];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].ring_buffer_secs,
+            20 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 30
+        );
+    }
+
     // -- upsert_node_trigger / delete_triggers_for_pipeline --
 
     use crate::migration::Migrator;
