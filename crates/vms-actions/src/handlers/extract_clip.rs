@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use tokio::time::sleep;
 use vms_core::{
     action::ExtractClipConfig,
     node::{NodeInput, NodeOutput},
@@ -12,7 +13,10 @@ use crate::dispatcher::ActionContext;
 ///
 /// The extraction window is `[event_pts - pre_event_secs, event_pts + post_event_secs]`
 /// where `event_pts` is the latest buffered PTS at the time of execution — a
-/// reliable proxy for "now" in pipeline time.
+/// reliable proxy for "now" in pipeline time. `post_event_secs` of footage
+/// doesn't exist yet at that instant, so this waits for it to elapse before
+/// reading the buffer — otherwise the post-event side of the window would
+/// always be empty, no matter how large `post_event_secs` is.
 ///
 /// # Limitations
 ///
@@ -48,6 +52,12 @@ pub async fn execute(
 
     // -- Anchor the extraction window to the latest buffered PTS --
     let event_pts = ring_buffer.latest_pts(camera_id).unwrap_or(Duration::ZERO);
+
+    // Wait for the post-event footage to actually be captured before reading
+    // the buffer — anchored to `event_pts` above, not re-read afterwards.
+    if cfg.post_event_secs > 0 {
+        sleep(Duration::from_secs(cfg.post_event_secs.into())).await;
+    }
 
     tracing::debug!(
         node_id = %node_id,
