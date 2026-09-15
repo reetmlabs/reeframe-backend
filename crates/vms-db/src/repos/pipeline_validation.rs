@@ -909,4 +909,170 @@ mod tests {
         let node = base_node(CoreNodeType::Transport);
         assert!(check_unresolved_node_references(&[node]).is_empty());
     }
+
+    // -- check_artifact_lineage --
+
+    fn transcode_config() -> vms_core::action::ActionConfig {
+        vms_core::action::ActionConfig::Transcode(vms_core::action::TranscodeConfig {
+            codec: "h264".into(),
+            bitrate_kbps: 2000,
+            resolution: None,
+            preset: "fast".into(),
+            output_format: "mp4".into(),
+        })
+    }
+
+    fn extract_clip_config() -> vms_core::action::ActionConfig {
+        vms_core::action::ActionConfig::ExtractClip(vms_core::action::ExtractClipConfig {
+            pre_event_secs: 5,
+            post_event_secs: 5,
+            format: "mp4".into(),
+            camera_id: None,
+            use_manual_range: false,
+        })
+    }
+
+    fn compress_config() -> vms_core::action::ActionConfig {
+        vms_core::action::ActionConfig::Compress(vms_core::action::CompressConfig {
+            algorithm: vms_core::action::CompressionAlgorithm::Zstd,
+            level: 3,
+        })
+    }
+
+    fn merge_clips_config() -> vms_core::action::ActionConfig {
+        vms_core::action::ActionConfig::MergeClips(vms_core::action::MergeClipsConfig {
+            order: vms_core::action::ClipOrder::Chronological,
+            gap_fill: vms_core::action::GapFill::Skip,
+            output_format: "mp4".into(),
+        })
+    }
+
+    fn action_node(cfg: vms_core::action::ActionConfig) -> PipelineNode {
+        let mut n = base_node(CoreNodeType::Action);
+        n.action_config = Some(cfg);
+        n
+    }
+
+    #[test]
+    fn transcode_with_no_upstream_artifact_is_flagged() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let transcode = action_node(transcode_config());
+        let edges = [edge(root.id, transcode.id, CoreEdgeType::Default)];
+
+        let issues = check_artifact_lineage(&[root, transcode.clone()], &edges);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].category,
+            ValidationCategory::MissingArtifactAncestor
+        );
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, Some(transcode.id));
+    }
+
+    #[test]
+    fn transcode_downstream_of_extract_clip_is_not_flagged() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let extract = action_node(extract_clip_config());
+        let transcode = action_node(transcode_config());
+        let edges = [
+            edge(root.id, extract.id, CoreEdgeType::Default),
+            edge(extract.id, transcode.id, CoreEdgeType::Default),
+        ];
+
+        let issues = check_artifact_lineage(&[root, extract, transcode], &edges);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn merge_clips_with_two_extract_clip_ancestors_is_not_flagged() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let fork = base_node(CoreNodeType::Fork);
+        let extract1 = action_node(extract_clip_config());
+        let extract2 = action_node(extract_clip_config());
+        let merge = action_node(merge_clips_config());
+        let edges = [
+            edge(root.id, fork.id, CoreEdgeType::Default),
+            edge(fork.id, extract1.id, CoreEdgeType::Default),
+            edge(fork.id, extract2.id, CoreEdgeType::Default),
+            edge(extract1.id, merge.id, CoreEdgeType::Default),
+            edge(extract2.id, merge.id, CoreEdgeType::Default),
+        ];
+
+        let issues = check_artifact_lineage(&[root, fork, extract1, extract2, merge], &edges);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn merge_clips_with_one_extract_clip_ancestor_is_flagged_as_single_source() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let extract = action_node(extract_clip_config());
+        let merge = action_node(merge_clips_config());
+        let edges = [
+            edge(root.id, extract.id, CoreEdgeType::Default),
+            edge(extract.id, merge.id, CoreEdgeType::Default),
+        ];
+
+        let issues = check_artifact_lineage(&[root, extract, merge.clone()], &edges);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::MergeSingleSource);
+        assert_eq!(issues[0].severity, ValidationSeverity::Warning);
+        assert_eq!(issues[0].node_id, Some(merge.id));
+    }
+
+    #[test]
+    fn merge_clips_fed_by_a_condition_branch_with_no_artifact_is_flagged() {
+        // Condition -> [true: Extract Clip, false: Compress (no artifact of
+        // its own)] -> both reconverge into the same Merge Clips node. Only
+        // one branch is ever active on a given run, so Merge Clips is safe
+        // when the true branch fires and unsafe when the false branch fires
+        // — a check that just ORs across Merge Clips' direct parents
+        // (ignoring that they're mutually exclusive alternatives of the same
+        // Condition) would miss the false-branch failure entirely.
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let mut condition = base_node(CoreNodeType::Condition);
+        condition.condition_expr = Some("true".into());
+        let extract = action_node(extract_clip_config());
+        let compress = action_node(compress_config());
+        let merge = action_node(merge_clips_config());
+        let edges = [
+            edge(root.id, condition.id, CoreEdgeType::Default),
+            edge(condition.id, extract.id, CoreEdgeType::TrueBranch),
+            edge(condition.id, compress.id, CoreEdgeType::FalseBranch),
+            edge(extract.id, merge.id, CoreEdgeType::Default),
+            edge(compress.id, merge.id, CoreEdgeType::Default),
+        ];
+
+        let issues = check_artifact_lineage(
+            &[root, condition, extract, compress.clone(), merge.clone()],
+            &edges,
+        );
+        let flagged: HashMap<Uuid, ValidationCategory> = issues
+            .iter()
+            .map(|i| (i.node_id.unwrap(), i.category))
+            .collect();
+        assert_eq!(
+            flagged.get(&merge.id),
+            Some(&ValidationCategory::MissingArtifactAncestor)
+        );
+        assert_eq!(
+            flagged.get(&compress.id),
+            Some(&ValidationCategory::MissingArtifactAncestor)
+        );
+    }
+
+    #[test]
+    fn unreachable_pass_through_node_is_not_flagged() {
+        // Not wired to the root at all — check_disconnected's problem, not ours.
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let orphan = action_node(transcode_config());
+        assert!(check_artifact_lineage(&[root, orphan], &[]).is_empty());
+    }
+
+    #[test]
+    fn non_pass_through_action_is_never_flagged() {
+        let root = base_node(CoreNodeType::TriggerRoot);
+        let skip = action_node(vms_core::action::ActionConfig::Skip);
+        let edges = [edge(root.id, skip.id, CoreEdgeType::Default)];
+        assert!(check_artifact_lineage(&[root, skip], &edges).is_empty());
+    }
 }
