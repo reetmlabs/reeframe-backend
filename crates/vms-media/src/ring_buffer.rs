@@ -214,10 +214,13 @@ impl RingBufferManager {
             .ok_or_else(|| VmsError::Media(format!("no ring buffer for camera {camera_id}")))?;
 
         // Grab a wider window so we capture an IDR frame before the clip start.
-        const KEYFRAME_SEARCH_SECS: u32 = 5;
         let frames = {
             let rb = ring.lock().expect("ring buffer mutex poisoned");
-            rb.extract(pre_secs + KEYFRAME_SEARCH_SECS, post_secs, event_pts)
+            rb.extract(
+                pre_secs + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS,
+                post_secs,
+                event_pts,
+            )
         };
 
         if frames.is_empty() {

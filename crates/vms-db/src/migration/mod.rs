@@ -33,6 +33,7 @@ mod m20260101_000030_add_pipeline_trigger_last_error;
 mod m20260101_000031_add_pipeline_validation_issues;
 mod m20260101_000032_add_pipeline_trigger_unresolved_reference;
 mod m20260101_000033_add_pipeline_node_unresolved_reference;
+mod m20260101_000034_add_pipeline_camera_ref_ring_buffer_secs;
 
 pub struct Migrator;
 
@@ -73,6 +74,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000031_add_pipeline_validation_issues::Migration),
             Box::new(m20260101_000032_add_pipeline_trigger_unresolved_reference::Migration),
             Box::new(m20260101_000033_add_pipeline_node_unresolved_reference::Migration),
+            Box::new(m20260101_000034_add_pipeline_camera_ref_ring_buffer_secs::Migration),
         ]
     }
 }

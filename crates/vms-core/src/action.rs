@@ -172,6 +172,16 @@ pub struct TranscodeConfig {
     pub output_format: String,
 }
 
+/// Extra seconds `extract_clip` searches before `pre_event_secs` to find a
+/// keyframe to start the clip on. Shared with the code that sizes a
+/// camera's ring buffer, so both agree on the true required span.
+pub const EXTRACT_CLIP_KEYFRAME_SEARCH_SECS: u32 = 5;
+
+/// Upper bound on a camera's derived ring buffer size, regardless of how
+/// large any `extract_clip` node's `pre_event_secs + post_event_secs` is —
+/// keeps one misconfigured node from blowing up per-camera memory use.
+pub const MAX_RING_BUFFER_SECS: u32 = 120;
+
 /// Configuration for the `extract_clip` action.
 ///
 /// Cuts a time-bounded segment from the camera's ring-buffer centred on the
