@@ -450,6 +450,38 @@ mod tests {
         assert_eq!(*pts_values.last().unwrap(), 10);
     }
 
+    // Growing the capacity lets subsequently pushed frames extend further
+    // back before eviction kicks in.
+    #[test]
+    fn grow_to_extends_eviction_window() {
+        let mut rb = RingBuffer::new(Duration::from_secs(5));
+        for s in 0..=10 {
+            rb.push(frame(s));
+        }
+        rb.grow_to(Duration::from_secs(20));
+        for s in 11..=15 {
+            rb.push(frame(s));
+        }
+        // Nothing older than T=15-20=-5 should have been evicted since the
+        // grow, so everything from the first loop that survived it (T=5..)
+        // is still present alongside the new frames.
+        let pts_values: Vec<u64> = rb.frames.iter().map(|f| f.pts.as_secs()).collect();
+        assert_eq!(pts_values.first(), Some(&5));
+        assert_eq!(pts_values.last(), Some(&15));
+    }
+
+    // A smaller request than the current capacity is ignored, not shrunk.
+    #[test]
+    fn grow_to_never_shrinks() {
+        let mut rb = RingBuffer::new(Duration::from_secs(20));
+        for s in 0..=10 {
+            rb.push(frame(s));
+        }
+        rb.grow_to(Duration::from_secs(5));
+        // Still governed by the original 20s capacity, so nothing evicted.
+        assert_eq!(rb.len(), 11);
+    }
+
     // A single frame is never evicted even if the gap would exceed max_duration.
     #[test]
     fn single_frame_never_evicted() {
