@@ -450,8 +450,21 @@ pub(crate) async fn execute_node(
             let expr = node.condition_expr.as_deref().unwrap_or("false");
             let eval_ctx = build_condition_context(parent_outputs);
             match evalexpr::eval_boolean_with_context(expr, &eval_ctx) {
-                Ok(result) => NodeOutput::success(node.id)
-                    .with_metadata(serde_json::json!({ "condition_result": result })),
+                // Forwards the parent's artifact_path/text (mirroring Fork)
+                // so an artifact can legitimately pass through a Condition.
+                Ok(result) => {
+                    let base = parent_outputs
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| NodeOutput::success(node.id));
+                    NodeOutput {
+                        node_id: node.id,
+                        metadata: serde_json::json!({ "condition_result": result }),
+                        success: true,
+                        error: None,
+                        ..base
+                    }
+                }
                 Err(e) => NodeOutput::failure(node.id, format!("condition eval failed: {e}")),
             }
         }
