@@ -271,10 +271,16 @@ impl RingBufferManager {
 
 /// Trim `frames` to start at the first IDR/keyframe.
 fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame> {
-    if let Some(idx) = frames.iter().position(|f| f.is_keyframe) {
-        frames.drain(..idx);
+    match frames.iter().position(|f| f.is_keyframe) {
+        Some(idx) => {
+            frames.drain(..idx);
+            frames
+        }
+        // No keyframe anywhere in the window — nothing here can be muxed
+        // into a valid clip, so the caller's empty check must catch this,
+        // not the muxer downstream.
+        None => Vec::new(),
     }
-    frames
 }
 
 /// Mux raw encoded frames into an MP4 file at `output`.
@@ -545,11 +551,13 @@ mod tests {
         assert!(aligned[0].is_keyframe);
     }
 
-    // align_to_keyframe on a stream with no keyframes returns the original slice.
+    // align_to_keyframe on a stream with no keyframes returns empty — those
+    // frames can never be muxed into a valid clip, so the caller's
+    // is_empty() check must catch this rather than the muxer downstream.
     #[test]
-    fn align_to_keyframe_no_keyframe_returns_all() {
+    fn align_to_keyframe_no_keyframe_returns_empty() {
         let frames = vec![frame(0), frame(1), frame(2)];
         let aligned = align_to_keyframe(frames);
-        assert_eq!(aligned.len(), 3);
+        assert!(aligned.is_empty());
     }
 }
