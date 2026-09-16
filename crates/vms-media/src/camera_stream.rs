@@ -1275,3 +1275,21 @@ mod reconnect_policy_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod wait_for_pipeline_null_tests {
+    use super::*;
+
+    #[test]
+    fn succeeds_once_the_pipeline_has_actually_reached_null() {
+        gstreamer::init().ok();
+        let pipeline = gstreamer::Pipeline::new();
+        // A freshly constructed pipeline starts in Null already, but go
+        // through Ready first so this exercises a real transition, not a
+        // no-op.
+        pipeline.set_state(gstreamer::State::Ready).ok();
+        pipeline.set_state(gstreamer::State::Null).ok();
+
+        assert!(wait_for_pipeline_null(&pipeline).is_ok());
+    }
+}
