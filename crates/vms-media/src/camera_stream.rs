@@ -586,6 +586,28 @@ async fn drain_recording_branch(
     }
 }
 
+/// How long to wait for the pipeline to genuinely finish its transition to
+/// `Null` before giving up on this reconnect attempt — see
+/// [`wait_for_pipeline_null`].
+const NULL_TRANSITION_TIMEOUT: gstreamer::ClockTime = gstreamer::ClockTime::from_seconds(5);
+
+/// Block until `gst_pipeline` has actually finished transitioning to
+/// `Null`, up to [`NULL_TRANSITION_TIMEOUT`].
+///
+/// `Element::state()` returns `Ok(Async)` — not an error — if the timeout
+/// elapses while still transitioning, so success is only `state ==
+/// Null`, not just an `Ok` result.
+fn wait_for_pipeline_null(gst_pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
+    let (result, state, _pending) = gst_pipeline.state(NULL_TRANSITION_TIMEOUT);
+    result.map_err(|e| VmsError::Media(format!("pipeline Null transition failed: {e:?}")))?;
+    if state != gstreamer::State::Null {
+        return Err(VmsError::Media(format!(
+            "pipeline still in {state:?} after {NULL_TRANSITION_TIMEOUT} waiting for Null"
+        )));
+    }
+    Ok(())
+}
+
 /// Tear down and rebuild the recording branch (`queue` + `splitmuxsink`)
 /// fresh on every reconnect, instead of reusing the same `splitmuxsink`
 /// instance indefinitely. No-op if no recording branch is currently attached
@@ -605,8 +627,11 @@ async fn drain_recording_branch(
 /// on `tee` is released and re-requested, nothing about `tee` itself or any
 /// other branch hanging off it changes.
 ///
-/// Must be called while `gst_pipeline` is in (or transitioning to) `Null` —
-/// `Bin::remove` requires an element to already be in `Null` state.
+/// Must be called only after [`wait_for_pipeline_null`] has confirmed
+/// `gst_pipeline` actually reached `Null` — `Bin::remove` requires an
+/// element to already be in `Null` state, and removing it while the old
+/// elements are still mid-teardown on their own streaming thread produces
+/// GStreamer-CRITICAL assertions and corrupted fragments.
 fn rebuild_recording_branch(
     camera_id: Uuid,
     gst_pipeline: &gstreamer::Pipeline,
@@ -856,6 +881,15 @@ pub(crate) fn spawn_monitor(
                             _ = &mut shutdown_rx => break 'outer,
                         }
                     }
+                }
+
+                if let Err(e) = wait_for_pipeline_null(&gst_pipeline) {
+                    tracing::error!(
+                        camera_id = %camera_id,
+                        error = %e,
+                        "Pipeline not fully stopped yet — will retry rebuild",
+                    );
+                    continue 'reconnect;
                 }
 
                 if let Err(e) = rebuild_recording_branch(
