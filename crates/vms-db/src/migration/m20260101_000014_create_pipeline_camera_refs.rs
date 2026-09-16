@@ -85,4 +85,5 @@ pub enum PipelineCameraRef {
     CameraId,
     NeedsRingBuffer,
     NeedsAnalytics,
+    RingBufferSecs,
 }

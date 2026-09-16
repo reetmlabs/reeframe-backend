@@ -191,6 +191,12 @@ pub struct PipelineCameraRef {
     pub camera_id: Uuid,
     /// Pipeline has an `extract_clip` node — needs the ring-buffer appsink branch.
     pub needs_ring_buffer: bool,
+    /// Seconds the ring buffer must hold to satisfy every `extract_clip`
+    /// node referencing this camera — `pre_event_secs +
+    /// EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + post_event_secs`, maxed across
+    /// them and capped at `MAX_RING_BUFFER_SECS`. `0` when
+    /// `needs_ring_buffer` is `false`.
+    pub ring_buffer_secs: u32,
     /// Pipeline has an analytics trigger or action — needs the ONNX appsink branch.
     pub needs_analytics: bool,
 }

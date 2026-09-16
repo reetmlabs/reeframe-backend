@@ -246,6 +246,7 @@ impl PipelineRepo {
                 camera_id: r.camera_id,
                 needs_ring_buffer: r.needs_ring_buffer,
                 needs_analytics: r.needs_analytics,
+                ring_buffer_secs: r.ring_buffer_secs.max(0) as u32,
             })
             .collect())
     }
@@ -702,6 +703,7 @@ impl PipelineRepo {
                 camera_id: Set(cam_ref.camera_id),
                 needs_ring_buffer: Set(cam_ref.needs_ring_buffer),
                 needs_analytics: Set(cam_ref.needs_analytics),
+                ring_buffer_secs: Set(cam_ref.ring_buffer_secs as i32),
             }
             .insert(&txn)
             .await
@@ -1245,28 +1247,28 @@ fn derive_camera_refs(
         .filter_map(|t| t.camera_id)
         .collect();
 
-    let mut refs: HashMap<Uuid, (bool, bool)> = HashMap::new();
+    let mut refs: HashMap<Uuid, (u32, bool)> = HashMap::new();
     for &camera_id in &trigger_cameras {
-        refs.entry(camera_id).or_insert((false, false));
+        refs.entry(camera_id).or_insert((0, false));
     }
 
     for node in nodes {
         let Some(action_config) = &node.action_config else {
             continue;
         };
-        let needs_ring_buffer = matches!(action_config, ActionConfig::ExtractClip(_));
+        let ring_buffer_secs = extract_clip_ring_buffer_secs(action_config);
         let needs_analytics = false; // no analytics action/trigger type exists yet
 
         match camera_id_from_action_config(action_config) {
             Some(camera_id) => {
-                let entry = refs.entry(camera_id).or_insert((false, false));
-                entry.0 |= needs_ring_buffer;
+                let entry = refs.entry(camera_id).or_insert((0, false));
+                entry.0 = entry.0.max(ring_buffer_secs);
                 entry.1 |= needs_analytics;
             }
-            None if needs_ring_buffer || needs_analytics => {
+            None if ring_buffer_secs > 0 || needs_analytics => {
                 for &camera_id in &trigger_cameras {
-                    let entry = refs.entry(camera_id).or_insert((false, false));
-                    entry.0 |= needs_ring_buffer;
+                    let entry = refs.entry(camera_id).or_insert((0, false));
+                    entry.0 = entry.0.max(ring_buffer_secs);
                     entry.1 |= needs_analytics;
                 }
             }
@@ -1276,13 +1278,28 @@ fn derive_camera_refs(
 
     refs.into_iter()
         .map(
-            |(camera_id, (needs_ring_buffer, needs_analytics))| PipelineCameraRef {
+            |(camera_id, (ring_buffer_secs, needs_analytics))| PipelineCameraRef {
                 camera_id,
-                needs_ring_buffer,
+                needs_ring_buffer: ring_buffer_secs > 0,
+                ring_buffer_secs,
                 needs_analytics,
             },
         )
         .collect()
+}
+
+/// Ring buffer seconds an `ExtractClip` node requires — `0` for every other
+/// action type. `pre_event_secs + EXTRACT_CLIP_KEYFRAME_SEARCH_SECS +
+/// post_event_secs`, capped at `MAX_RING_BUFFER_SECS` so one misconfigured
+/// node can't blow up per-camera memory use.
+fn extract_clip_ring_buffer_secs(action_config: &ActionConfig) -> u32 {
+    let ActionConfig::ExtractClip(cfg) = action_config else {
+        return 0;
+    };
+    cfg.pre_event_secs
+        .saturating_add(vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS)
+        .saturating_add(cfg.post_event_secs)
+        .min(vms_core::action::MAX_RING_BUFFER_SECS)
 }
 
 /// Serialize whichever of `action_config`/`transport_config`/`condition_expr`
@@ -2372,6 +2389,70 @@ mod tests {
 
         assert_eq!(refs.len(), 1);
         assert!(refs[0].needs_ring_buffer);
+    }
+
+    fn extract_clip_config_with_window(
+        camera_id: Option<Uuid>,
+        pre_event_secs: u32,
+        post_event_secs: u32,
+    ) -> ActionConfig {
+        ActionConfig::ExtractClip(vms_core::action::ExtractClipConfig {
+            pre_event_secs,
+            post_event_secs,
+            format: "mp4".into(),
+            camera_id,
+            use_manual_range: false,
+        })
+    }
+
+    #[test]
+    fn ring_buffer_secs_is_pre_plus_keyframe_margin_plus_post() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![action_node(extract_clip_config_with_window(
+            Some(cam),
+            5,
+            10,
+        ))];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].ring_buffer_secs,
+            5 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 10
+        );
+    }
+
+    #[test]
+    fn ring_buffer_secs_is_capped_at_the_maximum() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![action_node(extract_clip_config_with_window(
+            Some(cam),
+            600,
+            600,
+        ))];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].ring_buffer_secs,
+            vms_core::action::MAX_RING_BUFFER_SECS
+        );
+    }
+
+    #[test]
+    fn ring_buffer_secs_maxes_across_multiple_extract_clip_nodes_on_the_same_camera() {
+        let cam = Uuid::new_v4();
+        let nodes = vec![
+            action_node(extract_clip_config_with_window(Some(cam), 1, 1)),
+            action_node(extract_clip_config_with_window(Some(cam), 20, 30)),
+        ];
+        let refs = derive_camera_refs(&nodes, &[]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].ring_buffer_secs,
+            20 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 30
+        );
     }
 
     // -- upsert_node_trigger / delete_triggers_for_pipeline --

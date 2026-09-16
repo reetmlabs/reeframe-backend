@@ -22,8 +22,10 @@ use crate::PipelineRegistry;
 /// ref count goes 0 -> 1 and stopped when it drops back 1 -> 0. This prevents
 /// duplicate GStreamer pipelines or connection pools when multiple VMS pipelines
 /// reference the same camera or destination.
-/// Default ring-buffer duration used when a pipeline requests a ring buffer
-/// but no explicit duration is stored in the camera ref.
+/// Fallback ring-buffer duration for a `RingBuffer` resource started outside
+/// of `sync` (so `ring_buffer_secs` has nothing recorded for that camera
+/// yet) — in normal operation every acquire is preceded by a `sync` call
+/// that populates the real per-camera requirement.
 const DEFAULT_RING_BUFFER_SECS: u32 = 30;
 
 pub struct ResourceManager {
@@ -32,6 +34,10 @@ pub struct ResourceManager {
     /// a first caller is executing `start()`. The sender broadcasts the new
     /// `ResourceState` once startup completes (or fails).
     state_watches: DashMap<ResourceId, tokio::sync::watch::Sender<ResourceState>>,
+    /// Per-camera ring buffer duration required by the currently enabled
+    /// pipelines, kept up to date by every `sync` call. Consulted by
+    /// `start()` when a `RingBuffer` resource actually needs starting.
+    ring_buffer_secs: DashMap<Uuid, u32>,
     media: Arc<MediaManager>,
     cameras: CameraRepo,
     ring_buffers: Arc<RingBufferManager>,
@@ -50,6 +56,7 @@ impl ResourceManager {
         Arc::new(Self {
             entries: DashMap::new(),
             state_watches: DashMap::new(),
+            ring_buffer_secs: DashMap::new(),
             media,
             cameras,
             ring_buffers,
@@ -112,6 +119,11 @@ impl ResourceManager {
     /// `?`-propagated: one stale/unreachable resource must not block every
     /// other resource in the same batch from being reconciled.
     pub async fn sync(&self, old: &RegistrySnapshot, new: &RegistrySnapshot) {
+        let ring_buffer_secs = ring_buffer_durations(new);
+        for (&camera_id, &secs) in &ring_buffer_secs {
+            self.ring_buffer_secs.insert(camera_id, secs);
+        }
+
         let before = resource_counts(old);
         let after = resource_counts(new);
 
@@ -135,6 +147,28 @@ impl ResourceManager {
                         tracing::error!(resource = ?id, error = %e,
                             "Failed to release resource during registry sync — continuing");
                     }
+                }
+            }
+        }
+
+        // A camera's ring buffer ref count doesn't change when an already-
+        // referencing pipeline just needs a *larger* window than before
+        // (e.g. `post_event_secs` edited upward) — the delta loop above
+        // never re-acquires it in that case, so grow any already-running
+        // buffer here regardless of ref-count movement.
+        for (camera_id, secs) in ring_buffer_secs {
+            let id = ResourceId::RingBuffer(camera_id);
+            let already_running = matches!(
+                self.entries.get(&id).map(|e| e.state.clone()),
+                Some(ResourceState::Running)
+            );
+            if already_running {
+                if let Err(e) = self
+                    .ring_buffers
+                    .start(camera_id, secs, RingBufferMode::Memory)
+                {
+                    tracing::error!(%camera_id, error = %e,
+                        "Failed to grow ring buffer during registry sync — continuing");
                 }
             }
         }
@@ -326,8 +360,13 @@ impl ResourceManager {
         match id {
             ResourceId::CameraPipeline(cam_id) => self.start_live_camera(*cam_id).await,
             ResourceId::RingBuffer(cam_id) => {
+                let secs = self
+                    .ring_buffer_secs
+                    .get(cam_id)
+                    .map(|s| *s)
+                    .unwrap_or(DEFAULT_RING_BUFFER_SECS);
                 self.ring_buffers
-                    .start(*cam_id, DEFAULT_RING_BUFFER_SECS, RingBufferMode::Memory)
+                    .start(*cam_id, secs, RingBufferMode::Memory)
             }
             ResourceId::Source(id) => self.start_source(*id).await,
             ResourceId::DestinationPool(id) => {
@@ -432,6 +471,23 @@ fn resource_counts(snapshot: &RegistrySnapshot) -> HashMap<ResourceId, usize> {
     counts
 }
 
+/// Per-camera ring buffer size required by the currently enabled pipelines
+/// in `snapshot` — the max of `PipelineCameraRef::ring_buffer_secs` (already
+/// capped, see `derive_camera_refs`) across every pipeline referencing that
+/// camera. Cameras with no `needs_ring_buffer` reference are absent.
+fn ring_buffer_durations(snapshot: &RegistrySnapshot) -> HashMap<Uuid, u32> {
+    let mut durations: HashMap<Uuid, u32> = HashMap::new();
+    for pipeline in snapshot.pipelines.values() {
+        for cam_ref in &pipeline.camera_refs {
+            if cam_ref.needs_ring_buffer {
+                let entry = durations.entry(cam_ref.camera_id).or_insert(0);
+                *entry = (*entry).max(cam_ref.ring_buffer_secs);
+            }
+        }
+    }
+    durations
+}
+
 /// Map the DB-level source-type enum to the domain-level one, the same way
 /// `PipelineRepo::trigger_from_db` maps `pipeline_trigger::TriggerType`.
 fn source_type_from_db(db_type: vms_db::entities::source::SourceType) -> vms_core::SourceType {
@@ -525,6 +581,7 @@ mod tests {
                 camera_id,
                 needs_ring_buffer: true,
                 needs_analytics: true,
+                ring_buffer_secs: 30,
             }],
             vec![source_id],
             vec![transport_node(Uuid::new_v4(), destination_id)],
@@ -547,6 +604,7 @@ mod tests {
             camera_id,
             needs_ring_buffer: false,
             needs_analytics: false,
+            ring_buffer_secs: 0,
         };
         let snapshot = snapshot_of(vec![
             pipeline_with(vec![cam_ref()], vec![], vec![]),
@@ -568,5 +626,41 @@ mod tests {
         let counts = resource_counts(&snapshot);
 
         assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn ring_buffer_durations_maxes_across_pipelines_referencing_the_same_camera() {
+        let camera_id = Uuid::new_v4();
+        let cam_ref = |secs| PipelineCameraRef {
+            camera_id,
+            needs_ring_buffer: true,
+            needs_analytics: false,
+            ring_buffer_secs: secs,
+        };
+        let snapshot = snapshot_of(vec![
+            pipeline_with(vec![cam_ref(30)], vec![], vec![]),
+            pipeline_with(vec![cam_ref(90)], vec![], vec![]),
+        ]);
+
+        let durations = ring_buffer_durations(&snapshot);
+
+        assert_eq!(durations[&camera_id], 90);
+    }
+
+    #[test]
+    fn ring_buffer_durations_omits_cameras_that_dont_need_one() {
+        let camera_id = Uuid::new_v4();
+        let snapshot = snapshot_of(vec![pipeline_with(
+            vec![PipelineCameraRef {
+                camera_id,
+                needs_ring_buffer: false,
+                needs_analytics: false,
+                ring_buffer_secs: 0,
+            }],
+            vec![],
+            vec![],
+        )]);
+
+        assert!(ring_buffer_durations(&snapshot).is_empty());
     }
 }

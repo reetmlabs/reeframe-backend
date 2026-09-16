@@ -81,6 +81,15 @@ impl RingBuffer {
         self.frames.back().map(|f| f.pts)
     }
 
+    /// Grow `max_duration` to `min_duration` if it's larger than the current
+    /// value. Never shrinks — a smaller request keeps whatever history is
+    /// already buffered rather than discarding it.
+    pub fn grow_to(&mut self, min_duration: Duration) {
+        if min_duration > self.max_duration {
+            self.max_duration = min_duration;
+        }
+    }
+
     /// Number of frames currently in the buffer.
     pub fn len(&self) -> usize {
         self.frames.len()
@@ -115,8 +124,9 @@ impl RingBufferManager {
     ///
     /// Creates a [`RingBuffer`] sized to hold `duration_secs` of footage and
     /// attaches an appsink branch to the camera's live GStreamer tee. If the
-    /// camera is already being buffered this is a no-op.
-    ///
+    /// camera is already being buffered, its capacity is grown to
+    /// `duration_secs` instead — never shrunk, so a smaller `duration_secs`
+    /// from some other caller can't discard another caller's history.
     pub fn start(
         &self,
         camera_id: Uuid,
@@ -129,7 +139,11 @@ impl RingBufferManager {
             ));
         }
 
-        if self.buffers.contains_key(&camera_id) {
+        if let Some(existing) = self.buffers.get(&camera_id) {
+            existing
+                .lock()
+                .expect("ring buffer mutex poisoned")
+                .grow_to(Duration::from_secs(u64::from(duration_secs)));
             return Ok(());
         }
 
@@ -200,10 +214,13 @@ impl RingBufferManager {
             .ok_or_else(|| VmsError::Media(format!("no ring buffer for camera {camera_id}")))?;
 
         // Grab a wider window so we capture an IDR frame before the clip start.
-        const KEYFRAME_SEARCH_SECS: u32 = 5;
         let frames = {
             let rb = ring.lock().expect("ring buffer mutex poisoned");
-            rb.extract(pre_secs + KEYFRAME_SEARCH_SECS, post_secs, event_pts)
+            rb.extract(
+                pre_secs + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS,
+                post_secs,
+                event_pts,
+            )
         };
 
         if frames.is_empty() {
@@ -254,10 +271,16 @@ impl RingBufferManager {
 
 /// Trim `frames` to start at the first IDR/keyframe.
 fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame> {
-    if let Some(idx) = frames.iter().position(|f| f.is_keyframe) {
-        frames.drain(..idx);
+    match frames.iter().position(|f| f.is_keyframe) {
+        Some(idx) => {
+            frames.drain(..idx);
+            frames
+        }
+        // No keyframe anywhere in the window — nothing here can be muxed
+        // into a valid clip, so the caller's empty check must catch this,
+        // not the muxer downstream.
+        None => Vec::new(),
     }
-    frames
 }
 
 /// Mux raw encoded frames into an MP4 file at `output`.
@@ -436,6 +459,38 @@ mod tests {
         assert_eq!(*pts_values.last().unwrap(), 10);
     }
 
+    // Growing the capacity lets subsequently pushed frames extend further
+    // back before eviction kicks in.
+    #[test]
+    fn grow_to_extends_eviction_window() {
+        let mut rb = RingBuffer::new(Duration::from_secs(5));
+        for s in 0..=10 {
+            rb.push(frame(s));
+        }
+        rb.grow_to(Duration::from_secs(20));
+        for s in 11..=15 {
+            rb.push(frame(s));
+        }
+        // Nothing older than T=15-20=-5 should have been evicted since the
+        // grow, so everything from the first loop that survived it (T=5..)
+        // is still present alongside the new frames.
+        let pts_values: Vec<u64> = rb.frames.iter().map(|f| f.pts.as_secs()).collect();
+        assert_eq!(pts_values.first(), Some(&5));
+        assert_eq!(pts_values.last(), Some(&15));
+    }
+
+    // A smaller request than the current capacity is ignored, not shrunk.
+    #[test]
+    fn grow_to_never_shrinks() {
+        let mut rb = RingBuffer::new(Duration::from_secs(20));
+        for s in 0..=10 {
+            rb.push(frame(s));
+        }
+        rb.grow_to(Duration::from_secs(5));
+        // Still governed by the original 20s capacity, so nothing evicted.
+        assert_eq!(rb.len(), 11);
+    }
+
     // A single frame is never evicted even if the gap would exceed max_duration.
     #[test]
     fn single_frame_never_evicted() {
@@ -496,11 +551,13 @@ mod tests {
         assert!(aligned[0].is_keyframe);
     }
 
-    // align_to_keyframe on a stream with no keyframes returns the original slice.
+    // align_to_keyframe on a stream with no keyframes returns empty — those
+    // frames can never be muxed into a valid clip, so the caller's
+    // is_empty() check must catch this rather than the muxer downstream.
     #[test]
-    fn align_to_keyframe_no_keyframe_returns_all() {
+    fn align_to_keyframe_no_keyframe_returns_empty() {
         let frames = vec![frame(0), frame(1), frame(2)];
         let aligned = align_to_keyframe(frames);
-        assert_eq!(aligned.len(), 3);
+        assert!(aligned.is_empty());
     }
 }

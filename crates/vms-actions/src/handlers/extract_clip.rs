@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use tokio::time::sleep;
 use vms_core::{
     action::ExtractClipConfig,
     node::{NodeInput, NodeOutput},
@@ -12,7 +13,10 @@ use crate::dispatcher::ActionContext;
 ///
 /// The extraction window is `[event_pts - pre_event_secs, event_pts + post_event_secs]`
 /// where `event_pts` is the latest buffered PTS at the time of execution — a
-/// reliable proxy for "now" in pipeline time.
+/// reliable proxy for "now" in pipeline time. `post_event_secs` of footage
+/// doesn't exist yet at that instant, so this waits for it to elapse before
+/// reading the buffer — otherwise the post-event side of the window would
+/// always be empty, no matter how large `post_event_secs` is.
 ///
 /// # Limitations
 ///
@@ -49,6 +53,12 @@ pub async fn execute(
     // -- Anchor the extraction window to the latest buffered PTS --
     let event_pts = ring_buffer.latest_pts(camera_id).unwrap_or(Duration::ZERO);
 
+    // Wait for the post-event footage to actually be captured before reading
+    // the buffer — anchored to `event_pts` above, not re-read afterwards.
+    if cfg.post_event_secs > 0 {
+        sleep(Duration::from_secs(cfg.post_event_secs.into())).await;
+    }
+
     tracing::debug!(
         node_id = %node_id,
         camera_id = %camera_id,
@@ -73,5 +83,80 @@ pub async fn execute(
             NodeOutput::success(node_id).with_artifact(path)
         }
         Err(e) => NodeOutput::failure(node_id, format!("extract_clip: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use vms_core::TriggerContext;
+    use vms_media::{MediaConfig, MediaManager, RingBufferManager};
+
+    use super::*;
+
+    fn ring_buffer_manager() -> Arc<RingBufferManager> {
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (chunk_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (live_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let config = MediaConfig {
+            recording_dir: std::env::temp_dir(),
+            rtsp_bind: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        let media = MediaManager::new(config, event_tx, chunk_tx, live_tx)
+            .expect("MediaManager::new should succeed with a scratch recording dir");
+        RingBufferManager::new(Arc::new(media))
+    }
+
+    fn config(pre: u32, post: u32) -> ExtractClipConfig {
+        ExtractClipConfig {
+            pre_event_secs: pre,
+            post_event_secs: post,
+            format: "mp4".into(),
+            camera_id: Some(uuid::Uuid::new_v4()),
+            use_manual_range: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waits_for_post_event_secs_before_extracting() {
+        let cfg = config(5, 30);
+        let input = NodeInput {
+            parent_outputs: vec![],
+            trigger_ctx: TriggerContext::for_schedule(uuid::Uuid::new_v4(), uuid::Uuid::new_v4()),
+        };
+        let ctx = ActionContext {
+            ring_buffer: Some(ring_buffer_manager()),
+            ..Default::default()
+        };
+
+        let started = tokio::time::Instant::now();
+        // No ring buffer was ever started for this camera, so extraction
+        // itself fails fast once it runs — this only proves the wait
+        // happens *before* that point, not that extraction succeeds.
+        let out = execute(uuid::Uuid::new_v4(), &cfg, &input, &ctx).await;
+
+        assert!(!out.success);
+        assert!(started.elapsed() >= Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn does_not_wait_when_post_event_secs_is_zero() {
+        let cfg = config(5, 0);
+        let input = NodeInput {
+            parent_outputs: vec![],
+            trigger_ctx: TriggerContext::for_schedule(uuid::Uuid::new_v4(), uuid::Uuid::new_v4()),
+        };
+        let ctx = ActionContext {
+            ring_buffer: Some(ring_buffer_manager()),
+            ..Default::default()
+        };
+
+        let started = tokio::time::Instant::now();
+        let out = execute(uuid::Uuid::new_v4(), &cfg, &input, &ctx).await;
+
+        assert!(!out.success);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
