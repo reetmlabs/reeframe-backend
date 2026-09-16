@@ -1290,8 +1290,9 @@ fn derive_camera_refs(
 
 /// Ring buffer seconds an `ExtractClip` node requires — `0` for every other
 /// action type. `pre_event_secs + EXTRACT_CLIP_KEYFRAME_SEARCH_SECS +
-/// post_event_secs`, capped at `MAX_RING_BUFFER_SECS` so one misconfigured
-/// node can't blow up per-camera memory use.
+/// post_event_secs + RING_BUFFER_EVICTION_SAFETY_SECS`, capped at
+/// `MAX_RING_BUFFER_SECS` so one misconfigured node can't blow up
+/// per-camera memory use.
 fn extract_clip_ring_buffer_secs(action_config: &ActionConfig) -> u32 {
     let ActionConfig::ExtractClip(cfg) = action_config else {
         return 0;
@@ -1299,6 +1300,7 @@ fn extract_clip_ring_buffer_secs(action_config: &ActionConfig) -> u32 {
     cfg.pre_event_secs
         .saturating_add(vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS)
         .saturating_add(cfg.post_event_secs)
+        .saturating_add(vms_core::action::RING_BUFFER_EVICTION_SAFETY_SECS)
         .min(vms_core::action::MAX_RING_BUFFER_SECS)
 }
 
@@ -2418,7 +2420,9 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(
             refs[0].ring_buffer_secs,
-            5 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 10
+            5 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS
+                + 10
+                + vms_core::action::RING_BUFFER_EVICTION_SAFETY_SECS
         );
     }
 
@@ -2451,7 +2455,9 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(
             refs[0].ring_buffer_secs,
-            20 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 30
+            20 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS
+                + 30
+                + vms_core::action::RING_BUFFER_EVICTION_SAFETY_SECS
         );
     }
 

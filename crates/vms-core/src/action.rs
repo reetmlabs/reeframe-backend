@@ -182,6 +182,11 @@ pub const EXTRACT_CLIP_KEYFRAME_SEARCH_SECS: u32 = 5;
 /// keeps one misconfigured node from blowing up per-camera memory use.
 pub const MAX_RING_BUFFER_SECS: u32 = 120;
 
+/// Extra ring buffer capacity beyond the bare minimum window, absorbing the
+/// jitter between when `event_pts` is captured and when `extract_clip`
+/// actually reads the buffer — otherwise eviction races the read.
+pub const RING_BUFFER_EVICTION_SAFETY_SECS: u32 = 5;
+
 /// Configuration for the `extract_clip` action.
 ///
 /// Cuts a time-bounded segment from the camera's ring-buffer centred on the
