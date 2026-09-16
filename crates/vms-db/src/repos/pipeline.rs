@@ -2420,7 +2420,9 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(
             refs[0].ring_buffer_secs,
-            5 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 10
+            5 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS
+                + 10
+                + vms_core::action::RING_BUFFER_EVICTION_SAFETY_SECS
         );
     }
 
@@ -2453,7 +2455,9 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(
             refs[0].ring_buffer_secs,
-            20 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + 30
+            20 + vms_core::action::EXTRACT_CLIP_KEYFRAME_SEARCH_SECS
+                + 30
+                + vms_core::action::RING_BUFFER_EVICTION_SAFETY_SECS
         );
     }
 
