@@ -14,6 +14,9 @@ use vms_core::{RecordingChunkEvent, VmsError};
 pub(crate) struct CodecElements {
     pub(crate) depay_factory: &'static str,
     pub(crate) parse_factory: &'static str,
+    /// Mime type for [`byte_stream_au_caps`]; `None` where no such
+    /// distinction exists (e.g. JPEG).
+    pub(crate) parse_caps_mime: Option<&'static str>,
 }
 
 pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
@@ -21,31 +24,40 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
         "H264" => Some(CodecElements {
             depay_factory: "rtph264depay",
             parse_factory: "h264parse",
+            parse_caps_mime: Some("video/x-h264"),
         }),
         "H265" | "HEVC" => Some(CodecElements {
             depay_factory: "rtph265depay",
             parse_factory: "h265parse",
+            parse_caps_mime: Some("video/x-h265"),
         }),
         // Motion JPEG — RTP encoding name per RFC 2435
         "JPEG" => Some(CodecElements {
             depay_factory: "rtpjpegdepay",
             parse_factory: "jpegparse",
+            parse_caps_mime: None,
         }),
         // AV1 — RTP encoding name per RFC 9671
         "AV1" => Some(CodecElements {
             depay_factory: "rtpav1depay",
             parse_factory: "av1parse",
+            parse_caps_mime: None,
         }),
         _ => None,
     }
 }
 
-/// Make every keyframe self-contained by repeating codec config data (SPS/PPS
-/// for H264/H265) alongside it, if the parser exposes that property — a
-/// clip re-muxed standalone later (see `mux_to_mp4`) only has whatever the
-/// ring buffer captured, not the camera's one-time initial config data.
-/// Codecs with no such property (e.g. JPEG, already self-contained per
-/// frame) are left untouched.
+/// Forces inline, repeated SPS/PPS and one access unit per buffer — left
+/// unconstrained, a parser can negotiate `avc` instead, which carries
+/// config data out-of-band and breaks standalone re-muxing later.
+fn byte_stream_au_caps(mime: &str) -> gstreamer::Caps {
+    gstreamer::Caps::builder(mime)
+        .field("stream-format", "byte-stream")
+        .field("alignment", "au")
+        .build()
+}
+
+/// Repeats SPS/PPS before every keyframe, if the parser supports it.
 fn set_config_interval_if_supported(parse: &gstreamer::Element) {
     if parse.has_property("config-interval") {
         parse.set_property("config-interval", -1);
@@ -253,7 +265,13 @@ pub(crate) fn build_camera_stream(
         }
 
         // depay -> parse -> tee
-        if let Err(e) = gstreamer::Element::link_many([&depay, &parse, &tee]) {
+        let link_result = match codec.parse_caps_mime {
+            Some(mime) => depay
+                .link(&parse)
+                .and_then(|()| parse.link_filtered(&tee, &byte_stream_au_caps(mime))),
+            None => gstreamer::Element::link_many([&depay, &parse, &tee]),
+        };
+        if let Err(e) = link_result {
             tracing::error!(camera_id = %cam_id, "link depay->parse->tee: {e}");
             return;
         }
