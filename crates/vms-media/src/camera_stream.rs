@@ -1254,3 +1254,32 @@ mod reconnect_policy_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod config_interval_tests {
+    use super::*;
+
+    #[test]
+    fn sets_config_interval_on_a_parser_that_supports_it() {
+        gstreamer::init().ok();
+        let parse = gstreamer::ElementFactory::make("h264parse")
+            .build()
+            .expect("h264parse should be available");
+
+        set_config_interval_if_supported(&parse);
+
+        let value: i32 = parse.property("config-interval");
+        assert_eq!(value, -1);
+    }
+
+    #[test]
+    fn skips_a_parser_with_no_such_property() {
+        gstreamer::init().ok();
+        let parse = gstreamer::ElementFactory::make("jpegparse")
+            .build()
+            .expect("jpegparse should be available");
+
+        // Must not panic/error — jpegparse has no config-interval property.
+        set_config_interval_if_supported(&parse);
+    }
+}
