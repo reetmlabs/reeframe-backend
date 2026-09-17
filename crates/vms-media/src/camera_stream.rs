@@ -40,6 +40,18 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
     }
 }
 
+/// Make every keyframe self-contained by repeating codec config data (SPS/PPS
+/// for H264/H265) alongside it, if the parser exposes that property — a
+/// clip re-muxed standalone later (see `mux_to_mp4`) only has whatever the
+/// ring buffer captured, not the camera's one-time initial config data.
+/// Codecs with no such property (e.g. JPEG, already self-contained per
+/// frame) are left untouched.
+fn set_config_interval_if_supported(parse: &gstreamer::Element) {
+    if parse.has_property("config-interval") {
+        parse.set_property("config-interval", -1);
+    }
+}
+
 // -- Camera stream builder --
 
 /// State shared between the codec-detection `pad-added` handler, the
@@ -233,6 +245,7 @@ pub(crate) fn build_camera_stream(
                 return;
             }
         };
+        set_config_interval_if_supported(&parse);
 
         if let Err(e) = gst_pipeline.add_many([&depay, &parse]) {
             tracing::error!(camera_id = %cam_id, "add depay+parse: {e}");
