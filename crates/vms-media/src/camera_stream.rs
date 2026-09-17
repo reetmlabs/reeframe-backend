@@ -1301,3 +1301,35 @@ mod config_interval_tests {
         set_config_interval_if_supported(&parse);
     }
 }
+
+#[cfg(test)]
+mod byte_stream_caps_tests {
+    use super::*;
+
+    #[test]
+    fn h264_and_h265_get_byte_stream_caps_mime() {
+        assert_eq!(
+            codec_for("H264").unwrap().parse_caps_mime,
+            Some("video/x-h264")
+        );
+        assert_eq!(
+            codec_for("H265").unwrap().parse_caps_mime,
+            Some("video/x-h265")
+        );
+    }
+
+    #[test]
+    fn jpeg_and_av1_have_no_byte_stream_distinction() {
+        assert_eq!(codec_for("JPEG").unwrap().parse_caps_mime, None);
+        assert_eq!(codec_for("AV1").unwrap().parse_caps_mime, None);
+    }
+
+    #[test]
+    fn byte_stream_au_caps_has_the_expected_fields() {
+        gstreamer::init().ok();
+        let caps = byte_stream_au_caps("video/x-h264");
+        let s = caps.structure(0).unwrap();
+        assert_eq!(s.get::<&str>("stream-format").unwrap(), "byte-stream");
+        assert_eq!(s.get::<&str>("alignment").unwrap(), "au");
+    }
+}
