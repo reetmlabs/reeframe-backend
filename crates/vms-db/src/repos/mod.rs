@@ -134,3 +134,56 @@ pub(super) fn db_err(e: sea_orm::DbErr) -> VmsError {
 pub(super) fn now() -> chrono::DateTime<chrono::FixedOffset> {
     chrono::Utc::now().fixed_offset()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masked_value_falls_back_to_existing() {
+        let existing = serde_json::json!({"password": "enc:v1:real"});
+        let submitted = serde_json::json!({"password": "***"});
+        let merged = preserve_masked_credentials(&existing, submitted);
+        assert_eq!(merged["password"], "enc:v1:real");
+    }
+
+    #[test]
+    fn blank_value_falls_back_to_existing() {
+        let existing = serde_json::json!({"password": "enc:v1:real"});
+        let submitted = serde_json::json!({"password": ""});
+        let merged = preserve_masked_credentials(&existing, submitted);
+        assert_eq!(merged["password"], "enc:v1:real");
+    }
+
+    #[test]
+    fn missing_key_falls_back_to_existing() {
+        let existing = serde_json::json!({"password": "enc:v1:real"});
+        let submitted = serde_json::json!({"other_field": "unchanged"});
+        let merged = preserve_masked_credentials(&existing, submitted);
+        assert_eq!(merged["password"], "enc:v1:real");
+    }
+
+    #[test]
+    fn masked_value_with_no_existing_value_is_dropped() {
+        let existing = serde_json::json!({});
+        let submitted = serde_json::json!({"password": "***"});
+        let merged = preserve_masked_credentials(&existing, submitted);
+        assert!(merged.get("password").is_none());
+    }
+
+    #[test]
+    fn genuine_new_value_is_not_overwritten() {
+        let existing = serde_json::json!({"password": "enc:v1:real"});
+        let submitted = serde_json::json!({"password": "a-new-password"});
+        let merged = preserve_masked_credentials(&existing, submitted);
+        assert_eq!(merged["password"], "a-new-password");
+    }
+
+    #[test]
+    fn non_credential_fields_pass_through_unchanged() {
+        let existing = serde_json::json!({"host": "old.example.com"});
+        let submitted = serde_json::json!({"host": "new.example.com"});
+        let merged = preserve_masked_credentials(&existing, submitted);
+        assert_eq!(merged["host"], "new.example.com");
+    }
+}
