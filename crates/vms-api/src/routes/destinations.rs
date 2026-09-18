@@ -167,6 +167,8 @@ pub async fn update_destination(
         .ok_or_else(|| ApiError::not_found(format!("destination {id} not found")))?
         .enabled;
 
+    let config_changed = body.config.is_some();
+
     let input = UpdateDestination {
         name: body.name,
         description: body.description.map(Some),
@@ -176,6 +178,13 @@ pub async fn update_destination(
     };
 
     let dest = state.dest_repo.update(id, input).await?;
+
+    // A cached transport client (e.g. the S3 adapter's) is built from the
+    // config once and reused after that, so a config change needs to evict
+    // it or the next delivery keeps using stale credentials.
+    if config_changed {
+        state.invalidate_transport(id);
+    }
 
     // Only a real enabled/disabled transition marks or clears dependent
     // nodes — every other field change leaves them alone.

@@ -9,7 +9,8 @@ use vms_db::{
     SettingsRepo, SourceRepo, TileLayoutRepo, UserRepo,
 };
 use vms_engine::{
-    EventBus, Metrics, PipelineRegistry, ResourceManager, StatMonitor, TriggerEvaluator,
+    EventBus, Metrics, PipelineRegistry, ResourceManager, StatMonitor, TransportDispatcher,
+    TriggerEvaluator,
 };
 use vms_media::{MediaManager, RingBufferManager};
 
@@ -88,5 +89,12 @@ impl AppState {
         let new = self.pipeline_registry.snapshot();
         self.resource_manager.sync(&old, &new).await;
         Ok(())
+    }
+
+    /// Evict a destination's cached transport client. Call after a destination
+    /// config update so the next delivery builds a fresh client instead of
+    /// reusing one built from stale credentials.
+    pub fn invalidate_transport(&self, dest_id: uuid::Uuid) {
+        TransportDispatcher::invalidate(dest_id);
     }
 }
