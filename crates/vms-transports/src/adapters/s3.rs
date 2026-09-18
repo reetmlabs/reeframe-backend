@@ -30,6 +30,29 @@ pub fn invalidate(dest_id: Uuid) {
     }
 }
 
+#[cfg(test)]
+mod invalidate_tests {
+    use super::*;
+
+    #[test]
+    fn removes_the_cached_client_for_that_destination() {
+        let dest_id = Uuid::new_v4();
+        let client = AmazonS3Builder::new()
+            .with_bucket_name("test-bucket")
+            .with_region("us-east-1")
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .build()
+            .expect("a locally-buildable client needs no network access");
+        s3_clients().insert(dest_id, Arc::new(client));
+        assert!(s3_clients().contains_key(&dest_id));
+
+        invalidate(dest_id);
+
+        assert!(!s3_clients().contains_key(&dest_id));
+    }
+}
+
 // S3 requires every multipart part but the last to be at least 5 MiB; 8 MiB
 // gives headroom and cuts the number of upload requests versus the minimum.
 const CHUNK_SIZE: usize = 8 * 1024 * 1024;
