@@ -43,6 +43,21 @@ pub enum ResourceId {
     DestinationPool(Uuid),
 }
 
+impl ResourceId {
+    /// Dependency rank for ordering acquires/releases across resource kinds.
+    /// `RingBuffer` and `AnalyticsBranch` attach to a camera's already-running
+    /// `CameraPipeline`, so they must acquire after it and release before it;
+    /// every other kind has no such dependency.
+    pub fn acquire_rank(&self) -> u8 {
+        match self {
+            ResourceId::RingBuffer(_) | ResourceId::AnalyticsBranch(_) => 1,
+            ResourceId::Source(_)
+            | ResourceId::CameraPipeline(_)
+            | ResourceId::DestinationPool(_) => 0,
+        }
+    }
+}
+
 /// Lifecycle state of a managed resource.
 ///
 /// State transitions follow the sequence:
