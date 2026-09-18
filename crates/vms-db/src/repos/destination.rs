@@ -2,7 +2,7 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrai
 use uuid::Uuid;
 use vms_core::VmsError;
 
-use super::{db_err, decrypt_config, encrypt_config, now};
+use super::{db_err, decrypt_config, encrypt_config, now, preserve_masked_credentials};
 use crate::{
     crypto::Crypto,
     entities::destination::{self, ActiveModel, DestinationType},
@@ -93,6 +93,7 @@ impl DestinationRepo {
             .map_err(db_err)?
             .ok_or(VmsError::DestinationNotFound(id))?;
 
+        let existing_config = dest.config.clone();
         let mut active: ActiveModel = dest.into();
 
         if let Some(v) = input.name {
@@ -105,6 +106,7 @@ impl DestinationRepo {
             active.dest_type = Set(v);
         }
         if let Some(cfg) = input.config {
+            let cfg = preserve_masked_credentials(&existing_config, cfg);
             active.config = Set(encrypt_config(&self.crypto, cfg)?);
         }
         if let Some(v) = input.enabled {

@@ -37,7 +37,8 @@ use vms_core::VmsError;
 
 /// Well-known JSON object keys whose string values are stored encrypted.
 /// Applied to the top-level keys of `source.config` and `destination.config`.
-pub(super) const CREDENTIAL_FIELDS: &[&str] = &[
+/// Also the field list the API layer masks as `"***"` on read.
+pub const CREDENTIAL_FIELDS: &[&str] = &[
     "password",
     "token",
     "api_key",
@@ -89,6 +90,41 @@ pub(super) fn decrypt_config(
         }
     }
     Ok(config)
+}
+
+/// Keeps a credential field's existing stored value on update when the
+/// submitted value is missing, blank, or the `"***"` mask the API layer
+/// sends back on read — otherwise a client that resubmits a masked value
+/// would overwrite the real credential with the literal string `"***"`.
+/// Drops the key if there's no existing value to fall back to. Non-credential
+/// fields are left as submitted.
+pub(super) fn preserve_masked_credentials(
+    existing: &serde_json::Value,
+    mut submitted: serde_json::Value,
+) -> serde_json::Value {
+    let serde_json::Value::Object(ref mut map) = submitted else {
+        return submitted;
+    };
+    let existing_map = existing.as_object();
+    for &key in CREDENTIAL_FIELDS {
+        let is_masked = match map.get(key) {
+            None => true,
+            Some(serde_json::Value::String(s)) => s.is_empty() || s == "***",
+            Some(_) => false,
+        };
+        if !is_masked {
+            continue;
+        }
+        match existing_map.and_then(|m| m.get(key)) {
+            Some(existing_value) => {
+                map.insert(key.to_owned(), existing_value.clone());
+            }
+            None => {
+                map.remove(key);
+            }
+        }
+    }
+    submitted
 }
 
 pub(super) fn db_err(e: sea_orm::DbErr) -> VmsError {

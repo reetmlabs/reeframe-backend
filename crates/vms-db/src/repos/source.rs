@@ -2,7 +2,7 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrai
 use uuid::Uuid;
 use vms_core::VmsError;
 
-use super::{db_err, decrypt_config, encrypt_config, now};
+use super::{db_err, decrypt_config, encrypt_config, now, preserve_masked_credentials};
 use crate::{
     crypto::Crypto,
     entities::source::{self, ActiveModel, SourceType},
@@ -86,6 +86,7 @@ impl SourceRepo {
             .map_err(db_err)?
             .ok_or(VmsError::SourceNotFound(id))?;
 
+        let existing_config = src.config.clone();
         let mut active: ActiveModel = src.into();
 
         if let Some(v) = input.name {
@@ -98,6 +99,7 @@ impl SourceRepo {
             active.source_type = Set(v);
         }
         if let Some(cfg) = input.config {
+            let cfg = preserve_masked_credentials(&existing_config, cfg);
             active.config = Set(encrypt_config(&self.crypto, cfg)?);
         }
         if let Some(v) = input.enabled {
