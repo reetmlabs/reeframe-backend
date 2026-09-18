@@ -32,6 +32,19 @@ pub fn invalidate(dest_id: Uuid) {
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB read buffer; object_store manages multipart sizing
 
+/// Reject an `endpoint` with no (or a non-http) scheme before it reaches
+/// object_store, which accepts it silently and only fails much later with
+/// an opaque panic deep in its request-signing code.
+fn validate_endpoint(ep: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(ep).map_err(|e| format!("{ep:?} is not a valid URL: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        other => Err(format!(
+            "{ep:?} has scheme {other:?}, expected http or https"
+        )),
+    }
+}
+
 // -- Adapter --
 
 /// Upload the upstream artifact to an S3-compatible bucket.
@@ -115,6 +128,12 @@ pub async fn deliver(
                 .with_secret_access_key(&secret_key);
 
             if let Some(ep) = &endpoint {
+                if let Err(e) = validate_endpoint(ep) {
+                    return NodeOutput::failure(
+                        node_id,
+                        format!("s3 transport: invalid \"endpoint\": {e}"),
+                    );
+                }
                 builder = builder.with_endpoint(ep);
             }
             if path_style {
