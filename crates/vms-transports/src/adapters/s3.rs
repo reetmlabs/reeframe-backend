@@ -334,3 +334,33 @@ async fn stream_file_to_s3(
         .map_err(|e| format!("finalize multipart: {e}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod validate_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_https() {
+        assert!(validate_endpoint("https://fsn1.your-objectstorage.com").is_ok());
+    }
+
+    #[test]
+    fn accepts_http_for_local_dev() {
+        assert!(validate_endpoint("http://minio.internal:9000").is_ok());
+    }
+
+    #[test]
+    fn rejects_a_bare_host_with_no_scheme() {
+        assert!(validate_endpoint("fsn1.your-objectstorage.com").is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_http_scheme() {
+        assert!(validate_endpoint("ftp://fsn1.your-objectstorage.com").is_err());
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(validate_endpoint("not a url at all").is_err());
+    }
+}
