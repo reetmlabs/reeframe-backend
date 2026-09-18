@@ -57,6 +57,19 @@ mod invalidate_tests {
 // gives headroom and cuts the number of upload requests versus the minimum.
 const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
+/// Reject an `endpoint` with no (or a non-http) scheme before it reaches
+/// object_store, which accepts it silently and only fails much later with
+/// an opaque panic deep in its request-signing code.
+fn validate_endpoint(ep: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(ep).map_err(|e| format!("{ep:?} is not a valid URL: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        other => Err(format!(
+            "{ep:?} has scheme {other:?}, expected http or https"
+        )),
+    }
+}
+
 // -- Adapter --
 
 /// Upload the upstream artifact to an S3-compatible bucket.
@@ -144,6 +157,12 @@ pub async fn deliver(
                 .with_unsigned_payload(true);
 
             if let Some(ep) = &endpoint {
+                if let Err(e) = validate_endpoint(ep) {
+                    return NodeOutput::failure(
+                        node_id,
+                        format!("s3 transport: invalid \"endpoint\": {e}"),
+                    );
+                }
                 builder = builder.with_endpoint(ep);
             }
             if path_style {
@@ -405,5 +424,35 @@ mod fill_buf_tests {
         let n = fill_buf(&mut reader, &mut buf).await.unwrap();
         assert_eq!(n, 3);
         assert_eq!(&buf[..3], [1, 2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod validate_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_https() {
+        assert!(validate_endpoint("https://fsn1.your-objectstorage.com").is_ok());
+    }
+
+    #[test]
+    fn accepts_http_for_local_dev() {
+        assert!(validate_endpoint("http://minio.internal:9000").is_ok());
+    }
+
+    #[test]
+    fn rejects_a_bare_host_with_no_scheme() {
+        assert!(validate_endpoint("fsn1.your-objectstorage.com").is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_http_scheme() {
+        assert!(validate_endpoint("ftp://fsn1.your-objectstorage.com").is_err());
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(validate_endpoint("not a url at all").is_err());
     }
 }
