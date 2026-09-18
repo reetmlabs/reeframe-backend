@@ -338,3 +338,49 @@ async fn stream_file_to_s3(
         .map_err(|e| format!("finalize multipart: {e}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod fill_buf_tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    /// Returns at most one byte per `poll_read` call, to prove `fill_buf`
+    /// doesn't assume a single `read()` fills the buffer.
+    struct OneByteAtATime(Cursor<Vec<u8>>);
+
+    impl AsyncRead for OneByteAtATime {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let mut one = [0u8; 1];
+            let n = std::io::Read::read(&mut self.0, &mut one)?;
+            if n > 0 {
+                buf.put_slice(&one[..n]);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn accumulates_short_reads_into_a_full_buffer() {
+        let mut reader = OneByteAtATime(Cursor::new(vec![1, 2, 3, 4, 5]));
+        let mut buf = [0u8; 5];
+        let n = fill_buf(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(buf, [1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn stops_at_eof_with_a_partial_fill() {
+        let mut reader = OneByteAtATime(Cursor::new(vec![1, 2, 3]));
+        let mut buf = [0u8; 5];
+        let n = fill_buf(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(&buf[..3], [1, 2, 3]);
+    }
+}
