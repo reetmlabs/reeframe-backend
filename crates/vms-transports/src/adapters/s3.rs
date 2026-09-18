@@ -112,7 +112,11 @@ pub async fn deliver(
                 .with_bucket_name(&bucket)
                 .with_region(&region)
                 .with_access_key_id(&access_key)
-                .with_secret_access_key(&secret_key);
+                .with_secret_access_key(&secret_key)
+                // Some S3-compatible backends (Hetzner's Ceph RGW among them) reject the
+                // signed-payload SigV4 mode object_store uses by default for multipart
+                // requests. Unsigned payload is a standard SigV4 mode AWS S3 accepts too.
+                .with_unsigned_payload(true);
 
             if let Some(ep) = &endpoint {
                 builder = builder.with_endpoint(ep);
