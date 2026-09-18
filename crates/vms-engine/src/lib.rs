@@ -22,3 +22,4 @@ pub use recording_intent::reconcile_recording_intent;
 pub use resource_manager::ResourceManager;
 pub use stat_monitor::{CoverageConfig, RecordingIntentConfig, RetentionConfig, StatMonitor};
 pub use trigger_evaluator::TriggerEvaluator;
+pub use vms_transports::TransportDispatcher;

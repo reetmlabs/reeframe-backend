@@ -30,7 +30,32 @@ pub fn invalidate(dest_id: Uuid) {
     }
 }
 
-const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB read buffer; object_store manages multipart sizing
+#[cfg(test)]
+mod invalidate_tests {
+    use super::*;
+
+    #[test]
+    fn removes_the_cached_client_for_that_destination() {
+        let dest_id = Uuid::new_v4();
+        let client = AmazonS3Builder::new()
+            .with_bucket_name("test-bucket")
+            .with_region("us-east-1")
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .build()
+            .expect("a locally-buildable client needs no network access");
+        s3_clients().insert(dest_id, Arc::new(client));
+        assert!(s3_clients().contains_key(&dest_id));
+
+        invalidate(dest_id);
+
+        assert!(!s3_clients().contains_key(&dest_id));
+    }
+}
+
+// S3 requires every multipart part but the last to be at least 5 MiB; 8 MiB
+// gives headroom and cuts the number of upload requests versus the minimum.
+const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Reject an `endpoint` with no (or a non-http) scheme before it reaches
 /// object_store, which accepts it silently and only fails much later with
@@ -61,10 +86,10 @@ fn validate_endpoint(ep: &str) -> Result<(), String> {
 /// }
 /// ```
 ///
-/// Files are streamed via multipart upload in 1 MB chunks — the artifact is
-/// never fully loaded into memory.  Progress is reported via `progress_tx`
-/// after each chunk.  On success, `NodeOutput::metadata` contains `s3_url`,
-/// `bucket`, and `key`.
+/// Files are streamed via multipart upload in `CHUNK_SIZE` parts, so the
+/// artifact is never fully loaded into memory. Progress is reported via
+/// `progress_tx` after each part. On success, `NodeOutput::metadata`
+/// contains `s3_url`, `bucket`, and `key`.
 pub async fn deliver(
     node_id: NodeId,
     dest: &destination::Model,
@@ -125,7 +150,11 @@ pub async fn deliver(
                 .with_bucket_name(&bucket)
                 .with_region(&region)
                 .with_access_key_id(&access_key)
-                .with_secret_access_key(&secret_key);
+                .with_secret_access_key(&secret_key)
+                // Some S3-compatible backends (Hetzner's Ceph RGW among them) reject the
+                // signed-payload SigV4 mode object_store uses by default for multipart
+                // requests. Unsigned payload is a standard SigV4 mode AWS S3 accepts too.
+                .with_unsigned_payload(true);
 
             if let Some(ep) = &endpoint {
                 if let Err(e) = validate_endpoint(ep) {
@@ -282,6 +311,24 @@ pub async fn deliver(
 
 // -- Streaming multipart upload --
 
+/// Fill `buf` completely from `reader`, stopping early only at EOF.
+/// A single `read()` call isn't guaranteed to fill the buffer, and a short
+/// read here would silently produce an undersized multipart part.
+async fn fill_buf<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = reader.read(&mut buf[filled..]).await?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(filled)
+}
+
 async fn stream_file_to_s3(
     store: &object_store::aws::AmazonS3,
     src: &std::path::PathBuf,
@@ -304,8 +351,7 @@ async fn stream_file_to_s3(
     let mut bytes_sent: u64 = 0;
 
     loop {
-        let n = file
-            .read(&mut buf)
+        let n = fill_buf(&mut file, &mut buf)
             .await
             .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
@@ -333,6 +379,52 @@ async fn stream_file_to_s3(
         .await
         .map_err(|e| format!("finalize multipart: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod fill_buf_tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    /// Returns at most one byte per `poll_read` call, to prove `fill_buf`
+    /// doesn't assume a single `read()` fills the buffer.
+    struct OneByteAtATime(Cursor<Vec<u8>>);
+
+    impl AsyncRead for OneByteAtATime {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let mut one = [0u8; 1];
+            let n = std::io::Read::read(&mut self.0, &mut one)?;
+            if n > 0 {
+                buf.put_slice(&one[..n]);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn accumulates_short_reads_into_a_full_buffer() {
+        let mut reader = OneByteAtATime(Cursor::new(vec![1, 2, 3, 4, 5]));
+        let mut buf = [0u8; 5];
+        let n = fill_buf(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(buf, [1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn stops_at_eof_with_a_partial_fill() {
+        let mut reader = OneByteAtATime(Cursor::new(vec![1, 2, 3]));
+        let mut buf = [0u8; 5];
+        let n = fill_buf(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(&buf[..3], [1, 2, 3]);
+    }
 }
 
 #[cfg(test)]
