@@ -30,7 +30,9 @@ pub fn invalidate(dest_id: Uuid) {
     }
 }
 
-const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB read buffer; object_store manages multipart sizing
+// S3 requires every multipart part but the last to be at least 5 MiB; 8 MiB
+// gives headroom and cuts the number of upload requests versus the minimum.
+const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 // -- Adapter --
 
@@ -48,10 +50,10 @@ const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB read buffer; object_store manages
 /// }
 /// ```
 ///
-/// Files are streamed via multipart upload in 1 MB chunks — the artifact is
-/// never fully loaded into memory.  Progress is reported via `progress_tx`
-/// after each chunk.  On success, `NodeOutput::metadata` contains `s3_url`,
-/// `bucket`, and `key`.
+/// Files are streamed via multipart upload in `CHUNK_SIZE` parts, so the
+/// artifact is never fully loaded into memory. Progress is reported via
+/// `progress_tx` after each part. On success, `NodeOutput::metadata`
+/// contains `s3_url`, `bucket`, and `key`.
 pub async fn deliver(
     node_id: NodeId,
     dest: &destination::Model,
@@ -267,6 +269,24 @@ pub async fn deliver(
 
 // -- Streaming multipart upload --
 
+/// Fill `buf` completely from `reader`, stopping early only at EOF.
+/// A single `read()` call isn't guaranteed to fill the buffer, and a short
+/// read here would silently produce an undersized multipart part.
+async fn fill_buf<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = reader.read(&mut buf[filled..]).await?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(filled)
+}
+
 async fn stream_file_to_s3(
     store: &object_store::aws::AmazonS3,
     src: &std::path::PathBuf,
@@ -289,8 +309,7 @@ async fn stream_file_to_s3(
     let mut bytes_sent: u64 = 0;
 
     loop {
-        let n = file
-            .read(&mut buf)
+        let n = fill_buf(&mut file, &mut buf)
             .await
             .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
