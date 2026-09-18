@@ -2,7 +2,7 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrai
 use uuid::Uuid;
 use vms_core::VmsError;
 
-use super::{db_err, decrypt_config, encrypt_config, now};
+use super::{db_err, decrypt_config, encrypt_config, now, preserve_masked_credentials};
 use crate::{
     crypto::Crypto,
     entities::destination::{self, ActiveModel, DestinationType},
@@ -93,6 +93,7 @@ impl DestinationRepo {
             .map_err(db_err)?
             .ok_or(VmsError::DestinationNotFound(id))?;
 
+        let existing_config = dest.config.clone();
         let mut active: ActiveModel = dest.into();
 
         if let Some(v) = input.name {
@@ -105,6 +106,7 @@ impl DestinationRepo {
             active.dest_type = Set(v);
         }
         if let Some(cfg) = input.config {
+            let cfg = preserve_masked_credentials(&existing_config, cfg);
             active.config = Set(encrypt_config(&self.crypto, cfg)?);
         }
         if let Some(v) = input.enabled {
@@ -123,5 +125,51 @@ impl DestinationRepo {
             .ok_or(VmsError::DestinationNotFound(id))?;
         dest.delete(&self.db).await.map_err(db_err)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migration::Migrator;
+    use sea_orm_migration::MigratorTrait;
+
+    async fn test_repo() -> DestinationRepo {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        DestinationRepo::new(db, Crypto::from_key([0u8; 32]))
+    }
+
+    #[tokio::test]
+    async fn resubmitting_the_masked_value_keeps_the_real_password() {
+        let repo = test_repo().await;
+        let created = repo
+            .create(CreateDestination {
+                name: "test".into(),
+                description: None,
+                dest_type: DestinationType::Smb,
+                config: serde_json::json!({"password": "s3cret"}),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+
+        // Simulates a client resubmitting the "***" the API masked the
+        // password as on GET.
+        repo.update(
+            created.id,
+            UpdateDestination {
+                name: None,
+                description: None,
+                dest_type: None,
+                config: Some(serde_json::json!({"password": "***"})),
+                enabled: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = repo.get_decrypted(created.id).await.unwrap().unwrap();
+        assert_eq!(after.config["password"], "s3cret");
     }
 }

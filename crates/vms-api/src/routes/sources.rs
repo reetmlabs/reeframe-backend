@@ -4,6 +4,7 @@ use uuid::Uuid;
 use vms_db::{
     entities::source::{self, SourceType},
     repos::source::{CreateSource, UpdateSource},
+    repos::CREDENTIAL_FIELDS,
 };
 
 use crate::{
@@ -28,24 +29,6 @@ impl From<vms_core::pipeline::PipelineTrigger> for AffectedTriggerDto {
 }
 
 // -- Credential masking --
-
-/// Keys whose values are masked with `"***"` in GET responses.
-/// Must stay in sync with `vms_db::repos::CREDENTIAL_FIELDS`.
-const CREDENTIAL_FIELDS: &[&str] = &[
-    "password",
-    "token",
-    "api_key",
-    "bearer_token",
-    "secret_access_key",
-    "private_key",
-    "auth_token",
-    "access_token",
-    "bot_token",
-    "webhook_url",
-    "shared_secret",
-    "client_key",
-    "client_cert",
-];
 
 fn mask_config(mut config: serde_json::Value) -> serde_json::Value {
     if let serde_json::Value::Object(ref mut map) = config {
