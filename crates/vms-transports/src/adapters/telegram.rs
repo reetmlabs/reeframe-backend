@@ -210,3 +210,32 @@ pub async fn deliver(
         }
     }
 }
+
+#[cfg(test)]
+mod resolve_bot_token_tests {
+    use super::*;
+
+    #[test]
+    fn reads_bot_token() {
+        let cfg = serde_json::json!({ "bot_token": "123:abc" });
+        assert_eq!(resolve_bot_token(&cfg).as_deref(), Some("123:abc"));
+    }
+
+    #[test]
+    fn falls_back_to_token() {
+        let cfg = serde_json::json!({ "token": "123:abc" });
+        assert_eq!(resolve_bot_token(&cfg).as_deref(), Some("123:abc"));
+    }
+
+    #[test]
+    fn prefers_bot_token_over_token_when_both_are_present() {
+        let cfg = serde_json::json!({ "bot_token": "right", "token": "wrong" });
+        assert_eq!(resolve_bot_token(&cfg).as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn returns_none_when_neither_key_is_present() {
+        let cfg = serde_json::json!({ "chat_id": "-100" });
+        assert_eq!(resolve_bot_token(&cfg), None);
+    }
+}
