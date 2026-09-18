@@ -127,25 +127,42 @@ impl ResourceManager {
         let before = resource_counts(old);
         let after = resource_counts(new);
 
-        let mut ids: HashSet<ResourceId> = before.keys().cloned().collect();
-        ids.extend(after.keys().cloned());
+        let mut ids: Vec<ResourceId> = {
+            let set: HashSet<ResourceId> = before
+                .keys()
+                .cloned()
+                .chain(after.keys().cloned())
+                .collect();
+            set.into_iter().collect()
+        };
+        ids.sort_by_key(ResourceId::acquire_rank);
 
-        for id in ids {
-            let before = before.get(&id).copied().unwrap_or(0);
-            let after = after.get(&id).copied().unwrap_or(0);
-
+        // Release every dependent (e.g. a camera's RingBuffer) before what it
+        // depends on (that camera's CameraPipeline), then acquire the other
+        // way around, so a resource can never start before, or outlive,
+        // the resource it attaches to. HashSet iteration order alone can't
+        // guarantee this, since it has no notion of one resource depending
+        // on another.
+        for id in ids.iter().rev() {
+            let before = before.get(id).copied().unwrap_or(0);
+            let after = after.get(id).copied().unwrap_or(0);
+            if before > after {
+                for _ in 0..(before - after) {
+                    if let Err(e) = self.release(id.clone()).await {
+                        tracing::error!(resource = ?id, error = %e,
+                            "Failed to release resource during registry sync — continuing");
+                    }
+                }
+            }
+        }
+        for id in ids.iter() {
+            let before = before.get(id).copied().unwrap_or(0);
+            let after = after.get(id).copied().unwrap_or(0);
             if after > before {
                 for _ in 0..(after - before) {
                     if let Err(e) = self.acquire(id.clone()).await {
                         tracing::error!(resource = ?id, error = %e,
                             "Failed to acquire resource during registry sync — continuing");
-                    }
-                }
-            } else if before > after {
-                for _ in 0..(before - after) {
-                    if let Err(e) = self.release(id.clone()).await {
-                        tracing::error!(resource = ?id, error = %e,
-                            "Failed to release resource during registry sync — continuing");
                     }
                 }
             }
