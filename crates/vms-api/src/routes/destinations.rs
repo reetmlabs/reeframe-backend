@@ -4,6 +4,7 @@ use uuid::Uuid;
 use vms_db::{
     entities::destination::{self, DestinationType},
     repos::destination::{CreateDestination, UpdateDestination},
+    repos::CREDENTIAL_FIELDS,
 };
 
 use crate::{
@@ -28,22 +29,6 @@ impl From<vms_core::pipeline::PipelineNode> for AffectedNodeDto {
 }
 
 // -- Credential masking --
-
-const CREDENTIAL_FIELDS: &[&str] = &[
-    "password",
-    "token",
-    "api_key",
-    "bearer_token",
-    "secret_access_key",
-    "private_key",
-    "auth_token",
-    "access_token",
-    "bot_token",
-    "webhook_url",
-    "shared_secret",
-    "client_key",
-    "client_cert",
-];
 
 fn mask_config(mut config: serde_json::Value) -> serde_json::Value {
     if let serde_json::Value::Object(ref mut map) = config {
