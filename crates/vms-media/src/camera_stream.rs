@@ -14,6 +14,9 @@ use vms_core::{RecordingChunkEvent, VmsError};
 pub(crate) struct CodecElements {
     pub(crate) depay_factory: &'static str,
     pub(crate) parse_factory: &'static str,
+    /// Mime type for [`byte_stream_au_caps`]; `None` where no such
+    /// distinction exists (e.g. JPEG).
+    pub(crate) parse_caps_mime: Option<&'static str>,
 }
 
 pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
@@ -21,22 +24,43 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
         "H264" => Some(CodecElements {
             depay_factory: "rtph264depay",
             parse_factory: "h264parse",
+            parse_caps_mime: Some("video/x-h264"),
         }),
         "H265" | "HEVC" => Some(CodecElements {
             depay_factory: "rtph265depay",
             parse_factory: "h265parse",
+            parse_caps_mime: Some("video/x-h265"),
         }),
         // Motion JPEG — RTP encoding name per RFC 2435
         "JPEG" => Some(CodecElements {
             depay_factory: "rtpjpegdepay",
             parse_factory: "jpegparse",
+            parse_caps_mime: None,
         }),
         // AV1 — RTP encoding name per RFC 9671
         "AV1" => Some(CodecElements {
             depay_factory: "rtpav1depay",
             parse_factory: "av1parse",
+            parse_caps_mime: None,
         }),
         _ => None,
+    }
+}
+
+/// Forces inline, repeated SPS/PPS and one access unit per buffer — left
+/// unconstrained, a parser can negotiate `avc` instead, which carries
+/// config data out-of-band and breaks standalone re-muxing later.
+fn byte_stream_au_caps(mime: &str) -> gstreamer::Caps {
+    gstreamer::Caps::builder(mime)
+        .field("stream-format", "byte-stream")
+        .field("alignment", "au")
+        .build()
+}
+
+/// Repeats SPS/PPS before every keyframe, if the parser supports it.
+fn set_config_interval_if_supported(parse: &gstreamer::Element) {
+    if parse.has_property("config-interval") {
+        parse.set_property("config-interval", -1);
     }
 }
 
@@ -233,6 +257,7 @@ pub(crate) fn build_camera_stream(
                 return;
             }
         };
+        set_config_interval_if_supported(&parse);
 
         if let Err(e) = gst_pipeline.add_many([&depay, &parse]) {
             tracing::error!(camera_id = %cam_id, "add depay+parse: {e}");
@@ -240,7 +265,13 @@ pub(crate) fn build_camera_stream(
         }
 
         // depay -> parse -> tee
-        if let Err(e) = gstreamer::Element::link_many([&depay, &parse, &tee]) {
+        let link_result = match codec.parse_caps_mime {
+            Some(mime) => depay
+                .link(&parse)
+                .and_then(|()| parse.link_filtered(&tee, &byte_stream_au_caps(mime))),
+            None => gstreamer::Element::link_many([&depay, &parse, &tee]),
+        };
+        if let Err(e) = link_result {
             tracing::error!(camera_id = %cam_id, "link depay->parse->tee: {e}");
             return;
         }
@@ -1239,5 +1270,66 @@ mod reconnect_policy_tests {
             WaitPlan::Backoff(d) => assert_eq!(d.as_secs(), 4),
             WaitPlan::CircuitOpen(_) => panic!("should still be below the circuit threshold"),
         }
+    }
+}
+
+#[cfg(test)]
+mod config_interval_tests {
+    use super::*;
+
+    #[test]
+    fn sets_config_interval_on_a_parser_that_supports_it() {
+        gstreamer::init().ok();
+        let parse = gstreamer::ElementFactory::make("h264parse")
+            .build()
+            .expect("h264parse should be available");
+
+        set_config_interval_if_supported(&parse);
+
+        let value: i32 = parse.property("config-interval");
+        assert_eq!(value, -1);
+    }
+
+    #[test]
+    fn skips_a_parser_with_no_such_property() {
+        gstreamer::init().ok();
+        let parse = gstreamer::ElementFactory::make("jpegparse")
+            .build()
+            .expect("jpegparse should be available");
+
+        // Must not panic/error — jpegparse has no config-interval property.
+        set_config_interval_if_supported(&parse);
+    }
+}
+
+#[cfg(test)]
+mod byte_stream_caps_tests {
+    use super::*;
+
+    #[test]
+    fn h264_and_h265_get_byte_stream_caps_mime() {
+        assert_eq!(
+            codec_for("H264").unwrap().parse_caps_mime,
+            Some("video/x-h264")
+        );
+        assert_eq!(
+            codec_for("H265").unwrap().parse_caps_mime,
+            Some("video/x-h265")
+        );
+    }
+
+    #[test]
+    fn jpeg_and_av1_have_no_byte_stream_distinction() {
+        assert_eq!(codec_for("JPEG").unwrap().parse_caps_mime, None);
+        assert_eq!(codec_for("AV1").unwrap().parse_caps_mime, None);
+    }
+
+    #[test]
+    fn byte_stream_au_caps_has_the_expected_fields() {
+        gstreamer::init().ok();
+        let caps = byte_stream_au_caps("video/x-h264");
+        let s = caps.structure(0).unwrap();
+        assert_eq!(s.get::<&str>("stream-format").unwrap(), "byte-stream");
+        assert_eq!(s.get::<&str>("alignment").unwrap(), "au");
     }
 }
