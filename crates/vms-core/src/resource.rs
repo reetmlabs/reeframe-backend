@@ -117,3 +117,37 @@ impl Default for ResourceEntry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod acquire_rank_tests {
+    use super::*;
+
+    #[test]
+    fn independent_kinds_rank_below_things_that_attach_to_a_camera_pipeline() {
+        let cam_id = Uuid::new_v4();
+        assert!(
+            ResourceId::CameraPipeline(cam_id).acquire_rank()
+                < ResourceId::RingBuffer(cam_id).acquire_rank()
+        );
+        assert!(
+            ResourceId::CameraPipeline(cam_id).acquire_rank()
+                < ResourceId::AnalyticsBranch(cam_id).acquire_rank()
+        );
+        assert_eq!(ResourceId::Source(cam_id).acquire_rank(), 0);
+        assert_eq!(ResourceId::DestinationPool(cam_id).acquire_rank(), 0);
+    }
+
+    #[test]
+    fn sorting_by_rank_puts_a_camera_pipeline_before_its_ring_buffer() {
+        let cam_id = Uuid::new_v4();
+        let mut ids = [
+            ResourceId::RingBuffer(cam_id),
+            ResourceId::AnalyticsBranch(cam_id),
+            ResourceId::CameraPipeline(cam_id),
+        ];
+
+        ids.sort_by_key(ResourceId::acquire_rank);
+
+        assert_eq!(ids[0], ResourceId::CameraPipeline(cam_id));
+    }
+}
