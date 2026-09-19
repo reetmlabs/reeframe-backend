@@ -15,6 +15,16 @@ fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
+/// Read the bot token from a Telegram destination config. Accepts "token"
+/// as an alias for "bot_token" since at least one client submits it under
+/// that name.
+fn resolve_bot_token(cfg: &serde_json::Value) -> Option<String> {
+    cfg.get("bot_token")
+        .or_else(|| cfg.get("token"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 // -- Adapter --
 
 /// Send a message or file to a Telegram chat via the Bot API.
@@ -47,8 +57,8 @@ pub async fn deliver(
     // -- Resolve config --
     let cfg = &dest.config;
 
-    let bot_token = match cfg.get("bot_token").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
+    let bot_token = match resolve_bot_token(cfg) {
+        Some(t) => t,
         None => {
             return NodeOutput::failure(
                 node_id,
@@ -198,5 +208,34 @@ pub async fn deliver(
                 format!("telegram: sendMessage request failed: {e}"),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_bot_token_tests {
+    use super::*;
+
+    #[test]
+    fn reads_bot_token() {
+        let cfg = serde_json::json!({ "bot_token": "123:abc" });
+        assert_eq!(resolve_bot_token(&cfg).as_deref(), Some("123:abc"));
+    }
+
+    #[test]
+    fn falls_back_to_token() {
+        let cfg = serde_json::json!({ "token": "123:abc" });
+        assert_eq!(resolve_bot_token(&cfg).as_deref(), Some("123:abc"));
+    }
+
+    #[test]
+    fn prefers_bot_token_over_token_when_both_are_present() {
+        let cfg = serde_json::json!({ "bot_token": "right", "token": "wrong" });
+        assert_eq!(resolve_bot_token(&cfg).as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn returns_none_when_neither_key_is_present() {
+        let cfg = serde_json::json!({ "chat_id": "-100" });
+        assert_eq!(resolve_bot_token(&cfg), None);
     }
 }
