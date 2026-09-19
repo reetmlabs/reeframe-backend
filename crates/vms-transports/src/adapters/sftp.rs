@@ -17,6 +17,16 @@ use vms_db::entities::destination;
 
 const CHUNK_SIZE: usize = 256 * 1024;
 
+/// Read the remote directory from an SFTP destination config. Accepts
+/// "path" as an alias for "remote_path" since at least one client submits
+/// it under that name.
+fn resolve_remote_path(cfg: &serde_json::Value) -> Option<String> {
+    cfg.get("remote_path")
+        .or_else(|| cfg.get("path"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 // -- Adapter --
 
 /// Upload the upstream artifact (or text) to a remote host via SFTP.
@@ -81,8 +91,8 @@ pub async fn deliver(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let remote_base = match cfg.get("remote_path").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
+    let remote_base = match resolve_remote_path(cfg) {
+        Some(p) => p,
         None => {
             return NodeOutput::failure(
                 node_id,
@@ -365,4 +375,33 @@ fn mkdir_all(sftp: &ssh2::Sftp, path: &PathBuf) -> Result<(), String> {
             .map_err(|e| format!("mkdir {}: {e}", current.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod resolve_remote_path_tests {
+    use super::*;
+
+    #[test]
+    fn reads_remote_path() {
+        let cfg = serde_json::json!({ "remote_path": "/srv/uploads" });
+        assert_eq!(resolve_remote_path(&cfg).as_deref(), Some("/srv/uploads"));
+    }
+
+    #[test]
+    fn falls_back_to_path() {
+        let cfg = serde_json::json!({ "path": "/srv/uploads" });
+        assert_eq!(resolve_remote_path(&cfg).as_deref(), Some("/srv/uploads"));
+    }
+
+    #[test]
+    fn prefers_remote_path_over_path_when_both_are_present() {
+        let cfg = serde_json::json!({ "remote_path": "/right", "path": "/wrong" });
+        assert_eq!(resolve_remote_path(&cfg).as_deref(), Some("/right"));
+    }
+
+    #[test]
+    fn returns_none_when_neither_key_is_present() {
+        let cfg = serde_json::json!({ "host": "sftp.example.com" });
+        assert_eq!(resolve_remote_path(&cfg), None);
+    }
 }
