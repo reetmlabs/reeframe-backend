@@ -10,10 +10,13 @@ pub enum SourceType {
     #[sea_orm(string_value = "webhook")]
     Webhook,
     #[sea_orm(string_value = "api_poll")]
+    #[serde(alias = "poller")]
     ApiPoll,
     #[sea_orm(string_value = "ha_websocket")]
+    #[serde(alias = "homeassistant")]
     HaWebsocket,
     #[sea_orm(string_value = "file_watcher")]
+    #[serde(alias = "filewatcher")]
     FileWatcher,
 }
 
