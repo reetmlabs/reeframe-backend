@@ -376,3 +376,32 @@ fn mkdir_all(sftp: &ssh2::Sftp, path: &PathBuf) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod resolve_remote_path_tests {
+    use super::*;
+
+    #[test]
+    fn reads_remote_path() {
+        let cfg = serde_json::json!({ "remote_path": "/srv/uploads" });
+        assert_eq!(resolve_remote_path(&cfg).as_deref(), Some("/srv/uploads"));
+    }
+
+    #[test]
+    fn falls_back_to_path() {
+        let cfg = serde_json::json!({ "path": "/srv/uploads" });
+        assert_eq!(resolve_remote_path(&cfg).as_deref(), Some("/srv/uploads"));
+    }
+
+    #[test]
+    fn prefers_remote_path_over_path_when_both_are_present() {
+        let cfg = serde_json::json!({ "remote_path": "/right", "path": "/wrong" });
+        assert_eq!(resolve_remote_path(&cfg).as_deref(), Some("/right"));
+    }
+
+    #[test]
+    fn returns_none_when_neither_key_is_present() {
+        let cfg = serde_json::json!({ "host": "sftp.example.com" });
+        assert_eq!(resolve_remote_path(&cfg), None);
+    }
+}
