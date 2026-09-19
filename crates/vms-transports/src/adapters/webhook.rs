@@ -143,3 +143,32 @@ pub async fn deliver(
         Err(e) => NodeOutput::failure(node_id, format!("webhook: request failed: {e}")),
     }
 }
+
+#[cfg(test)]
+mod resolve_method_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_post_when_absent() {
+        let cfg = serde_json::json!({});
+        assert_eq!(resolve_method(&cfg), reqwest::Method::POST);
+    }
+
+    #[test]
+    fn honors_put() {
+        let cfg = serde_json::json!({ "method": "PUT" });
+        assert_eq!(resolve_method(&cfg), reqwest::Method::PUT);
+    }
+
+    #[test]
+    fn is_case_insensitive() {
+        let cfg = serde_json::json!({ "method": "put" });
+        assert_eq!(resolve_method(&cfg), reqwest::Method::PUT);
+    }
+
+    #[test]
+    fn falls_back_to_post_for_unrecognized_values() {
+        let cfg = serde_json::json!({ "method": "DELETE" });
+        assert_eq!(resolve_method(&cfg), reqwest::Method::POST);
+    }
+}
