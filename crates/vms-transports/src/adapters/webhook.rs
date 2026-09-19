@@ -15,14 +15,24 @@ fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
+/// Read the HTTP method from a webhook destination config. Defaults to POST
+/// for anything absent or unrecognized.
+fn resolve_method(cfg: &serde_json::Value) -> reqwest::Method {
+    match cfg.get("method").and_then(|v| v.as_str()) {
+        Some(m) if m.eq_ignore_ascii_case("put") => reqwest::Method::PUT,
+        _ => reqwest::Method::POST,
+    }
+}
+
 // -- Adapter --
 
-/// POST the rendered message (or raw upstream text) to a configurable URL.
+/// Send the rendered message (or raw upstream text) to a configurable URL.
 ///
 /// Destination config (stored in `dest.config`, credentials already decrypted):
 /// ```json
 /// {
 ///   "url":     "https://hooks.example.com/event",
+///   "method":  "PUT",
 ///   "headers": {
 ///     "Authorization": "Bearer secret",
 ///     "X-Source":      "reeframe"
@@ -30,7 +40,8 @@ fn client() -> &'static reqwest::Client {
 /// }
 /// ```
 ///
-/// `headers` is optional.  The request body is the rendered `message_template`
+/// `method` is optional and defaults to POST; PUT is the only other value
+/// recognized. `headers` is optional. The request body is the rendered `message_template`
 /// from `transport_cfg`, or the raw upstream text if no template is set.
 /// `Content-Type` defaults to `text/plain; charset=utf-8` unless overridden
 /// in `headers`.
@@ -89,7 +100,7 @@ pub async fn deliver(
         };
 
     // -- Build request --
-    let mut req = client().post(&url);
+    let mut req = client().request(resolve_method(cfg), &url);
 
     // -- Apply custom headers --
     if let Some(headers) = cfg.get("headers").and_then(|v| v.as_object()) {
@@ -130,5 +141,34 @@ pub async fn deliver(
             }
         }
         Err(e) => NodeOutput::failure(node_id, format!("webhook: request failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod resolve_method_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_post_when_absent() {
+        let cfg = serde_json::json!({});
+        assert_eq!(resolve_method(&cfg), reqwest::Method::POST);
+    }
+
+    #[test]
+    fn honors_put() {
+        let cfg = serde_json::json!({ "method": "PUT" });
+        assert_eq!(resolve_method(&cfg), reqwest::Method::PUT);
+    }
+
+    #[test]
+    fn is_case_insensitive() {
+        let cfg = serde_json::json!({ "method": "put" });
+        assert_eq!(resolve_method(&cfg), reqwest::Method::PUT);
+    }
+
+    #[test]
+    fn falls_back_to_post_for_unrecognized_values() {
+        let cfg = serde_json::json!({ "method": "DELETE" });
+        assert_eq!(resolve_method(&cfg), reqwest::Method::POST);
     }
 }
