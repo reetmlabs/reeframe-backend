@@ -59,3 +59,56 @@ impl Related<super::pipeline_source_ref::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+#[cfg(test)]
+mod source_type_alias_tests {
+    use super::SourceType;
+
+    #[test]
+    fn accepts_the_frontend_spellings() {
+        assert_eq!(
+            serde_json::from_str::<SourceType>("\"homeassistant\"").unwrap(),
+            SourceType::HaWebsocket
+        );
+        assert_eq!(
+            serde_json::from_str::<SourceType>("\"poller\"").unwrap(),
+            SourceType::ApiPoll
+        );
+        assert_eq!(
+            serde_json::from_str::<SourceType>("\"filewatcher\"").unwrap(),
+            SourceType::FileWatcher
+        );
+    }
+
+    #[test]
+    fn still_accepts_the_canonical_spellings() {
+        assert_eq!(
+            serde_json::from_str::<SourceType>("\"ha_websocket\"").unwrap(),
+            SourceType::HaWebsocket
+        );
+        assert_eq!(
+            serde_json::from_str::<SourceType>("\"api_poll\"").unwrap(),
+            SourceType::ApiPoll
+        );
+        assert_eq!(
+            serde_json::from_str::<SourceType>("\"file_watcher\"").unwrap(),
+            SourceType::FileWatcher
+        );
+    }
+
+    #[test]
+    fn serializes_back_to_the_canonical_spelling() {
+        assert_eq!(
+            serde_json::to_string(&SourceType::HaWebsocket).unwrap(),
+            "\"ha_websocket\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SourceType::ApiPoll).unwrap(),
+            "\"api_poll\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SourceType::FileWatcher).unwrap(),
+            "\"file_watcher\""
+        );
+    }
+}
