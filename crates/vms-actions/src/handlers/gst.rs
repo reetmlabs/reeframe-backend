@@ -243,21 +243,22 @@ pub fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
 }
 
 #[cfg(test)]
+fn make_test_clip(path: &Path) {
+    let pipeline = gstreamer::parse::launch(&format!(
+        "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64,framerate=10/1,format=I420 ! \
+         x264enc ! mp4mux ! filesink location={}",
+        path.display()
+    ))
+    .expect("parse test clip pipeline");
+    let pipeline = pipeline.downcast::<gstreamer::Pipeline>().unwrap();
+    pipeline.set_state(gstreamer::State::Playing).unwrap();
+    wait_for_eos(&pipeline).unwrap();
+    pipeline.set_state(gstreamer::State::Null).ok();
+}
+
+#[cfg(test)]
 mod wire_decodebin_tests {
     use super::*;
-
-    fn make_test_clip(path: &Path) {
-        let pipeline = gstreamer::parse::launch(&format!(
-            "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64,framerate=10/1,format=I420 ! \
-             x264enc ! mp4mux ! filesink location={}",
-            path.display()
-        ))
-        .expect("parse test clip pipeline");
-        let pipeline = pipeline.downcast::<gstreamer::Pipeline>().unwrap();
-        pipeline.set_state(gstreamer::State::Playing).unwrap();
-        wait_for_eos(&pipeline).unwrap();
-        pipeline.set_state(gstreamer::State::Null).ok();
-    }
 
     /// A hardware decoder can offer more than one memory layout for its raw
     /// output (GPU memory, DMA buffer, plain system memory). This confirms
@@ -299,6 +300,60 @@ mod wire_decodebin_tests {
         let caps = sink_pad.current_caps().expect("negotiated caps");
         let s = caps.structure(0).unwrap();
         assert_eq!(s.name(), "video/x-raw");
+
+        pipeline.set_state(gstreamer::State::Null).ok();
+        std::fs::remove_file(&src_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod wire_demux_video_tests {
+    use super::*;
+
+    /// `wire_demux_video` links a demuxer's video pad straight to an
+    /// explicit parse/decode chain, the path `watermark.rs` uses to avoid a
+    /// hardware decoder. This confirms that wiring actually reaches EOS
+    /// end to end (demux, parse, decode, and a sink all correctly linked).
+    #[test]
+    fn video_pad_reaches_an_explicit_decode_chain() {
+        gstreamer::init().ok();
+        let src_path =
+            std::env::temp_dir().join(format!("wire_demux_test_{}.mp4", std::process::id()));
+        make_test_clip(&src_path);
+
+        let pipeline = gstreamer::Pipeline::new();
+        let filesrc = gstreamer::ElementFactory::make("filesrc")
+            .property("location", src_path.to_str().unwrap())
+            .build()
+            .unwrap();
+        let demux = gstreamer::ElementFactory::make("qtdemux").build().unwrap();
+        let parse = gstreamer::ElementFactory::make("h264parse")
+            .build()
+            .unwrap();
+        let decoder = gstreamer::ElementFactory::make("avdec_h264")
+            .build()
+            .unwrap();
+        let sink = gstreamer::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+
+        pipeline
+            .add_many([&filesrc, &demux, &parse, &decoder, &sink])
+            .unwrap();
+        filesrc.link(&demux).unwrap();
+        gstreamer::Element::link_many([&parse, &decoder, &sink]).unwrap();
+        wire_demux_video(&demux, &parse, &pipeline);
+
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        wait_for_eos(&pipeline).unwrap();
+
+        let caps = sink
+            .static_pad("sink")
+            .unwrap()
+            .current_caps()
+            .expect("negotiated caps");
+        assert_eq!(caps.structure(0).unwrap().name(), "video/x-raw");
 
         pipeline.set_state(gstreamer::State::Null).ok();
         std::fs::remove_file(&src_path).ok();
