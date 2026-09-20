@@ -280,3 +280,41 @@ fn mime_from_path(path: &std::path::PathBuf) -> ContentType {
         _ => ContentType::parse("application/octet-stream").unwrap(),
     }
 }
+
+#[cfg(test)]
+mod resolve_from_tests {
+    use super::*;
+
+    #[test]
+    fn reads_from() {
+        let cfg = serde_json::json!({ "from": "reeframe@example.com" });
+        assert_eq!(
+            resolve_from(&cfg, Some("user@example.com")).as_deref(),
+            Some("reeframe@example.com")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_username_when_from_is_absent() {
+        let cfg = serde_json::json!({});
+        assert_eq!(
+            resolve_from(&cfg, Some("user@example.com")).as_deref(),
+            Some("user@example.com")
+        );
+    }
+
+    #[test]
+    fn prefers_from_over_username_when_both_are_present() {
+        let cfg = serde_json::json!({ "from": "reeframe@example.com" });
+        assert_eq!(
+            resolve_from(&cfg, Some("user@example.com")).as_deref(),
+            Some("reeframe@example.com")
+        );
+    }
+
+    #[test]
+    fn returns_none_when_neither_is_present() {
+        let cfg = serde_json::json!({});
+        assert_eq!(resolve_from(&cfg, None), None);
+    }
+}
