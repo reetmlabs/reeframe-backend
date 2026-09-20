@@ -16,8 +16,12 @@ use crate::dispatcher::ActionContext;
 
 /// Burn a text watermark onto every frame of the upstream video artifact.
 ///
-/// Pipeline: `filesrc → decodebin → videoconvert → textoverlay → videoconvert →
-/// x264enc → mp4mux → filesink`
+/// Pipeline: `filesrc → qtdemux → h264parse/h265parse → avdec_h264/avdec_h265
+/// → videoconvert → textoverlay → videoconvert → x264enc → mp4mux → filesink`
+///
+/// Decoding uses an explicit software decoder rather than decodebin's own
+/// autoplug, since a hardware H.264 decoder on this machine produces
+/// corrupted frames when textoverlay follows it on content with B-frames.
 ///
 /// The text is a minijinja template rendered with `TriggerContext` variables.
 /// Audio is dropped. Output is always H.264/MP4.
@@ -84,9 +88,19 @@ fn watermark_blocking(
         return Err(VmsError::Media("watermark: non-UTF-8 output path".into()));
     };
 
-    let encoder_name = gst_util::probe_video_codec(input)
-        .map(|c| gst_util::codec_to_encoder(&c))
+    let codec_caps = gst_util::probe_video_codec(input);
+    let encoder_name = codec_caps
+        .as_deref()
+        .map(gst_util::codec_to_encoder)
         .unwrap_or("x264enc");
+    let parser_name = codec_caps
+        .as_deref()
+        .map(gst_util::codec_to_parser)
+        .unwrap_or("h264parse");
+    let decoder_name = codec_caps
+        .as_deref()
+        .map(gst_util::codec_to_software_decoder)
+        .unwrap_or("avdec_h264");
 
     let pipeline = gstreamer::Pipeline::new();
 
@@ -95,9 +109,17 @@ fn watermark_blocking(
         .build()
         .map_err(|e| VmsError::Media(format!("filesrc: {e}")))?;
 
-    let decode = gstreamer::ElementFactory::make("decodebin")
+    let demux = gstreamer::ElementFactory::make("qtdemux")
         .build()
-        .map_err(|e| VmsError::Media(format!("decodebin: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("qtdemux: {e}")))?;
+
+    let parse = gstreamer::ElementFactory::make(parser_name)
+        .build()
+        .map_err(|e| VmsError::Media(format!("{parser_name}: {e}")))?;
+
+    let decoder = gstreamer::ElementFactory::make(decoder_name)
+        .build()
+        .map_err(|e| VmsError::Media(format!("{decoder_name}: {e}")))?;
 
     let convert_in = gstreamer::ElementFactory::make("videoconvert")
         .build()
@@ -137,7 +159,9 @@ fn watermark_blocking(
     pipeline
         .add_many([
             &src,
-            &decode,
+            &demux,
+            &parse,
+            &decoder,
             &convert_in,
             &overlay,
             &convert_out,
@@ -147,13 +171,22 @@ fn watermark_blocking(
         ])
         .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
 
-    gstreamer::Element::link_many([&convert_in, &overlay, &convert_out, &encoder, &muxer, &sink])
-        .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
+    gstreamer::Element::link_many([
+        &parse,
+        &decoder,
+        &convert_in,
+        &overlay,
+        &convert_out,
+        &encoder,
+        &muxer,
+        &sink,
+    ])
+    .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
 
-    src.link(&decode)
-        .map_err(|e| VmsError::Media(format!("link src→decode: {e}")))?;
+    src.link(&demux)
+        .map_err(|e| VmsError::Media(format!("link src→demux: {e}")))?;
 
-    gst_util::wire_decodebin(&decode, &convert_in, &pipeline);
+    gst_util::wire_demux_video(&demux, &parse, &pipeline);
 
     pipeline
         .set_state(gstreamer::State::Playing)

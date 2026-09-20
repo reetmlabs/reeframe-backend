@@ -39,6 +39,30 @@ pub fn codec_to_encoder(caps_name: &str) -> &'static str {
     }
 }
 
+/// Map a GStreamer caps structure name to a parser element name.
+///
+/// `"video/x-h265"` → `h265parse`; everything else → `h264parse`.
+pub fn codec_to_parser(caps_name: &str) -> &'static str {
+    match caps_name {
+        "video/x-h265" => "h265parse",
+        _ => "h264parse",
+    }
+}
+
+/// Map a GStreamer caps structure name to a software decoder element name.
+///
+/// `"video/x-h265"` → `avdec_h265`; everything else → `avdec_h264`. Used
+/// where a hardware decoder is known to misbehave with a specific
+/// downstream element (see `watermark.rs`), so decodebin's own autoplug
+/// (which can pick a hardware decoder) is bypassed in favor of an explicit
+/// software one.
+pub fn codec_to_software_decoder(caps_name: &str) -> &'static str {
+    match caps_name {
+        "video/x-h265" => "avdec_h265",
+        _ => "avdec_h264",
+    }
+}
+
 // -- Pipeline helpers --
 
 /// Connect a `decodebin` element's dynamic pads to the downstream pipeline.
@@ -135,6 +159,61 @@ pub fn wire_decodebin(
                     }
                 }
                 Err(e) => tracing::warn!("wire_decodebin: could not create fakesink: {e}"),
+            }
+        }
+    });
+}
+
+/// Connect a demuxer element's (e.g. `qtdemux`) dynamic pads to an explicit
+/// parse/decode chain, bypassing decodebin's own decoder autoplug.
+///
+/// Unlike [`wire_decodebin`], `video_sink` here receives still-encoded
+/// caps (a parser, not a raw-video sink), so no capsfilter is inserted.
+/// Audio pads are routed to a `fakesink` the same way.
+pub fn wire_demux_video(
+    demux: &gstreamer::Element,
+    video_sink: &gstreamer::Element,
+    pipeline: &gstreamer::Pipeline,
+) {
+    let video_sink_weak = video_sink.downgrade();
+    let pipeline_weak = pipeline.downgrade();
+
+    demux.connect_pad_added(move |_, pad| {
+        let caps = match pad.current_caps() {
+            Some(c) => c,
+            None => return,
+        };
+        let s = match caps.structure(0) {
+            Some(s) => s,
+            None => return,
+        };
+
+        if s.name().starts_with("video/") {
+            let Some(sink) = video_sink_weak.upgrade() else {
+                return;
+            };
+            let Some(sink_pad) = sink.static_pad("sink") else {
+                return;
+            };
+            if sink_pad.is_linked() {
+                return;
+            }
+            if let Err(e) = pad.link(&sink_pad) {
+                tracing::warn!("wire_demux_video: video link failed: {e}");
+            }
+        } else if s.name().starts_with("audio/") {
+            let Some(pl) = pipeline_weak.upgrade() else {
+                return;
+            };
+            match gstreamer::ElementFactory::make("fakesink").build() {
+                Ok(fs) => {
+                    pl.add(&fs).ok();
+                    fs.sync_state_with_parent().ok();
+                    if let Some(sp) = fs.static_pad("sink") {
+                        pad.link(&sp).ok();
+                    }
+                }
+                Err(e) => tracing::warn!("wire_demux_video: could not create fakesink: {e}"),
             }
         }
     });
