@@ -43,10 +43,11 @@ pub fn codec_to_encoder(caps_name: &str) -> &'static str {
 
 /// Connect a `decodebin` element's dynamic pads to the downstream pipeline.
 ///
-/// - Video pads are routed through a `capsfilter` pinning `video/x-raw,
-///   format=NV12` before reaching `video_sink` (must have a static `sink`
-///   pad), so a hardware decoder's several equivalent output caps don't get
-///   left to implicit negotiation.
+/// - Video pads are routed through a `capsfilter` pinning plain system
+///   memory `video/x-raw` (pixel format left open) before reaching
+///   `video_sink` (must have a static `sink` pad), so a hardware decoder's
+///   several equivalent memory layouts for the same format don't get left
+///   to implicit negotiation.
 /// - Audio pads are routed to a `fakesink` added on-the-fly so they do not
 ///   stall the pipeline when audio is not needed.
 pub fn wire_decodebin(
@@ -81,21 +82,18 @@ pub fn wire_decodebin(
                 return;
             };
 
-            // Pin a single raw format between the decoder and downstream
-            // software elements. A hardware decoder's output pad can offer
-            // several equivalent caps (e.g. GPU memory, DMA buffer, plain
-            // system memory) for the same format, and leaving that choice
-            // to implicit negotiation is the kind of ambiguity that shows
-            // up as occasional corrupted frames rather than a consistent
+            // Pin plain system memory between the decoder and downstream
+            // software elements, without constraining the pixel format
+            // itself (decoders vary in which formats they can convert to).
+            // A hardware decoder's output pad can offer several equivalent
+            // memory layouts for the same format (GPU memory, DMA buffer,
+            // plain system memory), and leaving that choice to implicit
+            // negotiation is the kind of ambiguity that shows up as
+            // occasional corrupted frames rather than a consistent
             // failure. This keeps hardware decode in place, it only pins
             // what comes out of it.
             let capsfilter = match gstreamer::ElementFactory::make("capsfilter")
-                .property(
-                    "caps",
-                    gstreamer::Caps::builder("video/x-raw")
-                        .field("format", "NV12")
-                        .build(),
-                )
+                .property("caps", gstreamer::Caps::builder("video/x-raw").build())
                 .build()
             {
                 Ok(c) => c,
@@ -182,12 +180,14 @@ mod wire_decodebin_tests {
         pipeline.set_state(gstreamer::State::Null).ok();
     }
 
-    /// A hardware decoder can offer more than one raw output caps for the
-    /// same format (GPU memory, DMA buffer, plain system memory). This
-    /// confirms `wire_decodebin` pins the video pad to plain system-memory
-    /// NV12 regardless of what the decoder could have offered instead.
+    /// A hardware decoder can offer more than one memory layout for its raw
+    /// output (GPU memory, DMA buffer, plain system memory). This confirms
+    /// `wire_decodebin` pins the video pad to plain system memory
+    /// regardless of what the decoder could have offered instead. The
+    /// pixel format itself is intentionally left unchecked, decoders vary
+    /// in which formats they can convert to.
     #[test]
-    fn video_pad_is_pinned_to_system_memory_nv12() {
+    fn video_pad_is_pinned_to_system_memory() {
         gstreamer::init().ok();
         let src_path =
             std::env::temp_dir().join(format!("wire_decodebin_test_{}.mp4", std::process::id()));
@@ -220,7 +220,6 @@ mod wire_decodebin_tests {
         let caps = sink_pad.current_caps().expect("negotiated caps");
         let s = caps.structure(0).unwrap();
         assert_eq!(s.name(), "video/x-raw");
-        assert_eq!(s.get::<&str>("format").unwrap(), "NV12");
 
         pipeline.set_state(gstreamer::State::Null).ok();
         std::fs::remove_file(&src_path).ok();
