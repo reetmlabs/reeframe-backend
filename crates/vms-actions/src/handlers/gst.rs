@@ -164,3 +164,65 @@ pub fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod wire_decodebin_tests {
+    use super::*;
+
+    fn make_test_clip(path: &Path) {
+        let pipeline = gstreamer::parse::launch(&format!(
+            "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64,framerate=10/1,format=I420 ! \
+             x264enc ! mp4mux ! filesink location={}",
+            path.display()
+        ))
+        .expect("parse test clip pipeline");
+        let pipeline = pipeline.downcast::<gstreamer::Pipeline>().unwrap();
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        wait_for_eos(&pipeline).unwrap();
+        pipeline.set_state(gstreamer::State::Null).ok();
+    }
+
+    /// A hardware decoder can offer more than one raw output caps for the
+    /// same format (GPU memory, DMA buffer, plain system memory). This
+    /// confirms `wire_decodebin` pins the video pad to plain system-memory
+    /// NV12 regardless of what the decoder could have offered instead.
+    #[test]
+    fn video_pad_is_pinned_to_system_memory_nv12() {
+        gstreamer::init().ok();
+        let src_path =
+            std::env::temp_dir().join(format!("wire_decodebin_test_{}.mp4", std::process::id()));
+        make_test_clip(&src_path);
+
+        let pipeline = gstreamer::Pipeline::new();
+        let filesrc = gstreamer::ElementFactory::make("filesrc")
+            .property("location", src_path.to_str().unwrap())
+            .build()
+            .unwrap();
+        let decode = gstreamer::ElementFactory::make("decodebin")
+            .build()
+            .unwrap();
+        // fakesink with sync=false drains immediately instead of applying
+        // backpressure, so the pipeline reaches EOS without anything having
+        // to pull samples out of it.
+        let sink = gstreamer::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+
+        pipeline.add_many([&filesrc, &decode, &sink]).unwrap();
+        filesrc.link(&decode).unwrap();
+        wire_decodebin(&decode, &sink, &pipeline);
+
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        wait_for_eos(&pipeline).unwrap();
+
+        let sink_pad = sink.static_pad("sink").unwrap();
+        let caps = sink_pad.current_caps().expect("negotiated caps");
+        let s = caps.structure(0).unwrap();
+        assert_eq!(s.name(), "video/x-raw");
+        assert_eq!(s.get::<&str>("format").unwrap(), "NV12");
+
+        pipeline.set_state(gstreamer::State::Null).ok();
+        std::fs::remove_file(&src_path).ok();
+    }
+}
