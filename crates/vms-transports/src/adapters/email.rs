@@ -30,6 +30,16 @@ pub fn invalidate(dest_id: Uuid) {
     }
 }
 
+/// Resolve the sender address, falling back to `username` when `from` isn't
+/// set. For most SMTP providers the two are the same address, and today
+/// nothing ever submits a `from` separate from the login username.
+fn resolve_from(cfg: &serde_json::Value, username: Option<&str>) -> Option<String> {
+    cfg.get("from")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| username.map(str::to_string))
+}
+
 // -- Adapter --
 
 /// Send an email via SMTP using `lettre`.
@@ -48,7 +58,8 @@ pub fn invalidate(dest_id: Uuid) {
 /// }
 /// ```
 ///
-/// `smtp_port` defaults to 587. `tls` accepts `"starttls"` (default), `"tls"`, or `"none"`.
+/// `smtp_port` defaults to 587. `from` defaults to `username` if not set.
+/// `tls` accepts `"starttls"` (default), `"tls"`, or `"none"`.
 /// `subject` is a minijinja template rendered with the same variables as other adapters.
 /// `to` may be a single address or a comma-separated list.
 ///
@@ -81,10 +92,14 @@ pub async fn deliver(
         .get("password")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let from_addr = match cfg.get("from").and_then(|v| v.as_str()) {
-        Some(f) => f.to_string(),
-        None => return NodeOutput::failure(node_id, "email: destination config missing \"from\""),
-    };
+    let from_addr =
+        match resolve_from(cfg, username.as_deref()) {
+            Some(f) => f,
+            None => return NodeOutput::failure(
+                node_id,
+                "email: destination config missing \"from\" (and no \"username\" to fall back to)",
+            ),
+        };
     let to_raw = match cfg.get("to").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return NodeOutput::failure(node_id, "email: destination config missing \"to\""),
