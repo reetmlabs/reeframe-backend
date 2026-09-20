@@ -43,7 +43,10 @@ pub fn codec_to_encoder(caps_name: &str) -> &'static str {
 
 /// Connect a `decodebin` element's dynamic pads to the downstream pipeline.
 ///
-/// - Video pads are linked to `video_sink` (must have a static `sink` pad).
+/// - Video pads are routed through a `capsfilter` pinning `video/x-raw,
+///   format=NV12` before reaching `video_sink` (must have a static `sink`
+///   pad), so a hardware decoder's several equivalent output caps don't get
+///   left to implicit negotiation.
 /// - Audio pads are routed to a `fakesink` added on-the-fly so they do not
 ///   stall the pipeline when audio is not needed.
 pub fn wire_decodebin(
@@ -71,10 +74,53 @@ pub fn wire_decodebin(
             let Some(sink_pad) = sink.static_pad("sink") else {
                 return;
             };
-            if !sink_pad.is_linked() {
-                if let Err(e) = pad.link(&sink_pad) {
-                    tracing::warn!("wire_decodebin: video link failed: {e}");
+            if sink_pad.is_linked() {
+                return;
+            }
+            let Some(pl) = pipeline_weak.upgrade() else {
+                return;
+            };
+
+            // Pin a single raw format between the decoder and downstream
+            // software elements. A hardware decoder's output pad can offer
+            // several equivalent caps (e.g. GPU memory, DMA buffer, plain
+            // system memory) for the same format, and leaving that choice
+            // to implicit negotiation is the kind of ambiguity that shows
+            // up as occasional corrupted frames rather than a consistent
+            // failure. This keeps hardware decode in place, it only pins
+            // what comes out of it.
+            let capsfilter = match gstreamer::ElementFactory::make("capsfilter")
+                .property(
+                    "caps",
+                    gstreamer::Caps::builder("video/x-raw")
+                        .field("format", "NV12")
+                        .build(),
+                )
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("wire_decodebin: could not create capsfilter: {e}");
+                    return;
                 }
+            };
+            if let Err(e) = pl.add(&capsfilter) {
+                tracing::warn!("wire_decodebin: could not add capsfilter: {e}");
+                return;
+            }
+            if let Err(e) = capsfilter.sync_state_with_parent() {
+                tracing::warn!("wire_decodebin: capsfilter sync_state failed: {e}");
+                return;
+            }
+            let Some(cf_sink) = capsfilter.static_pad("sink") else {
+                return;
+            };
+            if let Err(e) = pad.link(&cf_sink) {
+                tracing::warn!("wire_decodebin: video link (to capsfilter) failed: {e}");
+                return;
+            }
+            if let Err(e) = capsfilter.link(&sink) {
+                tracing::warn!("wire_decodebin: capsfilter link failed: {e}");
             }
         } else if s.name().starts_with("audio/") {
             // Sink audio to fakesink — keeps the pipeline from stalling when
