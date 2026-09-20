@@ -30,6 +30,16 @@ pub fn invalidate(dest_id: Uuid) {
     }
 }
 
+/// Resolve the sender address, falling back to `username` when `from` isn't
+/// set. For most SMTP providers the two are the same address, and today
+/// nothing ever submits a `from` separate from the login username.
+fn resolve_from(cfg: &serde_json::Value, username: Option<&str>) -> Option<String> {
+    cfg.get("from")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| username.map(str::to_string))
+}
+
 // -- Adapter --
 
 /// Send an email via SMTP using `lettre`.
@@ -48,7 +58,8 @@ pub fn invalidate(dest_id: Uuid) {
 /// }
 /// ```
 ///
-/// `smtp_port` defaults to 587. `tls` accepts `"starttls"` (default), `"tls"`, or `"none"`.
+/// `smtp_port` defaults to 587. `from` defaults to `username` if not set.
+/// `tls` accepts `"starttls"` (default), `"tls"`, or `"none"`.
 /// `subject` is a minijinja template rendered with the same variables as other adapters.
 /// `to` may be a single address or a comma-separated list.
 ///
@@ -81,10 +92,14 @@ pub async fn deliver(
         .get("password")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let from_addr = match cfg.get("from").and_then(|v| v.as_str()) {
-        Some(f) => f.to_string(),
-        None => return NodeOutput::failure(node_id, "email: destination config missing \"from\""),
-    };
+    let from_addr =
+        match resolve_from(cfg, username.as_deref()) {
+            Some(f) => f,
+            None => return NodeOutput::failure(
+                node_id,
+                "email: destination config missing \"from\" (and no \"username\" to fall back to)",
+            ),
+        };
     let to_raw = match cfg.get("to").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return NodeOutput::failure(node_id, "email: destination config missing \"to\""),
@@ -263,5 +278,43 @@ fn mime_from_path(path: &std::path::PathBuf) -> ContentType {
         Some("pdf") => ContentType::parse("application/pdf").unwrap(),
         Some("txt") => ContentType::TEXT_PLAIN,
         _ => ContentType::parse("application/octet-stream").unwrap(),
+    }
+}
+
+#[cfg(test)]
+mod resolve_from_tests {
+    use super::*;
+
+    #[test]
+    fn reads_from() {
+        let cfg = serde_json::json!({ "from": "reeframe@example.com" });
+        assert_eq!(
+            resolve_from(&cfg, Some("user@example.com")).as_deref(),
+            Some("reeframe@example.com")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_username_when_from_is_absent() {
+        let cfg = serde_json::json!({});
+        assert_eq!(
+            resolve_from(&cfg, Some("user@example.com")).as_deref(),
+            Some("user@example.com")
+        );
+    }
+
+    #[test]
+    fn prefers_from_over_username_when_both_are_present() {
+        let cfg = serde_json::json!({ "from": "reeframe@example.com" });
+        assert_eq!(
+            resolve_from(&cfg, Some("user@example.com")).as_deref(),
+            Some("reeframe@example.com")
+        );
+    }
+
+    #[test]
+    fn returns_none_when_neither_is_present() {
+        let cfg = serde_json::json!({});
+        assert_eq!(resolve_from(&cfg, None), None);
     }
 }
