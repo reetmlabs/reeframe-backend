@@ -415,8 +415,9 @@ where
 /// Execute a single pipeline node and return its [`NodeOutput`].
 ///
 /// `TriggerRoot` seeds the output with trigger context metadata, including
-/// the triggering Event's top-level payload fields as `event.*` (see
-/// [`flatten_event_payload`]) so a downstream `Condition` can reference them.
+/// the triggering Event's top-level payload fields as `event.*` and a manual
+/// trigger's parameters as `manual.*` (see [`flatten_scalar_fields`]) so a
+/// downstream `Condition` can reference them.
 /// `Condition` evaluates its `evalexpr` expression and stores the boolean
 /// result in `metadata["condition_result"]`.
 /// `Fork` passes the first parent output through with this node's ID.
@@ -441,7 +442,8 @@ pub(crate) async fn execute_node(
                 "fired_at":     ctx.fired_at.to_rfc3339(),
             });
             if let Some(map) = metadata.as_object_mut() {
-                map.extend(flatten_event_payload(ctx.event_payload.as_ref()));
+                map.extend(flatten_scalar_fields("event", ctx.event_payload.as_ref()));
+                map.extend(flatten_scalar_fields("manual", ctx.manual_params.as_ref()));
             }
             NodeOutput::success(node.id).with_metadata(metadata)
         }
@@ -544,9 +546,10 @@ pub(crate) async fn execute_node(
     }
 }
 
-/// Flattens an `Event`'s top-level payload fields into `event.<key>` entries
-/// so a downstream `Condition` sees what the trigger's own `filter` saw.
-fn flatten_event_payload(
+/// Flattens the top-level string/number/bool fields of a JSON object into
+/// `<prefix>.<key>` entries for a downstream `Condition`'s evalexpr context.
+fn flatten_scalar_fields(
+    prefix: &str,
     payload: Option<&serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
@@ -560,7 +563,7 @@ fn flatten_event_payload(
                 | serde_json::Value::Number(_)
                 | serde_json::Value::Bool(_)
         ) {
-            out.insert(format!("event.{k}"), v.clone());
+            out.insert(format!("{prefix}.{k}"), v.clone());
         }
     }
     out
@@ -637,6 +640,13 @@ mod tests {
         let mut ctx = TriggerContext::for_schedule(Uuid::new_v4(), pid);
         ctx.trigger_type = TriggerType::Event;
         ctx.event_payload = Some(payload);
+        ctx
+    }
+
+    fn manual_ctx(pid: Uuid, params: serde_json::Value) -> TriggerContext {
+        let mut ctx = TriggerContext::for_schedule(Uuid::new_v4(), pid);
+        ctx.trigger_type = TriggerType::Manual;
+        ctx.manual_params = Some(params);
         ctx
     }
 
@@ -760,6 +770,41 @@ mod tests {
 
         let mut cond = node(pid, NodeType::Condition);
         cond.condition_expr = Some("event.confidence > 0.85".into());
+        let cond_out = execute_node(
+            &cond,
+            &[root_out],
+            &ctx,
+            &action_ctx(),
+            &dr,
+            &progress_map(),
+        )
+        .await;
+        assert!(cond_out.success);
+        assert_eq!(cond_out.metadata["condition_result"], true);
+    }
+
+    #[tokio::test]
+    async fn trigger_root_forwards_manual_params_as_manual_fields() {
+        let pid = Uuid::new_v4();
+        let n = node(pid, NodeType::TriggerRoot);
+        let ctx = manual_ctx(pid, serde_json::json!({"action": "run", "count": 3}));
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(out.success);
+        assert_eq!(out.metadata["manual.action"], "run");
+        assert_eq!(out.metadata["manual.count"], 3);
+    }
+
+    #[tokio::test]
+    async fn condition_after_manual_trigger_can_reference_manual_params() {
+        let pid = Uuid::new_v4();
+        let root = node(pid, NodeType::TriggerRoot);
+        let ctx = manual_ctx(pid, serde_json::json!({"action": "run"}));
+        let dr = dest_repo().await;
+        let root_out = execute_node(&root, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
+
+        let mut cond = node(pid, NodeType::Condition);
+        cond.condition_expr = Some("manual.action == \"run\"".into());
         let cond_out = execute_node(
             &cond,
             &[root_out],
