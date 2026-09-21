@@ -643,6 +643,13 @@ mod tests {
         ctx
     }
 
+    fn manual_ctx(pid: Uuid, params: serde_json::Value) -> TriggerContext {
+        let mut ctx = TriggerContext::for_schedule(Uuid::new_v4(), pid);
+        ctx.trigger_type = TriggerType::Manual;
+        ctx.manual_params = Some(params);
+        ctx
+    }
+
     fn action_ctx() -> ActionContext {
         ActionContext {
             recording_dir: std::path::PathBuf::from("/tmp"),
@@ -763,6 +770,41 @@ mod tests {
 
         let mut cond = node(pid, NodeType::Condition);
         cond.condition_expr = Some("event.confidence > 0.85".into());
+        let cond_out = execute_node(
+            &cond,
+            &[root_out],
+            &ctx,
+            &action_ctx(),
+            &dr,
+            &progress_map(),
+        )
+        .await;
+        assert!(cond_out.success);
+        assert_eq!(cond_out.metadata["condition_result"], true);
+    }
+
+    #[tokio::test]
+    async fn trigger_root_forwards_manual_params_as_manual_fields() {
+        let pid = Uuid::new_v4();
+        let n = node(pid, NodeType::TriggerRoot);
+        let ctx = manual_ctx(pid, serde_json::json!({"action": "run", "count": 3}));
+        let dr = dest_repo().await;
+        let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(out.success);
+        assert_eq!(out.metadata["manual.action"], "run");
+        assert_eq!(out.metadata["manual.count"], 3);
+    }
+
+    #[tokio::test]
+    async fn condition_after_manual_trigger_can_reference_manual_params() {
+        let pid = Uuid::new_v4();
+        let root = node(pid, NodeType::TriggerRoot);
+        let ctx = manual_ctx(pid, serde_json::json!({"action": "run"}));
+        let dr = dest_repo().await;
+        let root_out = execute_node(&root, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
+
+        let mut cond = node(pid, NodeType::Condition);
+        cond.condition_expr = Some("manual.action == \"run\"".into());
         let cond_out = execute_node(
             &cond,
             &[root_out],
