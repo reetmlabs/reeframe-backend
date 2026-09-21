@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::action::NotificationFormat;
 use crate::pipeline::NodeId;
 use crate::trigger::TriggerContext;
 
@@ -75,6 +76,10 @@ pub struct NodeOutput {
     /// Transport nodes use this as the message body when no explicit
     /// `message_template` is configured.
     pub text: Option<String>,
+    /// How `text` should be interpreted by the transport that sends it
+    /// (plain text, HTML, or Markdown). Set by `render_notification`;
+    /// `None` for output that was never a rendered notification.
+    pub format: Option<NotificationFormat>,
     /// Arbitrary metadata: delivery URLs, message IDs, detection results, etc.
     ///
     /// Stored as JSON so transport adapters can attach structured receipts.
@@ -92,6 +97,7 @@ impl NodeOutput {
             node_id,
             artifact_path: None,
             text: None,
+            format: None,
             metadata: serde_json::Value::Null,
             success: true,
             error: None,
@@ -104,6 +110,7 @@ impl NodeOutput {
             node_id,
             artifact_path: None,
             text: None,
+            format: None,
             metadata: serde_json::Value::Null,
             success: false,
             error: Some(error.into()),
@@ -119,6 +126,12 @@ impl NodeOutput {
     /// Attach rendered text to this output (builder pattern).
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
+        self
+    }
+
+    /// Attach a format for how `text` should be interpreted (builder pattern).
+    pub fn with_format(mut self, format: NotificationFormat) -> Self {
+        self.format = Some(format);
         self
     }
 
@@ -138,6 +151,7 @@ impl NodeOutput {
             node_id: ctx.trigger_id,
             artifact_path: None,
             text: None,
+            format: None,
             metadata: serde_json::json!({
                 "trigger_type": ctx.trigger_type,
                 "camera_id": ctx.camera_id,
@@ -198,5 +212,14 @@ impl NodeInput {
     /// is configured on the transport.
     pub fn first_text(&self) -> Option<&str> {
         self.parent_outputs.iter().find_map(|o| o.text.as_deref())
+    }
+
+    /// Format of the first rendered text found among parent outputs, if any.
+    ///
+    /// Used by transport nodes to decide how to send [`NodeInput::first_text`]
+    /// (e.g. as HTML vs. plain text) when it came from a `render_notification`
+    /// node.
+    pub fn first_format(&self) -> Option<&NotificationFormat> {
+        self.parent_outputs.iter().find_map(|o| o.format.as_ref())
     }
 }

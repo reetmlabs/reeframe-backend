@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use minijinja::Environment;
 use tokio::sync::mpsc::UnboundedSender;
 use vms_core::{
-    action::TransportConfig,
+    action::{NotificationFormat, TransportConfig},
     node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
@@ -23,6 +23,18 @@ fn resolve_bot_token(cfg: &serde_json::Value) -> Option<String> {
         .or_else(|| cfg.get("token"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// Map a notification format to Telegram's `parse_mode` value. Markdown uses
+/// Telegram's legacy "Markdown" mode rather than "MarkdownV2", since the
+/// latter requires escaping rules for arbitrary rendered text that aren't
+/// implemented here. `Text` needs no parse_mode.
+fn parse_mode_for(format: Option<&NotificationFormat>) -> Option<&'static str> {
+    match format {
+        Some(NotificationFormat::Html) => Some("HTML"),
+        Some(NotificationFormat::Markdown) => Some("Markdown"),
+        Some(NotificationFormat::Text) | None => None,
+    }
 }
 
 // -- Adapter --
@@ -93,10 +105,13 @@ pub async fn deliver(
 
     let env = Environment::new();
 
-    let message_text: Option<String> =
+    // An explicit message_template is the transport's own text, not the
+    // upstream render_notification node's, so its format only applies to
+    // the fallback (first_text) case.
+    let (message_text, parse_mode): (Option<String>, Option<&str>) =
         match transport_cfg.and_then(|c| c.message_template.as_deref()) {
             Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
-                Ok(s) => Some(s),
+                Ok(s) => (Some(s), None),
                 Err(e) => {
                     return NodeOutput::failure(
                         node_id,
@@ -104,7 +119,10 @@ pub async fn deliver(
                     )
                 }
             },
-            None => input.first_text().map(str::to_string),
+            None => (
+                input.first_text().map(str::to_string),
+                parse_mode_for(input.first_format()),
+            ),
         };
 
     let base_url = format!("https://api.telegram.org/bot{bot_token}");
@@ -139,6 +157,9 @@ pub async fn deliver(
 
         if let Some(caption) = &message_text {
             form = form.text("caption", caption.clone());
+            if let Some(mode) = parse_mode {
+                form = form.text("parse_mode", mode);
+            }
         }
 
         let resp = client()
@@ -178,10 +199,13 @@ pub async fn deliver(
             }
         };
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "chat_id": chat_id,
             "text":    text,
         });
+        if let Some(mode) = parse_mode {
+            body["parse_mode"] = serde_json::Value::from(mode);
+        }
 
         let resp = client()
             .post(format!("{base_url}/sendMessage"))
@@ -237,5 +261,32 @@ mod resolve_bot_token_tests {
     fn returns_none_when_neither_key_is_present() {
         let cfg = serde_json::json!({ "chat_id": "-100" });
         assert_eq!(resolve_bot_token(&cfg), None);
+    }
+}
+
+#[cfg(test)]
+mod parse_mode_for_tests {
+    use super::*;
+
+    #[test]
+    fn html_maps_to_html_parse_mode() {
+        assert_eq!(
+            parse_mode_for(Some(&NotificationFormat::Html)),
+            Some("HTML")
+        );
+    }
+
+    #[test]
+    fn markdown_maps_to_legacy_markdown_parse_mode() {
+        assert_eq!(
+            parse_mode_for(Some(&NotificationFormat::Markdown)),
+            Some("Markdown")
+        );
+    }
+
+    #[test]
+    fn text_and_absent_need_no_parse_mode() {
+        assert_eq!(parse_mode_for(Some(&NotificationFormat::Text)), None);
+        assert_eq!(parse_mode_for(None), None);
     }
 }

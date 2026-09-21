@@ -1,6 +1,6 @@
-use minijinja::Environment;
+use minijinja::{AutoEscape, Environment};
 use vms_core::{
-    action::RenderNotificationConfig,
+    action::{NotificationFormat, RenderNotificationConfig},
     node::{NodeInput, NodeOutput},
     pipeline::NodeId,
 };
@@ -38,11 +38,19 @@ pub fn execute(node_id: NodeId, cfg: &RenderNotificationConfig, input: &NodeInpu
         message      => input.first_text(),
     };
 
-    let env = Environment::new();
+    // HTML format escapes substituted variables (a camera name containing
+    // "&" or "<", say) so they can't break or be mistaken for markup, while
+    // leaving tags the template author wrote (e.g. "<b>") untouched.
+    let mut env = Environment::new();
+    if cfg.format == NotificationFormat::Html {
+        env.set_auto_escape_callback(|_| AutoEscape::Html);
+    }
     match env.render_str(&cfg.template, template_ctx) {
         Ok(rendered) => {
             tracing::debug!(node_id = %node_id, len = rendered.len(), "RenderNotification: rendered");
-            NodeOutput::success(node_id).with_text(rendered)
+            NodeOutput::success(node_id)
+                .with_text(rendered)
+                .with_format(cfg.format.clone())
         }
         Err(e) => NodeOutput::failure(node_id, format!("template render error: {e}")),
     }
@@ -99,5 +107,57 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("template render error"));
+    }
+
+    #[test]
+    fn output_carries_the_configured_format() {
+        let id = Uuid::new_v4();
+        let cfg = RenderNotificationConfig {
+            template: "hi".into(),
+            format: NotificationFormat::Markdown,
+        };
+        let out = execute(id, &cfg, &make_input());
+        assert_eq!(out.format, Some(NotificationFormat::Markdown));
+    }
+
+    #[test]
+    fn html_format_escapes_substituted_variables_but_not_literal_tags() {
+        let id = Uuid::new_v4();
+        let cfg = RenderNotificationConfig {
+            template: "<b>{{ message }}</b>".into(),
+            format: NotificationFormat::Html,
+        };
+        let mut input = make_input();
+        input
+            .parent_outputs
+            .push(NodeOutput::success(Uuid::new_v4()).with_text("A & B <script>"));
+
+        let out = execute(id, &cfg, &input);
+        assert!(out.success);
+        let text = out.text.unwrap();
+        assert!(
+            text.starts_with("<b>") && text.ends_with("</b>"),
+            "literal template tags must stay unescaped, got {text:?}"
+        );
+        assert!(
+            text.contains("A &amp; B &lt;script&gt;"),
+            "substituted variable must be escaped, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn text_format_does_not_escape_substituted_variables() {
+        let id = Uuid::new_v4();
+        let cfg = RenderNotificationConfig {
+            template: "{{ message }}".into(),
+            format: NotificationFormat::Text,
+        };
+        let mut input = make_input();
+        input
+            .parent_outputs
+            .push(NodeOutput::success(Uuid::new_v4()).with_text("A & B"));
+
+        let out = execute(id, &cfg, &input);
+        assert_eq!(out.text.as_deref(), Some("A & B"));
     }
 }
