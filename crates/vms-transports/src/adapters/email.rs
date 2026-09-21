@@ -10,7 +10,7 @@ use minijinja::Environment;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 use vms_core::{
-    action::TransportConfig,
+    action::{NotificationFormat, TransportConfig},
     node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
@@ -38,6 +38,15 @@ fn resolve_from(cfg: &serde_json::Value, username: Option<&str>) -> Option<Strin
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .or_else(|| username.map(str::to_string))
+}
+
+/// Content-Type for the message body, based on the upstream
+/// render_notification node's format, if any.
+fn body_content_type(format: Option<&NotificationFormat>) -> ContentType {
+    match format {
+        Some(NotificationFormat::Html) => ContentType::TEXT_HTML,
+        _ => ContentType::TEXT_PLAIN,
+    }
 }
 
 // -- Adapter --
@@ -144,9 +153,12 @@ pub async fn deliver(
     };
 
     // -- Render body --
-    let body_text = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
+    // An explicit message_template is the transport's own text, not the
+    // upstream render_notification node's, so its format only applies to
+    // the fallback (first_text) case.
+    let (body_text, body_format) = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
         Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
-            Ok(s) => s,
+            Ok(s) => (s, None),
             Err(e) => {
                 return NodeOutput::failure(
                     node_id,
@@ -154,7 +166,10 @@ pub async fn deliver(
                 )
             }
         },
-        None => input.first_text().unwrap_or("").to_string(),
+        None => (
+            input.first_text().unwrap_or("").to_string(),
+            input.first_format().cloned(),
+        ),
     };
 
     // -- Parse addresses --
@@ -181,8 +196,9 @@ pub async fn deliver(
     }
 
     // -- Build message body --
+    let content_type = body_content_type(body_format.as_ref());
     let text_part = SinglePart::builder()
-        .header(ContentType::TEXT_PLAIN)
+        .header(content_type)
         .body(body_text.clone());
 
     let message = if let Some(src) = artifact {
