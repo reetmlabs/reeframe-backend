@@ -415,8 +415,9 @@ where
 /// Execute a single pipeline node and return its [`NodeOutput`].
 ///
 /// `TriggerRoot` seeds the output with trigger context metadata, including
-/// the triggering Event's top-level payload fields as `event.*` (see
-/// [`flatten_event_payload`]) so a downstream `Condition` can reference them.
+/// the triggering Event's top-level payload fields as `event.*` and a manual
+/// trigger's parameters as `manual.*` (see [`flatten_scalar_fields`]) so a
+/// downstream `Condition` can reference them.
 /// `Condition` evaluates its `evalexpr` expression and stores the boolean
 /// result in `metadata["condition_result"]`.
 /// `Fork` passes the first parent output through with this node's ID.
@@ -441,7 +442,8 @@ pub(crate) async fn execute_node(
                 "fired_at":     ctx.fired_at.to_rfc3339(),
             });
             if let Some(map) = metadata.as_object_mut() {
-                map.extend(flatten_event_payload(ctx.event_payload.as_ref()));
+                map.extend(flatten_scalar_fields("event", ctx.event_payload.as_ref()));
+                map.extend(flatten_scalar_fields("manual", ctx.manual_params.as_ref()));
             }
             NodeOutput::success(node.id).with_metadata(metadata)
         }
@@ -544,9 +546,10 @@ pub(crate) async fn execute_node(
     }
 }
 
-/// Flattens an `Event`'s top-level payload fields into `event.<key>` entries
-/// so a downstream `Condition` sees what the trigger's own `filter` saw.
-fn flatten_event_payload(
+/// Flattens the top-level string/number/bool fields of a JSON object into
+/// `<prefix>.<key>` entries for a downstream `Condition`'s evalexpr context.
+fn flatten_scalar_fields(
+    prefix: &str,
     payload: Option<&serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
@@ -560,7 +563,7 @@ fn flatten_event_payload(
                 | serde_json::Value::Number(_)
                 | serde_json::Value::Bool(_)
         ) {
-            out.insert(format!("event.{k}"), v.clone());
+            out.insert(format!("{prefix}.{k}"), v.clone());
         }
     }
     out
