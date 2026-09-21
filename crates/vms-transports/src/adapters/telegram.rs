@@ -263,3 +263,30 @@ mod resolve_bot_token_tests {
         assert_eq!(resolve_bot_token(&cfg), None);
     }
 }
+
+#[cfg(test)]
+mod parse_mode_for_tests {
+    use super::*;
+
+    #[test]
+    fn html_maps_to_html_parse_mode() {
+        assert_eq!(
+            parse_mode_for(Some(&NotificationFormat::Html)),
+            Some("HTML")
+        );
+    }
+
+    #[test]
+    fn markdown_maps_to_legacy_markdown_parse_mode() {
+        assert_eq!(
+            parse_mode_for(Some(&NotificationFormat::Markdown)),
+            Some("Markdown")
+        );
+    }
+
+    #[test]
+    fn text_and_absent_need_no_parse_mode() {
+        assert_eq!(parse_mode_for(Some(&NotificationFormat::Text)), None);
+        assert_eq!(parse_mode_for(None), None);
+    }
+}
