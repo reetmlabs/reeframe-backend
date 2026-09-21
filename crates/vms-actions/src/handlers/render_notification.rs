@@ -1,6 +1,6 @@
-use minijinja::Environment;
+use minijinja::{AutoEscape, Environment};
 use vms_core::{
-    action::RenderNotificationConfig,
+    action::{NotificationFormat, RenderNotificationConfig},
     node::{NodeInput, NodeOutput},
     pipeline::NodeId,
 };
@@ -38,11 +38,19 @@ pub fn execute(node_id: NodeId, cfg: &RenderNotificationConfig, input: &NodeInpu
         message      => input.first_text(),
     };
 
-    let env = Environment::new();
+    // HTML format escapes substituted variables (a camera name containing
+    // "&" or "<", say) so they can't break or be mistaken for markup, while
+    // leaving tags the template author wrote (e.g. "<b>") untouched.
+    let mut env = Environment::new();
+    if cfg.format == NotificationFormat::Html {
+        env.set_auto_escape_callback(|_| AutoEscape::Html);
+    }
     match env.render_str(&cfg.template, template_ctx) {
         Ok(rendered) => {
             tracing::debug!(node_id = %node_id, len = rendered.len(), "RenderNotification: rendered");
-            NodeOutput::success(node_id).with_text(rendered)
+            NodeOutput::success(node_id)
+                .with_text(rendered)
+                .with_format(cfg.format.clone())
         }
         Err(e) => NodeOutput::failure(node_id, format!("template render error: {e}")),
     }
