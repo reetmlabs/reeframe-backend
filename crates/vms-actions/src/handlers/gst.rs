@@ -39,6 +39,30 @@ pub fn codec_to_encoder(caps_name: &str) -> &'static str {
     }
 }
 
+/// Map a GStreamer caps structure name to a parser element name.
+///
+/// `"video/x-h265"` → `h265parse`; everything else → `h264parse`.
+pub fn codec_to_parser(caps_name: &str) -> &'static str {
+    match caps_name {
+        "video/x-h265" => "h265parse",
+        _ => "h264parse",
+    }
+}
+
+/// Map a GStreamer caps structure name to a software decoder element name.
+///
+/// `"video/x-h265"` → `avdec_h265`; everything else → `avdec_h264`. Used
+/// where a hardware decoder is known to misbehave with a specific
+/// downstream element (see `watermark.rs`), so decodebin's own autoplug
+/// (which can pick a hardware decoder) is bypassed in favor of an explicit
+/// software one.
+pub fn codec_to_software_decoder(caps_name: &str) -> &'static str {
+    match caps_name {
+        "video/x-h265" => "avdec_h265",
+        _ => "avdec_h264",
+    }
+}
+
 // -- Pipeline helpers --
 
 /// Connect a `decodebin` element's dynamic pads to the downstream pipeline.
@@ -140,6 +164,61 @@ pub fn wire_decodebin(
     });
 }
 
+/// Connect a demuxer element's (e.g. `qtdemux`) dynamic pads to an explicit
+/// parse/decode chain, bypassing decodebin's own decoder autoplug.
+///
+/// Unlike [`wire_decodebin`], `video_sink` here receives still-encoded
+/// caps (a parser, not a raw-video sink), so no capsfilter is inserted.
+/// Audio pads are routed to a `fakesink` the same way.
+pub fn wire_demux_video(
+    demux: &gstreamer::Element,
+    video_sink: &gstreamer::Element,
+    pipeline: &gstreamer::Pipeline,
+) {
+    let video_sink_weak = video_sink.downgrade();
+    let pipeline_weak = pipeline.downgrade();
+
+    demux.connect_pad_added(move |_, pad| {
+        let caps = match pad.current_caps() {
+            Some(c) => c,
+            None => return,
+        };
+        let s = match caps.structure(0) {
+            Some(s) => s,
+            None => return,
+        };
+
+        if s.name().starts_with("video/") {
+            let Some(sink) = video_sink_weak.upgrade() else {
+                return;
+            };
+            let Some(sink_pad) = sink.static_pad("sink") else {
+                return;
+            };
+            if sink_pad.is_linked() {
+                return;
+            }
+            if let Err(e) = pad.link(&sink_pad) {
+                tracing::warn!("wire_demux_video: video link failed: {e}");
+            }
+        } else if s.name().starts_with("audio/") {
+            let Some(pl) = pipeline_weak.upgrade() else {
+                return;
+            };
+            match gstreamer::ElementFactory::make("fakesink").build() {
+                Ok(fs) => {
+                    pl.add(&fs).ok();
+                    fs.sync_state_with_parent().ok();
+                    if let Some(sp) = fs.static_pad("sink") {
+                        pad.link(&sp).ok();
+                    }
+                }
+                Err(e) => tracing::warn!("wire_demux_video: could not create fakesink: {e}"),
+            }
+        }
+    });
+}
+
 /// Wait for the pipeline to reach EOS or emit an error.
 ///
 /// Called after `set_state(Playing)` to block until the file processing job
@@ -164,21 +243,22 @@ pub fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
 }
 
 #[cfg(test)]
+fn make_test_clip(path: &Path) {
+    let pipeline = gstreamer::parse::launch(&format!(
+        "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64,framerate=10/1,format=I420 ! \
+         x264enc ! mp4mux ! filesink location={}",
+        path.display()
+    ))
+    .expect("parse test clip pipeline");
+    let pipeline = pipeline.downcast::<gstreamer::Pipeline>().unwrap();
+    pipeline.set_state(gstreamer::State::Playing).unwrap();
+    wait_for_eos(&pipeline).unwrap();
+    pipeline.set_state(gstreamer::State::Null).ok();
+}
+
+#[cfg(test)]
 mod wire_decodebin_tests {
     use super::*;
-
-    fn make_test_clip(path: &Path) {
-        let pipeline = gstreamer::parse::launch(&format!(
-            "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64,framerate=10/1,format=I420 ! \
-             x264enc ! mp4mux ! filesink location={}",
-            path.display()
-        ))
-        .expect("parse test clip pipeline");
-        let pipeline = pipeline.downcast::<gstreamer::Pipeline>().unwrap();
-        pipeline.set_state(gstreamer::State::Playing).unwrap();
-        wait_for_eos(&pipeline).unwrap();
-        pipeline.set_state(gstreamer::State::Null).ok();
-    }
 
     /// A hardware decoder can offer more than one memory layout for its raw
     /// output (GPU memory, DMA buffer, plain system memory). This confirms
@@ -220,6 +300,60 @@ mod wire_decodebin_tests {
         let caps = sink_pad.current_caps().expect("negotiated caps");
         let s = caps.structure(0).unwrap();
         assert_eq!(s.name(), "video/x-raw");
+
+        pipeline.set_state(gstreamer::State::Null).ok();
+        std::fs::remove_file(&src_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod wire_demux_video_tests {
+    use super::*;
+
+    /// `wire_demux_video` links a demuxer's video pad straight to an
+    /// explicit parse/decode chain, the path `watermark.rs` uses to avoid a
+    /// hardware decoder. This confirms that wiring actually reaches EOS
+    /// end to end (demux, parse, decode, and a sink all correctly linked).
+    #[test]
+    fn video_pad_reaches_an_explicit_decode_chain() {
+        gstreamer::init().ok();
+        let src_path =
+            std::env::temp_dir().join(format!("wire_demux_test_{}.mp4", std::process::id()));
+        make_test_clip(&src_path);
+
+        let pipeline = gstreamer::Pipeline::new();
+        let filesrc = gstreamer::ElementFactory::make("filesrc")
+            .property("location", src_path.to_str().unwrap())
+            .build()
+            .unwrap();
+        let demux = gstreamer::ElementFactory::make("qtdemux").build().unwrap();
+        let parse = gstreamer::ElementFactory::make("h264parse")
+            .build()
+            .unwrap();
+        let decoder = gstreamer::ElementFactory::make("avdec_h264")
+            .build()
+            .unwrap();
+        let sink = gstreamer::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+
+        pipeline
+            .add_many([&filesrc, &demux, &parse, &decoder, &sink])
+            .unwrap();
+        filesrc.link(&demux).unwrap();
+        gstreamer::Element::link_many([&parse, &decoder, &sink]).unwrap();
+        wire_demux_video(&demux, &parse, &pipeline);
+
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        wait_for_eos(&pipeline).unwrap();
+
+        let caps = sink
+            .static_pad("sink")
+            .unwrap()
+            .current_caps()
+            .expect("negotiated caps");
+        assert_eq!(caps.structure(0).unwrap().name(), "video/x-raw");
 
         pipeline.set_state(gstreamer::State::Null).ok();
         std::fs::remove_file(&src_path).ok();
