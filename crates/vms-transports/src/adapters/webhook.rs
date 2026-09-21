@@ -187,3 +187,29 @@ mod resolve_method_tests {
         assert_eq!(resolve_method(&cfg), reqwest::Method::POST);
     }
 }
+
+#[cfg(test)]
+mod body_content_type_tests {
+    use super::*;
+
+    #[test]
+    fn html_format_sends_text_html() {
+        assert_eq!(
+            body_content_type(Some(&NotificationFormat::Html)),
+            "text/html; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn text_and_markdown_and_absent_send_text_plain() {
+        assert_eq!(
+            body_content_type(Some(&NotificationFormat::Text)),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            body_content_type(Some(&NotificationFormat::Markdown)),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(body_content_type(None), "text/plain; charset=utf-8");
+    }
+}
