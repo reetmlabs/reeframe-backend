@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use minijinja::Environment;
 use tokio::sync::mpsc::UnboundedSender;
 use vms_core::{
-    action::TransportConfig,
+    action::{NotificationFormat, TransportConfig},
     node::{NodeInput, NodeOutput, TransferProgress},
     pipeline::NodeId,
 };
@@ -21,6 +21,15 @@ fn resolve_method(cfg: &serde_json::Value) -> reqwest::Method {
     match cfg.get("method").and_then(|v| v.as_str()) {
         Some(m) if m.eq_ignore_ascii_case("put") => reqwest::Method::PUT,
         _ => reqwest::Method::POST,
+    }
+}
+
+/// Content-Type for the request body, based on the upstream
+/// render_notification node's format, if any.
+fn body_content_type(format: Option<&NotificationFormat>) -> &'static str {
+    match format {
+        Some(NotificationFormat::Html) => "text/html; charset=utf-8",
+        _ => "text/plain; charset=utf-8",
     }
 }
 
@@ -85,10 +94,13 @@ pub async fn deliver(
 
     let env = Environment::new();
 
-    let message_text: Option<String> =
+    // An explicit message_template is the transport's own text, not the
+    // upstream render_notification node's, so its format only applies to
+    // the fallback (first_text) case.
+    let (message_text, message_format) =
         match transport_cfg.and_then(|c| c.message_template.as_deref()) {
             Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
-                Ok(s) => Some(s),
+                Ok(s) => (Some(s), None),
                 Err(e) => {
                     return NodeOutput::failure(
                         node_id,
@@ -96,7 +108,10 @@ pub async fn deliver(
                     )
                 }
             },
-            None => input.first_text().map(str::to_string),
+            None => (
+                input.first_text().map(str::to_string),
+                input.first_format().cloned(),
+            ),
         };
 
     // -- Build request --
@@ -113,7 +128,7 @@ pub async fn deliver(
 
     // -- Attach body --
     let req = if let Some(text) = message_text {
-        req.header("Content-Type", "text/plain; charset=utf-8")
+        req.header("Content-Type", body_content_type(message_format.as_ref()))
             .body(text)
     } else if let Some(src) = artifact {
         let bytes = match tokio::fs::read(src).await {
