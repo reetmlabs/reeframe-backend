@@ -108,4 +108,56 @@ mod tests {
             .unwrap_or("")
             .contains("template render error"));
     }
+
+    #[test]
+    fn output_carries_the_configured_format() {
+        let id = Uuid::new_v4();
+        let cfg = RenderNotificationConfig {
+            template: "hi".into(),
+            format: NotificationFormat::Markdown,
+        };
+        let out = execute(id, &cfg, &make_input());
+        assert_eq!(out.format, Some(NotificationFormat::Markdown));
+    }
+
+    #[test]
+    fn html_format_escapes_substituted_variables_but_not_literal_tags() {
+        let id = Uuid::new_v4();
+        let cfg = RenderNotificationConfig {
+            template: "<b>{{ message }}</b>".into(),
+            format: NotificationFormat::Html,
+        };
+        let mut input = make_input();
+        input
+            .parent_outputs
+            .push(NodeOutput::success(Uuid::new_v4()).with_text("A & B <script>"));
+
+        let out = execute(id, &cfg, &input);
+        assert!(out.success);
+        let text = out.text.unwrap();
+        assert!(
+            text.starts_with("<b>") && text.ends_with("</b>"),
+            "literal template tags must stay unescaped, got {text:?}"
+        );
+        assert!(
+            text.contains("A &amp; B &lt;script&gt;"),
+            "substituted variable must be escaped, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn text_format_does_not_escape_substituted_variables() {
+        let id = Uuid::new_v4();
+        let cfg = RenderNotificationConfig {
+            template: "{{ message }}".into(),
+            format: NotificationFormat::Text,
+        };
+        let mut input = make_input();
+        input
+            .parent_outputs
+            .push(NodeOutput::success(Uuid::new_v4()).with_text("A & B"));
+
+        let out = execute(id, &cfg, &input);
+        assert_eq!(out.text.as_deref(), Some("A & B"));
+    }
 }
