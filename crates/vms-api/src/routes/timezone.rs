@@ -8,35 +8,32 @@ use crate::{
     state::AppState,
 };
 
-/// Per-camera override of the global `[recordings]` retention settings.
-/// `null` means "no override, inherit the global default."
+/// Per-camera override of the global `[recordings] timezone`. `null` means
+/// "no override, inherit the global default."
 #[derive(Serialize)]
-pub struct RetentionPolicyDto {
-    pub retention_days: Option<i32>,
-    pub retention_disk_threshold_percent: Option<f64>,
+pub struct CameraTimezoneDto {
+    pub timezone: Option<String>,
 }
 
 /// `null` clears the override (falls back to the global default); omitting
-/// a field leaves its current override unchanged.
+/// the field leaves the current override unchanged.
 #[derive(Deserialize)]
-pub struct UpdateRetentionPolicyBody {
-    pub retention_days: Option<Option<i32>>,
-    pub retention_disk_threshold_percent: Option<Option<f64>>,
+pub struct UpdateCameraTimezoneBody {
+    pub timezone: Option<Option<String>>,
 }
 
-fn to_dto(camera: vms_db::entities::camera::Model) -> RetentionPolicyDto {
-    RetentionPolicyDto {
-        retention_days: camera.retention_days,
-        retention_disk_threshold_percent: camera.retention_disk_threshold_percent,
+fn to_dto(camera: vms_db::entities::camera::Model) -> CameraTimezoneDto {
+    CameraTimezoneDto {
+        timezone: camera.timezone,
     }
 }
 
-/// GET /cameras/{id}/retention-policy
+/// GET /cameras/{id}/timezone
 #[handler]
-pub async fn get_retention_policy(
+pub async fn get_camera_timezone(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<RetentionPolicyDto>, ApiError> {
+) -> Result<Json<CameraTimezoneDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let camera = state
@@ -47,15 +44,15 @@ pub async fn get_retention_policy(
     Ok(Json(to_dto(camera)))
 }
 
-/// PATCH /cameras/{id}/retention-policy
+/// PATCH /cameras/{id}/timezone
 #[handler]
-pub async fn update_retention_policy(
+pub async fn update_camera_timezone(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<RetentionPolicyDto>, ApiError> {
+) -> Result<Json<CameraTimezoneDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
-    let body: UpdateRetentionPolicyBody = parse_body(req).await?;
+    let body: UpdateCameraTimezoneBody = parse_body(req).await?;
 
     let camera = state
         .camera_repo
@@ -74,9 +71,9 @@ pub async fn update_retention_policy(
                 ring_buffer_duration_secs: None,
                 ring_buffer_storage: None,
                 enabled: None,
-                retention_days: body.retention_days,
-                retention_disk_threshold_percent: body.retention_disk_threshold_percent,
-                timezone: None,
+                retention_days: None,
+                retention_disk_threshold_percent: None,
+                timezone: body.timezone,
             },
         )
         .await?;

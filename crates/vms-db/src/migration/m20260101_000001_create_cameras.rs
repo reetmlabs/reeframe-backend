@@ -85,4 +85,5 @@ pub enum Camera {
     RetentionDays,
     RetentionDiskThresholdPercent,
     DesiredRecording,
+    Timezone,
 }

@@ -45,6 +45,10 @@ pub struct UpdateCamera {
     pub retention_days: Option<Option<i32>>,
     /// Same three-state shape as `retention_days`.
     pub retention_disk_threshold_percent: Option<Option<f64>>,
+    /// `None` = leave unchanged. `Some(None)` = clear the override (inherit
+    /// the global `[recordings] timezone` default). `Some(Some(tz))` = set
+    /// an explicit IANA timezone override for this camera.
+    pub timezone: Option<Option<String>>,
 }
 
 // -- Repository --
@@ -88,6 +92,7 @@ impl CameraRepo {
             retention_days: Set(None),
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
+            timezone: Set(None),
         };
         model.insert(&self.db).await.map_err(db_err)
     }
@@ -177,6 +182,9 @@ impl CameraRepo {
         }
         if let Some(v) = input.retention_disk_threshold_percent {
             active.retention_disk_threshold_percent = Set(v);
+        }
+        if let Some(v) = input.timezone {
+            active.timezone = Set(v);
         }
 
         active.updated_at = Set(now());

@@ -12,7 +12,13 @@ use vms_media::MediaManager;
 
 use crate::coverage::compute_day_coverage;
 use crate::recording_intent::reconcile_recording_intent;
+use crate::time_helpers::{local_to_utc, parse_iana_tz};
 use crate::{pipeline_registry::RegistrySnapshot, PipelineRegistry, TriggerEvaluator};
+
+/// A camera's own `timezone` override, if set, else `default_timezone`.
+fn resolve_camera_timezone(camera_timezone: Option<&str>, default_timezone: &str) -> chrono_tz::Tz {
+    parse_iana_tz(camera_timezone.unwrap_or(default_timezone))
+}
 
 /// Seconds between samples during normal operation (first sleep and default).
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -69,6 +75,9 @@ pub struct CoverageConfig {
     pub camera_repo: CameraRepo,
     pub coverage_repo: DailyRecordingCoverageRepo,
     pub retention_days: u32,
+    /// IANA timezone used for any camera with no `timezone` override of its
+    /// own. Invalid or unrecognised names fall back to UTC.
+    pub default_timezone: String,
 }
 
 /// Recording-intent reconciliation configuration, set once via
@@ -358,16 +367,27 @@ impl StatMonitor {
         recording_repo: &RecordingRepo,
         days: HashSet<(Uuid, chrono::NaiveDate)>,
     ) {
-        let coverage_repo = {
+        let (camera_repo, coverage_repo, default_timezone) = {
             let guard = self.coverage.lock().unwrap();
             let Some(cfg) = guard.as_ref() else {
                 return;
             };
-            cfg.coverage_repo.clone()
+            (
+                cfg.camera_repo.clone(),
+                cfg.coverage_repo.clone(),
+                cfg.default_timezone.clone(),
+            )
         };
 
         for (camera_id, day) in days {
-            self.recompute_and_store_day(recording_repo, &coverage_repo, camera_id, day, true)
+            let camera_timezone = camera_repo
+                .get(camera_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|c| c.timezone);
+            let tz = resolve_camera_timezone(camera_timezone.as_deref(), &default_timezone);
+            self.recompute_and_store_day(recording_repo, &coverage_repo, camera_id, day, tz, true)
                 .await;
         }
     }
@@ -391,7 +411,7 @@ impl StatMonitor {
             *last_run = Some(Instant::now());
         }
 
-        let (recording_repo, camera_repo, coverage_repo, retention_days) = {
+        let (recording_repo, camera_repo, coverage_repo, retention_days, default_timezone) = {
             let guard = self.coverage.lock().unwrap();
             let Some(cfg) = guard.as_ref() else {
                 return;
@@ -401,6 +421,7 @@ impl StatMonitor {
                 cfg.camera_repo.clone(),
                 cfg.coverage_repo.clone(),
                 cfg.retention_days,
+                cfg.default_timezone.clone(),
             )
         };
 
@@ -412,12 +433,21 @@ impl StatMonitor {
             }
         };
 
-        let today = chrono::Utc::now().date_naive();
         let mut backfill_budget = MAX_COVERAGE_BACKFILL_PER_TICK;
 
         for camera in &cameras {
-            self.recompute_and_store_day(&recording_repo, &coverage_repo, camera.id, today, false)
-                .await;
+            let tz = resolve_camera_timezone(camera.timezone.as_deref(), &default_timezone);
+            let today = chrono::Utc::now().with_timezone(&tz).date_naive();
+
+            self.recompute_and_store_day(
+                &recording_repo,
+                &coverage_repo,
+                camera.id,
+                today,
+                tz,
+                false,
+            )
+            .await;
 
             if backfill_budget == 0 {
                 continue;
@@ -450,6 +480,7 @@ impl StatMonitor {
                     &coverage_repo,
                     camera.id,
                     day,
+                    tz,
                     false,
                 )
                 .await;
@@ -458,8 +489,9 @@ impl StatMonitor {
         }
     }
 
-    /// Compute one camera's coverage for `day` (UTC) from its current chunks
-    /// and upsert the row. `day < today` is finalized; `day == today` isn't.
+    /// Compute one camera's coverage for `day` in `tz` (that camera's own
+    /// resolved timezone) from its current chunks, and upsert the row.
+    /// `day < today` (also in `tz`) is finalized; `day == today` isn't.
     /// `mark_purged_if_empty` is only `true` from the retention-purge hook —
     /// a backfilled day with zero chunks means "never recorded," not
     /// "recorded, then purged," so backfill/today recomputes never set it.
@@ -469,13 +501,17 @@ impl StatMonitor {
         coverage_repo: &DailyRecordingCoverageRepo,
         camera_id: Uuid,
         day: chrono::NaiveDate,
+        tz: chrono_tz::Tz,
         mark_purged_if_empty: bool,
     ) {
-        let Some(day_start) = day.and_hms_opt(0, 0, 0) else {
+        let (Some(day_start_local), Some(next_day_start_local)) = (
+            day.and_hms_opt(0, 0, 0),
+            (day + chrono::Duration::days(1)).and_hms_opt(0, 0, 0),
+        ) else {
             return;
         };
-        let day_start = day_start.and_utc().fixed_offset();
-        let day_end = day_start + chrono::Duration::days(1);
+        let day_start = local_to_utc(tz, day_start_local).fixed_offset();
+        let day_end = local_to_utc(tz, next_day_start_local).fixed_offset();
 
         let chunks = match recording_repo
             .list_starting_in_range_for_camera(camera_id, day_start, day_end)
@@ -494,7 +530,8 @@ impl StatMonitor {
         };
 
         let result = compute_day_coverage(&chunks);
-        let is_finalized = day < chrono::Utc::now().date_naive();
+        let today_in_tz = chrono::Utc::now().with_timezone(&tz).date_naive();
+        let is_finalized = day < today_in_tz;
         let purged_by_retention = mark_purged_if_empty && result.chunk_count == 0;
 
         if let Err(e) = coverage_repo
@@ -950,5 +987,25 @@ mod tests {
         // RAM will likely be > 0 on a live system; CPU baseline is ~0 on first
         // call but any value within 20% of 0.01 counts.  Just verify no panic.
         let _ = mon.poll();
+    }
+
+    // -- resolve_camera_timezone --
+
+    #[test]
+    fn resolve_camera_timezone_prefers_the_camera_override() {
+        let tz = resolve_camera_timezone(Some("Asia/Tehran"), "UTC");
+        assert_eq!(tz, chrono_tz::Asia::Tehran);
+    }
+
+    #[test]
+    fn resolve_camera_timezone_falls_back_to_the_default() {
+        let tz = resolve_camera_timezone(None, "Europe/Berlin");
+        assert_eq!(tz, chrono_tz::Europe::Berlin);
+    }
+
+    #[test]
+    fn resolve_camera_timezone_falls_back_to_utc_when_both_are_unset() {
+        let tz = resolve_camera_timezone(None, "UTC");
+        assert_eq!(tz, chrono_tz::Tz::UTC);
     }
 }

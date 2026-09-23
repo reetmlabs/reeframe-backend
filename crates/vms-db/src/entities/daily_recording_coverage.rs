@@ -7,8 +7,8 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub camera_id: Uuid,
-    /// UTC calendar day this row summarizes — deliberately UTC, not the
-    /// viewer's local timezone (see `coverage.rs`'s module doc for why).
+    /// Calendar day this row summarizes, in this camera's own configured
+    /// timezone, not the viewer's (see `coverage.rs`'s module doc for why).
     pub day: Date,
     /// Sum of merged session spans for `day` — an in-progress session
     /// contributes 0 until it closes, same as the reference algorithm this
