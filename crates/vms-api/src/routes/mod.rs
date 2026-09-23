@@ -18,6 +18,7 @@ mod settings;
 mod sources;
 mod thumbnails;
 mod tile_profiles;
+mod timezone;
 mod users;
 mod webhooks;
 
@@ -43,6 +44,7 @@ pub use tile_profiles::{
     TileCameraBindingDto, TileFormationDto, TileProfileDto, UpdateTileFormationBody,
     UpdateTileProfileBody,
 };
+pub use timezone::{CameraTimezoneDto, UpdateCameraTimezoneBody};
 pub use users::{ApiKeyDto, CreateApiKeyBody, CreatedApiKeyDto};
 
 use salvo::prelude::*;
@@ -129,6 +131,11 @@ fn protected_routes() -> Router {
                             Router::with_path("retention-policy")
                                 .get(retention::get_retention_policy)
                                 .patch(retention::update_retention_policy),
+                        )
+                        .push(
+                            Router::with_path("timezone")
+                                .get(timezone::get_camera_timezone)
+                                .patch(timezone::update_camera_timezone),
                         )
                         .push(
                             Router::with_path("thumbnails").push(
