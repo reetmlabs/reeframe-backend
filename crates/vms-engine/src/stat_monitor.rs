@@ -988,4 +988,24 @@ mod tests {
         // call but any value within 20% of 0.01 counts.  Just verify no panic.
         let _ = mon.poll();
     }
+
+    // -- resolve_camera_timezone --
+
+    #[test]
+    fn resolve_camera_timezone_prefers_the_camera_override() {
+        let tz = resolve_camera_timezone(Some("Asia/Tehran"), "UTC");
+        assert_eq!(tz, chrono_tz::Asia::Tehran);
+    }
+
+    #[test]
+    fn resolve_camera_timezone_falls_back_to_the_default() {
+        let tz = resolve_camera_timezone(None, "Europe/Berlin");
+        assert_eq!(tz, chrono_tz::Europe::Berlin);
+    }
+
+    #[test]
+    fn resolve_camera_timezone_falls_back_to_utc_when_both_are_unset() {
+        let tz = resolve_camera_timezone(None, "UTC");
+        assert_eq!(tz, chrono_tz::Tz::UTC);
+    }
 }
