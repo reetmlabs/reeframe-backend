@@ -55,6 +55,10 @@ pub struct RecordingsConfig {
     /// percentage, delete the oldest finalized recordings first until it
     /// drops back under it. `0` disables disk-threshold cleanup.
     pub retention_disk_threshold_percent: f64,
+    /// IANA timezone (e.g. "Europe/Berlin") used to compute daily recording
+    /// coverage day boundaries for any camera with no timezone override of
+    /// its own.
+    pub timezone: String,
 }
 
 impl Default for RecordingsConfig {
@@ -62,6 +66,7 @@ impl Default for RecordingsConfig {
         Self {
             retention_days: 30,
             retention_disk_threshold_percent: 90.0,
+            timezone: "UTC".into(),
         }
     }
 }

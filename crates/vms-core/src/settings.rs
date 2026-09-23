@@ -36,6 +36,11 @@ pub const KNOWN_SETTINGS: &[SettingMeta] = &[
         sensitive: false,
     },
     SettingMeta {
+        key: "recordings.timezone",
+        hot: false,
+        sensitive: false,
+    },
+    SettingMeta {
         key: "media.chunk_duration_secs",
         hot: false,
         sensitive: false,
