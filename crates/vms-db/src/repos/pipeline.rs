@@ -2705,6 +2705,7 @@ mod tests {
             retention_days: Set(None),
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
+            timezone: Set(None),
         }
         .insert(&repo.db)
         .await
@@ -2960,6 +2961,7 @@ mod tests {
             retention_days: Set(None),
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
+            timezone: Set(None),
         }
         .insert(&repo.db)
         .await
