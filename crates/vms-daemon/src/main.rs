@@ -558,6 +558,7 @@ async fn main() -> anyhow::Result<()> {
         camera_repo: camera_repo.clone(),
         coverage_repo: daily_coverage_repo.clone(),
         retention_days: cfg.recordings.retention_days,
+        default_timezone: cfg.recordings.timezone.clone(),
     });
     stat_monitor.set_recording_intent(RecordingIntentConfig {
         camera_repo: camera_repo.clone(),

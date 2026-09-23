@@ -12,12 +12,12 @@
 //! "a new day always forces a new session" rule falls out for free — there's
 //! no cross-day chunk in the input to force a split against.
 //!
-//! One deliberate deviation from the frontend: day boundaries here are UTC,
-//! not the viewing device's local timezone (the frontend has no concept of
-//! a shared canonical timezone to bucket by, since a server serves many
-//! viewers who may be in different zones). A chunk within a few hours of UTC
-//! midnight can land on a different calendar day here than in the frontend's
-//! own on-demand fallback — accepted as a known limitation.
+//! One deliberate deviation from the frontend: day boundaries here are each
+//! camera's own configured timezone (`Camera::timezone`, falling back to
+//! `[recordings] timezone`, falling back to UTC), not the viewing device's
+//! local timezone — a server serves many viewers who may be in different
+//! zones, but a recording is tied to where its camera physically is, not
+//! to whoever happens to be looking at it right now.
 
 use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
