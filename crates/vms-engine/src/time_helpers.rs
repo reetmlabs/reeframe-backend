@@ -71,4 +71,28 @@ mod tests {
         let tz = parse_iana_tz("Not/A/Timezone");
         assert_eq!(tz, Tz::UTC);
     }
+
+    #[test]
+    fn local_to_utc_converts_a_positive_offset() {
+        // Tehran is UTC+03:30 with no DST. Local midnight is the previous
+        // UTC day, 20:30.
+        let midnight = chrono::NaiveDate::from_ymd_opt(2026, 9, 22)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let utc = local_to_utc(chrono_tz::Asia::Tehran, midnight);
+        assert_eq!(utc.to_string(), "2026-09-21 20:30:00 UTC");
+    }
+
+    #[test]
+    fn local_to_utc_resolves_an_ambiguous_dst_fallback_time() {
+        // 2026-11-01 01:30 America/New_York occurs twice (DST ends at 2am).
+        // Must resolve to a valid instant rather than panicking.
+        let ambiguous = chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+        let utc = local_to_utc(chrono_tz::America::New_York, ambiguous);
+        assert!(utc.to_string().starts_with("2026-11-01"));
+    }
 }
