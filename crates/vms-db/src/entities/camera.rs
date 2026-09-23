@@ -50,6 +50,10 @@ pub struct Model {
     /// source of truth boot recovery and reconnect handling reconcile
     /// against, so a manually-started recording survives a restart.
     pub desired_recording: bool,
+    /// Per-camera IANA timezone (e.g. "Europe/Berlin") used to compute daily
+    /// recording coverage day boundaries. `None` inherits the global
+    /// `[recordings] timezone` default.
+    pub timezone: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
