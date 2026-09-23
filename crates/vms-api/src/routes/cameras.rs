@@ -247,6 +247,7 @@ pub async fn update_camera(
         enabled: body.enabled,
         retention_days: None,
         retention_disk_threshold_percent: None,
+        timezone: None,
     };
 
     let camera = state.camera_repo.update(id, input).await?;

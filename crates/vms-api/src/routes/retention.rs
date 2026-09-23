@@ -76,6 +76,7 @@ pub async fn update_retention_policy(
                 enabled: None,
                 retention_days: body.retention_days,
                 retention_disk_threshold_percent: body.retention_disk_threshold_percent,
+                timezone: None,
             },
         )
         .await?;
