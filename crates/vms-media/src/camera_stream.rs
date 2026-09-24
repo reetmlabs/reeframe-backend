@@ -1493,3 +1493,79 @@ mod byte_stream_caps_tests {
     }
 }
 
+#[cfg(test)]
+mod recording_branch_avc_bridge_tests {
+    use super::*;
+
+    /// `splitmuxsink`'s internal muxer only accepts H264/H265 in avc/avc3,
+    /// never byte-stream — the format `build_camera_stream`'s shared parser
+    /// forces onto `tee` for `extract_clip`'s sake. `build_recording_branch`
+    /// must insert its own converting parser for those codecs.
+    #[test]
+    fn build_recording_branch_adds_a_recparse_for_h264() {
+        gstreamer::init().ok();
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_queue, recparse, _splitmux) = build_recording_branch(
+            Uuid::new_v4(),
+            std::path::Path::new("/tmp"),
+            60,
+            &naming,
+            &tx,
+        )
+        .unwrap();
+        assert!(recparse.is_some(), "H264 must get a converting recparse");
+        assert_eq!(recparse.unwrap().factory().unwrap().name(), "h264parse");
+    }
+
+    #[test]
+    fn build_recording_branch_has_no_recparse_when_codec_is_unknown() {
+        gstreamer::init().ok();
+        let naming = ChunkNaming::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_queue, recparse, _splitmux) = build_recording_branch(
+            Uuid::new_v4(),
+            std::path::Path::new("/tmp"),
+            60,
+            &naming,
+            &tx,
+        )
+        .unwrap();
+        assert!(recparse.is_none());
+    }
+
+    /// Regression test for the actual bug: linking `queue` straight into
+    /// `splitmuxsink` once `tee`'s feed is already fixed to byte-stream/au
+    /// fails outright (`mp4mux` cannot mux byte-stream H264). Routing
+    /// through a converting `recparse` first must succeed.
+    #[test]
+    fn recording_branch_links_end_to_end_despite_byte_stream_tee_feed() {
+        gstreamer::init().ok();
+
+        let camera_id = Uuid::new_v4();
+        let pipeline = gstreamer::Pipeline::new();
+        let tee = gstreamer::ElementFactory::make("tee")
+            .name(tee_name(camera_id))
+            .build()
+            .unwrap();
+        pipeline.add(&tee).unwrap();
+
+        // Fix tee's sink to byte-stream/au, same as the live video chain does.
+        let upstream = gstreamer::ElementFactory::make("capsfilter")
+            .property("caps", byte_stream_au_caps("video/x-h264"))
+            .build()
+            .unwrap();
+        pipeline.add(&upstream).unwrap();
+        upstream.link(&tee).unwrap();
+
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let dir = std::env::temp_dir();
+
+        attach_recording_branch(camera_id, &pipeline, &naming, &tx, &dir, 60)
+            .expect("recording branch must link even though tee's feed is byte-stream/au");
+        assert!(is_recording_attached(camera_id, &pipeline));
+    }
+}
