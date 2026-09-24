@@ -122,6 +122,13 @@ pub(crate) fn build_sub_stream(
 
         if let Err(e) = gstreamer::Element::link_many([&depay, &parse, &tee]) {
             tracing::error!(camera_id = %cam_id, "sub-stream link depay->parse->tee: {e}");
+            // Same cleanup as camera_stream.rs's main pipeline: remove the
+            // half-wired elements so the next reconnect retries the link
+            // instead of assuming they're already fully wired.
+            for el in [&depay, &parse] {
+                el.set_state(gstreamer::State::Null).ok();
+                gst_pipeline.remove(el).ok();
+            }
             return;
         }
 

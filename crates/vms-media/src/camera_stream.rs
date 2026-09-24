@@ -273,6 +273,13 @@ pub(crate) fn build_camera_stream(
         };
         if let Err(e) = link_result {
             tracing::error!(camera_id = %cam_id, "link depay->parse->tee: {e}");
+            // Tear the half-wired elements back out — otherwise the next
+            // reconnect finds `depay` already present, assumes the chain is
+            // fully wired (see the branch above), and never retries the link.
+            for el in [&depay, &parse] {
+                el.set_state(gstreamer::State::Null).ok();
+                gst_pipeline.remove(el).ok();
+            }
             return;
         }
 
