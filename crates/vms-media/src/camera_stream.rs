@@ -273,6 +273,13 @@ pub(crate) fn build_camera_stream(
         };
         if let Err(e) = link_result {
             tracing::error!(camera_id = %cam_id, "link depay->parse->tee: {e}");
+            // Tear the half-wired elements back out — otherwise the next
+            // reconnect finds `depay` already present, assumes the chain is
+            // fully wired (see the branch above), and never retries the link.
+            for el in [&depay, &parse] {
+                el.set_state(gstreamer::State::Null).ok();
+                gst_pipeline.remove(el).ok();
+            }
             return;
         }
 
@@ -313,24 +320,47 @@ pub(crate) fn build_camera_stream(
 // `remux_faststart`) — more disk I/O per chunk, but completely decoupled
 // from the live pipeline's own state.
 
-/// Build the recording branch — `queue -> splitmuxsink`, with
+/// Build the recording branch — `queue -> [recparse ->] splitmuxsink`, with
 /// `format-location-full` wired to the naming/chunk-event machinery — as a
-/// standalone, unattached pair of elements. Used both for the initial
+/// standalone, unattached set of elements. Used both for the initial
 /// pipeline construction (`build_camera_stream`) and to build a fresh
 /// replacement on every reconnect (`rebuild_recording_branch`) — the caller
 /// adds the returned elements to the pipeline and links them to `tee`.
+///
+/// `recparse` (`Some` for H264/H265) restructures `tee`'s byte-stream/au
+/// feed back into `avc`/`avc3` — `splitmuxsink`'s muxer only accepts H264/
+/// H265 in that format, never byte-stream, so a second parser instance is
+/// needed here even though the shared live-pipeline parser is forced to
+/// byte-stream for `extract_clip`'s sake (see `byte_stream_au_caps`).
 fn build_recording_branch(
     camera_id: Uuid,
     recording_dir: &Path,
     chunk_duration_secs: u64,
     naming: &Arc<ChunkNaming>,
     chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
-) -> Result<(gstreamer::Element, gstreamer::Element), VmsError> {
+) -> Result<
+    (
+        gstreamer::Element,
+        Option<gstreamer::Element>,
+        gstreamer::Element,
+    ),
+    VmsError,
+> {
     // A fresh instance has nothing open yet — clears any stale path left
     // over from a prior recording session so a drain issued before this
     // instance's first fragment opens doesn't wait on one that will never
     // close (see `watch_current_close`).
     *naming.current_path.lock().unwrap() = None;
+
+    let recparse = match naming.codec.lock().unwrap().as_deref().and_then(codec_for) {
+        Some(codec) if codec.parse_caps_mime.is_some() => Some(
+            gstreamer::ElementFactory::make(codec.parse_factory)
+                .name(format!("cam_{}_recparse", camera_id.as_simple()))
+                .build()
+                .map_err(|e| VmsError::Media(format!("recording {}: {e}", codec.parse_factory)))?,
+        ),
+        _ => None,
+    };
 
     let queue = gstreamer::ElementFactory::make("queue")
         .name(format!("cam_{}_recqueue", camera_id.as_simple()))
@@ -380,15 +410,44 @@ fn build_recording_branch(
         });
     }
 
-    Ok((queue, splitmux))
+    Ok((queue, recparse, splitmux))
 }
 
 fn tee_name(camera_id: Uuid) -> String {
     format!("cam_{}_tee", camera_id.as_simple())
 }
 
+/// How long to wait for the video codec to wire into `tee` before giving up
+/// — SDP negotiation is normally sub-second, this is generous headroom.
+const CODEC_WIRE_TIMEOUT: Duration = Duration::from_secs(5);
+const CODEC_WIRE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Wait until the live pipeline's video codec is wired into `tee` (its sink
+/// pad linked), or `CODEC_WIRE_TIMEOUT` elapses. Attaching the recording
+/// branch before this finishes lets `splitmuxsink` link into `tee` first,
+/// which narrows `tee`'s negotiable caps and can permanently fail the video
+/// link — see `build_camera_stream`'s pad-added handler.
+pub(crate) async fn wait_for_codec_wired(gst_pipeline: &gstreamer::Pipeline, camera_id: Uuid) {
+    let tee_name = tee_name(camera_id);
+    let deadline = tokio::time::Instant::now() + CODEC_WIRE_TIMEOUT;
+    loop {
+        let linked = gst_pipeline
+            .by_name(&tee_name)
+            .and_then(|tee| tee.static_pad("sink"))
+            .is_some_and(|p| p.is_linked());
+        if linked || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(CODEC_WIRE_POLL_INTERVAL).await;
+    }
+}
+
 fn recqueue_name(camera_id: Uuid) -> String {
     format!("cam_{}_recqueue", camera_id.as_simple())
+}
+
+fn recparse_name(camera_id: Uuid) -> String {
+    format!("cam_{}_recparse", camera_id.as_simple())
 }
 
 fn splitmux_name(camera_id: Uuid) -> String {
@@ -423,7 +482,7 @@ pub(crate) fn attach_recording_branch(
         .by_name(&tee_name(camera_id))
         .ok_or_else(|| VmsError::Media("attach recording branch: tee not found".into()))?;
 
-    let (queue, splitmux) = build_recording_branch(
+    let (queue, recparse, splitmux) = build_recording_branch(
         camera_id,
         recording_dir,
         chunk_duration_secs,
@@ -431,8 +490,12 @@ pub(crate) fn attach_recording_branch(
         chunk_event_tx,
     )?;
 
+    let mut new_elements: Vec<&gstreamer::Element> = vec![&queue, &splitmux];
+    if let Some(p) = &recparse {
+        new_elements.push(p);
+    }
     gst_pipeline
-        .add_many([&queue, &splitmux])
+        .add_many(new_elements)
         .map_err(|e| VmsError::Media(format!("attach recording branch: add_many: {e}")))?;
 
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
@@ -444,13 +507,47 @@ pub(crate) fn attach_recording_branch(
     tee_src
         .link(&queue_sink)
         .map_err(|e| VmsError::Media(format!("attach recording branch: link tee->queue: {e}")))?;
-    queue.link(&splitmux).map_err(|e| {
-        VmsError::Media(format!(
-            "attach recording branch: link queue->splitmux: {e}"
-        ))
+
+    // Direct pad links throughout — `Element::link()`'s generic pad search
+    // probes splitmuxsink's request pad speculatively and wrongly rejects it
+    // as incompatible against upstream's already-fixed caps.
+    let queue_src = queue.static_pad("src").ok_or_else(|| {
+        VmsError::Media("attach recording branch: new queue has no src pad".into())
+    })?;
+    let splitmux_sink = splitmux.request_pad_simple("video").ok_or_else(|| {
+        VmsError::Media("attach recording branch: splitmuxsink has no video pad template".into())
     })?;
 
-    for el in [&queue, &splitmux] {
+    if let Some(p) = &recparse {
+        let recparse_sink = p.static_pad("sink").ok_or_else(|| {
+            VmsError::Media("attach recording branch: recparse has no sink pad".into())
+        })?;
+        let recparse_src = p.static_pad("src").ok_or_else(|| {
+            VmsError::Media("attach recording branch: recparse has no src pad".into())
+        })?;
+        queue_src.link(&recparse_sink).map_err(|e| {
+            VmsError::Media(format!(
+                "attach recording branch: link queue->recparse: {e:?}"
+            ))
+        })?;
+        recparse_src.link(&splitmux_sink).map_err(|e| {
+            VmsError::Media(format!(
+                "attach recording branch: link recparse->splitmux: {e:?}"
+            ))
+        })?;
+    } else {
+        queue_src.link(&splitmux_sink).map_err(|e| {
+            VmsError::Media(format!(
+                "attach recording branch: link queue->splitmux: {e:?}"
+            ))
+        })?;
+    }
+
+    let mut synced = vec![&queue, &splitmux];
+    if let Some(p) = &recparse {
+        synced.push(p);
+    }
+    for el in synced {
         el.sync_state_with_parent().map_err(|e| {
             VmsError::Media(format!(
                 "attach recording branch: sync_state_with_parent: {e}"
@@ -487,6 +584,7 @@ pub(crate) fn detach_recording_branch(
     let Some(splitmux) = gst_pipeline.by_name(&splitmux_name(camera_id)) else {
         return Ok(());
     };
+    let recparse = gst_pipeline.by_name(&recparse_name(camera_id));
 
     let queue_sink = queue
         .static_pad("sink")
@@ -536,6 +634,10 @@ pub(crate) fn detach_recording_branch(
         splitmux.set_state(gstreamer::State::Null).ok();
         pipeline_clone.remove(&queue).ok();
         pipeline_clone.remove(&splitmux).ok();
+        if let Some(p) = recparse {
+            p.set_state(gstreamer::State::Null).ok();
+            pipeline_clone.remove(&p).ok();
+        }
     });
 
     Ok(())
@@ -684,6 +786,7 @@ fn rebuild_recording_branch(
     let old_splitmux = gst_pipeline
         .by_name(&splitmux_name(camera_id))
         .ok_or_else(|| VmsError::Media("rebuild recording branch: splitmux not found".into()))?;
+    let old_recparse = gst_pipeline.by_name(&recparse_name(camera_id));
 
     // Unlink and release the tee's request pad feeding the old queue, then
     // remove the old elements.
@@ -694,8 +797,12 @@ fn rebuild_recording_branch(
         tee_src.unlink(&old_queue_sink).ok();
         tee.release_request_pad(&tee_src);
     }
+    let mut old_elements: Vec<&gstreamer::Element> = vec![&old_queue, &old_splitmux];
+    if let Some(p) = &old_recparse {
+        old_elements.push(p);
+    }
     gst_pipeline
-        .remove_many([&old_queue, &old_splitmux])
+        .remove_many(old_elements)
         .map_err(|e| VmsError::Media(format!("rebuild recording branch: remove_many: {e}")))?;
 
     attach_recording_branch(
@@ -1383,5 +1490,82 @@ mod byte_stream_caps_tests {
         let s = caps.structure(0).unwrap();
         assert_eq!(s.get::<&str>("stream-format").unwrap(), "byte-stream");
         assert_eq!(s.get::<&str>("alignment").unwrap(), "au");
+    }
+}
+
+#[cfg(test)]
+mod recording_branch_avc_bridge_tests {
+    use super::*;
+
+    /// `splitmuxsink`'s internal muxer only accepts H264/H265 in avc/avc3,
+    /// never byte-stream — the format `build_camera_stream`'s shared parser
+    /// forces onto `tee` for `extract_clip`'s sake. `build_recording_branch`
+    /// must insert its own converting parser for those codecs.
+    #[test]
+    fn build_recording_branch_adds_a_recparse_for_h264() {
+        gstreamer::init().ok();
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_queue, recparse, _splitmux) = build_recording_branch(
+            Uuid::new_v4(),
+            std::path::Path::new("/tmp"),
+            60,
+            &naming,
+            &tx,
+        )
+        .unwrap();
+        assert!(recparse.is_some(), "H264 must get a converting recparse");
+        assert_eq!(recparse.unwrap().factory().unwrap().name(), "h264parse");
+    }
+
+    #[test]
+    fn build_recording_branch_has_no_recparse_when_codec_is_unknown() {
+        gstreamer::init().ok();
+        let naming = ChunkNaming::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_queue, recparse, _splitmux) = build_recording_branch(
+            Uuid::new_v4(),
+            std::path::Path::new("/tmp"),
+            60,
+            &naming,
+            &tx,
+        )
+        .unwrap();
+        assert!(recparse.is_none());
+    }
+
+    /// Regression test for the actual bug: linking `queue` straight into
+    /// `splitmuxsink` once `tee`'s feed is already fixed to byte-stream/au
+    /// fails outright (`mp4mux` cannot mux byte-stream H264). Routing
+    /// through a converting `recparse` first must succeed.
+    #[test]
+    fn recording_branch_links_end_to_end_despite_byte_stream_tee_feed() {
+        gstreamer::init().ok();
+
+        let camera_id = Uuid::new_v4();
+        let pipeline = gstreamer::Pipeline::new();
+        let tee = gstreamer::ElementFactory::make("tee")
+            .name(tee_name(camera_id))
+            .build()
+            .unwrap();
+        pipeline.add(&tee).unwrap();
+
+        // Fix tee's sink to byte-stream/au, same as the live video chain does.
+        let upstream = gstreamer::ElementFactory::make("capsfilter")
+            .property("caps", byte_stream_au_caps("video/x-h264"))
+            .build()
+            .unwrap();
+        pipeline.add(&upstream).unwrap();
+        upstream.link(&tee).unwrap();
+
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let dir = std::env::temp_dir();
+
+        attach_recording_branch(camera_id, &pipeline, &naming, &tx, &dir, 60)
+            .expect("recording branch must link even though tee's feed is byte-stream/au");
+        assert!(is_recording_attached(camera_id, &pipeline));
     }
 }
