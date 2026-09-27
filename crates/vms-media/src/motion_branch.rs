@@ -17,15 +17,16 @@
 //! relative to real inference — and it costs zero additional camera-side
 //! connections, which is the constraint that actually matters here.
 //!
-//! Branch: `tee -> queue -> decodebin -> videoconvert -> videoscale ->
-//! capsfilter(GRAY8, MOTION_FRAME_WIDTH x MOTION_FRAME_HEIGHT) -> appsink`.
-//! The tee's encoded elementary stream (already depayed+parsed by the main
-//! pipeline) needs only `decodebin`'s own dynamic output pad handled — same
-//! shape as `manager.rs`'s `capture_snapshot` branch, just persistent
-//! instead of one-shot.
+//! Branch: `tee -> queue -> <software decoder> -> videorate(max 2 fps) ->
+//! videoconvert -> videoscale -> capsfilter(GRAY8, MOTION_FRAME_WIDTH x
+//! MOTION_FRAME_HEIGHT) -> appsink`. The decoder is picked from the tee's caps
+//! when they first reach the queue. It is pinned to a software decoder because
+//! `decodebin` may pick a hardware one, and a hardware decoder rejecting the
+//! stream's profile errors out the whole camera pipeline. Every frame still has
+//! to be decoded (inter frames need their references), but `videorate` drops
+//! all but [`SAMPLE_RATE_FPS`] per second before conversion and scaling.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gstreamer::prelude::*;
 use tokio::sync::mpsc;
@@ -35,10 +36,20 @@ use vms_core::VmsError;
 
 use crate::motion::{MotionAnalyzer, MotionSignal, MOTION_FRAME_HEIGHT, MOTION_FRAME_WIDTH};
 
-/// Minimum spacing between analyzed frames. Motion/tamper detection doesn't
-/// need every decoded frame, and analyzing at a fixed low rate keeps CPU
-/// cost flat regardless of the source stream's actual frame rate.
-const MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+/// Frames per second handed to the analyzer. `MotionAnalyzer` counts frames,
+/// not time, so its frozen-feed and hysteresis windows assume this rate.
+const SAMPLE_RATE_FPS: i32 = 2;
+
+/// Software decoders to try for each tee codec, in order of preference.
+fn decoder_candidates(caps_name: &str) -> &'static [&'static str] {
+    match caps_name {
+        "video/x-h264" => &["avdec_h264"],
+        "video/x-h265" => &["avdec_h265"],
+        "image/jpeg" => &["jpegdec"],
+        "video/x-av1" => &["dav1ddec", "av1dec", "avdec_av1"],
+        _ => &[],
+    }
+}
 
 // -- Element name helpers --
 
@@ -47,6 +58,9 @@ fn queue_name(id: Uuid) -> String {
 }
 fn decode_name(id: Uuid) -> String {
     format!("cam_{}_motiondecode", id.as_simple())
+}
+fn rate_name(id: Uuid) -> String {
+    format!("cam_{}_motionrate", id.as_simple())
 }
 fn convert_name(id: Uuid) -> String {
     format!("cam_{}_motionconvert", id.as_simple())
@@ -113,10 +127,12 @@ pub fn attach(
         .build()
         .map_err(|e| VmsError::Media(format!("motion queue: {e}")))?;
 
-    let decodebin = gstreamer::ElementFactory::make("decodebin")
-        .name(decode_name(camera_id))
+    let rate = gstreamer::ElementFactory::make("videorate")
+        .name(rate_name(camera_id))
+        .property("max-rate", SAMPLE_RATE_FPS)
+        .property("drop-only", true)
         .build()
-        .map_err(|e| VmsError::Media(format!("motion decodebin: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("motion videorate: {e}")))?;
 
     let convert = gstreamer::ElementFactory::make("videoconvert")
         .name(convert_name(camera_id))
@@ -149,7 +165,7 @@ pub fn attach(
     pipeline
         .add_many([
             &queue,
-            &decodebin,
+            &rate,
             &convert,
             &scale,
             &capsfilter,
@@ -158,6 +174,7 @@ pub fn attach(
         .map_err(|e| VmsError::Media(format!("motion add_many: {e}")))?;
 
     gstreamer::Element::link_many([
+        &rate,
         &convert,
         &scale,
         &capsfilter,
@@ -165,33 +182,30 @@ pub fn attach(
     ])
     .map_err(|e| VmsError::Media(format!("motion link chain: {e}")))?;
 
-    queue
-        .link(&decodebin)
-        .map_err(|e| VmsError::Media(format!("motion link queue->decodebin: {e}")))?;
-
-    // decodebin autoplugs the parser+decoder off the tee's already-depayed
-    // elementary stream and exposes decoded video on a dynamic src pad once
-    // it knows the stream shape (same pattern as `capture_snapshot`'s branch).
-    let convert_weak = convert.downgrade();
-    decodebin.connect_pad_added(move |_, src_pad| {
-        let Some(caps) = src_pad.current_caps() else {
-            return;
+    // The tee's codec is only known once caps flow, so the decoder is built
+    // and linked in front of `rate` when the first caps event leaves the queue.
+    let queue_src = queue
+        .static_pad("src")
+        .ok_or_else(|| VmsError::Media("motion queue has no src pad".into()))?;
+    let pipeline_weak = pipeline.downgrade();
+    let rate_weak = rate.downgrade();
+    queue_src.add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gstreamer::PadProbeData::Event(ref event)) = info.data else {
+            return gstreamer::PadProbeReturn::Ok;
         };
-        let Some(structure) = caps.structure(0) else {
-            return;
+        let gstreamer::EventView::Caps(caps_event) = event.view() else {
+            return gstreamer::PadProbeReturn::Ok;
         };
-        if !structure.name().starts_with("video/") {
-            return;
+        if pad.is_linked() {
+            return gstreamer::PadProbeReturn::Remove;
         }
-        let Some(convert) = convert_weak.upgrade() else {
-            return;
+        let (Some(pipeline), Some(rate)) = (pipeline_weak.upgrade(), rate_weak.upgrade()) else {
+            return gstreamer::PadProbeReturn::Remove;
         };
-        let Some(sink_pad) = convert.static_pad("sink") else {
-            return;
-        };
-        if !sink_pad.is_linked() {
-            src_pad.link(&sink_pad).ok();
+        if let Err(e) = link_decoder(&pipeline, pad, &rate, caps_event.caps(), camera_id) {
+            tracing::warn!(camera_id = %camera_id, error = %e, "Motion detection has no decoder for this stream");
         }
+        gstreamer::PadProbeReturn::Remove
     });
 
     // -- Link tee -> queue --
@@ -205,13 +219,12 @@ pub fn attach(
         .link(&queue_sink)
         .map_err(|e| VmsError::Media(format!("link tee->motionqueue: {e}")))?;
 
-    // -- Appsink callback: throttle to MIN_SAMPLE_INTERVAL, forward raw frames --
+    // -- Appsink callback: forward raw frames --
     // `drop = true` + a small `max_buffers` means GStreamer itself sheds
     // frames under load; `try_send` on a small bounded channel sheds them
     // again on the Rust side if the analyzer task is ever behind — either
     // way, a slow consumer never stalls the streaming thread.
     let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(2);
-    let last_sample = Arc::new(Mutex::new(Instant::now() - MIN_SAMPLE_INTERVAL));
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -219,15 +232,6 @@ pub fn attach(
                     .pull_sample()
                     .map_err(|_| gstreamer::FlowError::Error)?;
                 let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
-
-                {
-                    let mut last = last_sample.lock().unwrap();
-                    if last.elapsed() < MIN_SAMPLE_INTERVAL {
-                        return Ok(gstreamer::FlowSuccess::Ok);
-                    }
-                    *last = Instant::now();
-                }
-
                 let map = buffer
                     .map_readable()
                     .map_err(|_| gstreamer::FlowError::Error)?;
@@ -240,7 +244,7 @@ pub fn attach(
     // -- Bring new elements up to the pipeline's current state --
     for el in [
         &queue,
-        &decodebin,
+        &rate,
         &convert,
         &scale,
         &capsfilter,
@@ -292,6 +296,7 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
 
     let names = [
         decode_name(camera_id),
+        rate_name(camera_id),
         convert_name(camera_id),
         scale_name(camera_id),
         caps_name(camera_id),
@@ -368,6 +373,46 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
         tee.release_request_pad(&tee_src_clone);
     });
 
+    Ok(())
+}
+
+/// Build the software decoder for `caps` and link it between the queue's
+/// `queue_src` pad and `rate`. Runs on the streaming thread.
+fn link_decoder(
+    pipeline: &gstreamer::Pipeline,
+    queue_src: &gstreamer::Pad,
+    rate: &gstreamer::Element,
+    caps: &gstreamer::CapsRef,
+    camera_id: Uuid,
+) -> Result<(), VmsError> {
+    let caps_name = caps
+        .structure(0)
+        .map(|s| s.name().to_string())
+        .unwrap_or_default();
+    let factory = decoder_candidates(&caps_name)
+        .iter()
+        .find(|f| gstreamer::ElementFactory::find(f).is_some())
+        .ok_or_else(|| VmsError::Media(format!("no software decoder for '{caps_name}'")))?;
+
+    let decoder = gstreamer::ElementFactory::make(factory)
+        .name(decode_name(camera_id))
+        .build()
+        .map_err(|e| VmsError::Media(format!("motion {factory}: {e}")))?;
+    pipeline
+        .add(&decoder)
+        .map_err(|e| VmsError::Media(format!("motion add {factory}: {e}")))?;
+    decoder
+        .link(rate)
+        .map_err(|e| VmsError::Media(format!("motion link {factory}->videorate: {e}")))?;
+    decoder
+        .sync_state_with_parent()
+        .map_err(|e| VmsError::Media(format!("sync motion {factory}: {e}")))?;
+    let decoder_sink = decoder
+        .static_pad("sink")
+        .ok_or_else(|| VmsError::Media(format!("motion {factory} has no sink pad")))?;
+    queue_src
+        .link(&decoder_sink)
+        .map_err(|e| VmsError::Media(format!("motion link queue->{factory}: {e:?}")))?;
     Ok(())
 }
 
