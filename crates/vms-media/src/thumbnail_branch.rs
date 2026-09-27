@@ -16,6 +16,20 @@ use vms_core::VmsError;
 /// capture interval is.
 const JPEG_QUALITY: i32 = 75;
 
+/// How long the gate stays open waiting for the decoder to emit a frame
+/// before giving up until the next interval, so a stuck decoder can't
+/// leave every frame flowing into it.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A frame whose luma variance is below this is flat (levels²).
+const BLANK_VARIANCE_THRESHOLD: f64 = 4.0;
+/// Flat frames with mean luma at or below / at or above these are treated
+/// as black / white — covers both limited (16–235) and full range.
+const BLANK_BLACK_MAX_MEAN: f64 = 32.0;
+const BLANK_WHITE_MIN_MEAN: f64 = 224.0;
+/// Sample every Nth pixel on every Nth row when checking for a blank frame.
+const BLANK_SAMPLE_STEP: usize = 4;
+
 fn queue_name(id: Uuid) -> String {
     format!("cam_{}_thumbqueue", id.as_simple())
 }
@@ -25,11 +39,87 @@ fn decode_name(id: Uuid) -> String {
 fn convert_name(id: Uuid) -> String {
     format!("cam_{}_thumbconvert", id.as_simple())
 }
+fn capsfilter_name(id: Uuid) -> String {
+    format!("cam_{}_thumbcaps", id.as_simple())
+}
 fn encoder_name(id: Uuid) -> String {
     format!("cam_{}_thumbenc", id.as_simple())
 }
 fn sink_name(id: Uuid) -> String {
     format!("cam_{}_thumbsink", id.as_simple())
+}
+
+/// Decides which encoded frames reach the decoder. Throttling in the appsink
+/// is too late: by then every frame has been decoded and JPEG-encoded.
+/// Instead one keyframe per interval is let in, and the gate stays open
+/// until the decoder emits a frame (decoders may need a few more input
+/// frames before producing output).
+#[derive(Default)]
+struct CaptureGate {
+    last_capture: Option<Instant>,
+    capturing_since: Option<Instant>,
+}
+
+impl CaptureGate {
+    /// Whether an encoded buffer may pass into the decoder.
+    fn admit(&mut self, now: Instant, is_keyframe: bool, interval: Duration) -> bool {
+        match self.capturing_since {
+            Some(since) if now.duration_since(since) > CAPTURE_TIMEOUT => {
+                self.capturing_since = None;
+                self.last_capture = Some(now);
+                false
+            }
+            Some(_) => true,
+            None => {
+                let due = self
+                    .last_capture
+                    .is_none_or(|last| now.duration_since(last) >= interval);
+                if due && is_keyframe {
+                    self.capturing_since = Some(now);
+                }
+                due && is_keyframe
+            }
+        }
+    }
+
+    /// Whether a decoded frame is the one this capture was waiting for.
+    /// Closes the gate either way; later leftover frames are rejected.
+    fn take_decoded(&mut self, now: Instant) -> bool {
+        if self.capturing_since.take().is_none() {
+            return false;
+        }
+        self.last_capture = Some(now);
+        true
+    }
+}
+
+/// True for a completely black or completely white frame — what a camera
+/// with no signal typically sends — so it doesn't replace a real thumbnail.
+fn is_blank(luma: &[u8]) -> bool {
+    let n = luma.len() as f64;
+    if n == 0.0 {
+        return true;
+    }
+    let mean = luma.iter().map(|&b| b as f64).sum::<f64>() / n;
+    let variance = luma.iter().map(|&b| (b as f64 - mean).powi(2)).sum::<f64>() / n;
+    variance < BLANK_VARIANCE_THRESHOLD
+        && (mean <= BLANK_BLACK_MAX_MEAN || mean >= BLANK_WHITE_MIN_MEAN)
+}
+
+/// Subsampled luma of an I420 frame, or `None` if it can't be mapped.
+fn sample_luma(buffer: &gstreamer::BufferRef, caps: &gstreamer::CapsRef) -> Option<Vec<u8>> {
+    let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
+    let frame = gstreamer_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).ok()?;
+    let plane = frame.plane_data(0).ok()?;
+    let stride = info.stride()[0] as usize;
+    let (width, height) = (info.width() as usize, info.height() as usize);
+    let mut out =
+        Vec::with_capacity((width / BLANK_SAMPLE_STEP + 1) * (height / BLANK_SAMPLE_STEP + 1));
+    for row in (0..height).step_by(BLANK_SAMPLE_STEP) {
+        let line = plane.get(row * stride..row * stride + width)?;
+        out.extend(line.iter().step_by(BLANK_SAMPLE_STEP));
+    }
+    Some(out)
 }
 
 /// Handle to a running per-camera thumbnail-capture branch. Same shape as
@@ -54,7 +144,9 @@ impl ThumbnailHandle {
 
 /// Attach a thumbnail-capture branch to `tee_name`'s tee on `pipeline`.
 /// Writes one `{unix_ms}.jpg` file into `thumbnails_dir/cam_{id}/` at most
-/// once per `interval`. Safe to call while the pipeline is `Playing`.
+/// once per `interval`, decoding only the frames needed for it. Black or
+/// white frames are skipped, leaving the previous thumbnail current. Safe
+/// to call while the pipeline is `Playing`.
 pub fn attach(
     pipeline: &gstreamer::Pipeline,
     tee_name: &str,
@@ -84,6 +176,18 @@ pub fn attach(
         .build()
         .map_err(|e| VmsError::Media(format!("thumbnail videoconvert: {e}")))?;
 
+    // Fixed I420 so the blank-frame check can read the luma plane directly.
+    let capsfilter = gstreamer::ElementFactory::make("capsfilter")
+        .name(capsfilter_name(camera_id))
+        .property(
+            "caps",
+            gstreamer::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .build(),
+        )
+        .build()
+        .map_err(|e| VmsError::Media(format!("thumbnail capsfilter: {e}")))?;
+
     let encoder = gstreamer::ElementFactory::make("jpegenc")
         .name(encoder_name(camera_id))
         .property("quality", JPEG_QUALITY)
@@ -102,6 +206,7 @@ pub fn attach(
             &queue,
             &decodebin,
             &convert,
+            &capsfilter,
             &encoder,
             appsink.upcast_ref::<gstreamer::Element>(),
         ])
@@ -109,6 +214,7 @@ pub fn attach(
 
     gstreamer::Element::link_many([
         &convert,
+        &capsfilter,
         &encoder,
         appsink.upcast_ref::<gstreamer::Element>(),
     ])
@@ -152,11 +258,44 @@ pub fn attach(
         .link(&queue_sink)
         .map_err(|e| VmsError::Media(format!("link tee->thumbqueue: {e}")))?;
 
-    // Appsink callback: throttle to `interval`, forward encoded JPEG bytes.
-    // Encoding already happened in the pipeline (jpegenc) — nothing left
-    // to do downstream but rate-limit and write the bytes to disk.
+    let gate = Arc::new(Mutex::new(CaptureGate::default()));
+
+    let admit_gate = gate.clone();
+    queue_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+        let Some(buffer) = info.buffer() else {
+            return gstreamer::PadProbeReturn::Ok;
+        };
+        let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+        if admit_gate
+            .lock()
+            .unwrap()
+            .admit(Instant::now(), is_keyframe, interval)
+        {
+            gstreamer::PadProbeReturn::Ok
+        } else {
+            gstreamer::PadProbeReturn::Drop
+        }
+    });
+
+    let encoder_sink = encoder
+        .static_pad("sink")
+        .ok_or_else(|| VmsError::Media("thumbnail jpegenc has no sink pad".into()))?;
+    encoder_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |pad, info| {
+        if !gate.lock().unwrap().take_decoded(Instant::now()) {
+            return gstreamer::PadProbeReturn::Drop;
+        }
+        let (Some(buffer), Some(caps)) = (info.buffer(), pad.current_caps()) else {
+            return gstreamer::PadProbeReturn::Ok;
+        };
+        if sample_luma(buffer, &caps).is_some_and(|luma| is_blank(&luma)) {
+            tracing::debug!(camera_id = %camera_id, "Skipping blank thumbnail frame");
+            return gstreamer::PadProbeReturn::Drop;
+        }
+        gstreamer::PadProbeReturn::Ok
+    });
+
+    // Every sample reaching the appsink is an accepted capture.
     let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(2);
-    let last_capture = Arc::new(Mutex::new(Instant::now() - interval));
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -164,15 +303,6 @@ pub fn attach(
                     .pull_sample()
                     .map_err(|_| gstreamer::FlowError::Error)?;
                 let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
-
-                {
-                    let mut last = last_capture.lock().unwrap();
-                    if last.elapsed() < interval {
-                        return Ok(gstreamer::FlowSuccess::Ok);
-                    }
-                    *last = Instant::now();
-                }
-
                 let map = buffer
                     .map_readable()
                     .map_err(|_| gstreamer::FlowError::Error)?;
@@ -186,6 +316,7 @@ pub fn attach(
         &queue,
         &decodebin,
         &convert,
+        &capsfilter,
         &encoder,
         appsink.upcast_ref::<gstreamer::Element>(),
     ] {
@@ -234,6 +365,7 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
     let names = [
         decode_name(camera_id),
         convert_name(camera_id),
+        capsfilter_name(camera_id),
         encoder_name(camera_id),
         sink_name(camera_id),
     ];
@@ -309,4 +441,138 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod capture_gate_tests {
+    use super::*;
+
+    const INTERVAL: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn first_keyframe_is_admitted_and_delta_frames_before_it_are_not() {
+        let mut gate = CaptureGate::default();
+        let t0 = Instant::now();
+        assert!(!gate.admit(t0, false, INTERVAL));
+        assert!(gate.admit(t0, true, INTERVAL));
+    }
+
+    #[test]
+    fn gate_stays_open_until_a_frame_is_decoded_then_waits_an_interval() {
+        let mut gate = CaptureGate::default();
+        let t0 = Instant::now();
+        assert!(gate.admit(t0, true, INTERVAL));
+        assert!(gate.admit(t0 + Duration::from_millis(40), false, INTERVAL));
+        assert!(gate.take_decoded(t0 + Duration::from_millis(50)));
+        assert!(!gate.admit(t0 + Duration::from_secs(1), true, INTERVAL));
+        assert!(gate.admit(t0 + Duration::from_secs(31), true, INTERVAL));
+    }
+
+    #[test]
+    fn leftover_decoded_frames_after_the_capture_are_rejected() {
+        let mut gate = CaptureGate::default();
+        let t0 = Instant::now();
+        gate.admit(t0, true, INTERVAL);
+        assert!(gate.take_decoded(t0));
+        assert!(!gate.take_decoded(t0));
+    }
+
+    #[test]
+    fn a_decoder_that_never_emits_closes_the_gate_after_the_timeout() {
+        let mut gate = CaptureGate::default();
+        let t0 = Instant::now();
+        gate.admit(t0, true, INTERVAL);
+        let late = t0 + CAPTURE_TIMEOUT + Duration::from_millis(1);
+        assert!(!gate.admit(late, false, INTERVAL));
+        assert!(!gate.admit(late + Duration::from_secs(1), true, INTERVAL));
+    }
+
+    #[test]
+    fn black_and_white_frames_are_blank() {
+        assert!(is_blank(&[0; 64]));
+        assert!(is_blank(&[16; 64]));
+        assert!(is_blank(&[235; 64]));
+        assert!(is_blank(&[255; 64]));
+    }
+
+    #[test]
+    fn grey_or_textured_frames_are_not_blank() {
+        assert!(!is_blank(&[128; 64]));
+        let textured: Vec<u8> = (0..64).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect();
+        assert!(!is_blank(&textured));
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Runs a 25 fps H.264 test pattern with a keyframe every 10 frames,
+    /// shaped like the live tees (SPS/PPS on every keyframe), for `run`, and returns (frames that reached the decoder, JPEGs written).
+    async fn run_branch(pattern: &str, interval: Duration, run: Duration) -> (usize, usize) {
+        gstreamer::init().unwrap();
+        let camera_id = Uuid::new_v4();
+        let tee_name = format!("cam_{}_tee", camera_id.as_simple());
+        let pipeline = gstreamer::parse::launch(&format!(
+            "videotestsrc is-live=true pattern={pattern} ! \
+             video/x-raw,width=320,height=180,framerate=25/1 ! \
+             x264enc tune=zerolatency key-int-max=10 ! h264parse config-interval=-1 ! \
+             video/x-h264,stream-format=byte-stream,alignment=au ! tee name={tee_name}"
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("thumb_test_{}", camera_id.as_simple()));
+
+        // Attach before playing: a tee with no src pads fails the pipeline.
+        let handle = attach(&pipeline, &tee_name, camera_id, dir.clone(), interval).unwrap();
+
+        let decoded = Arc::new(AtomicUsize::new(0));
+        let counter = decoded.clone();
+        pipeline
+            .by_name(&queue_name(camera_id))
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                gstreamer::PadProbeReturn::Ok
+            });
+
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        tokio::time::sleep(run).await;
+        handle.stop().await;
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+
+        let written = std::fs::read_dir(dir.join(format!("cam_{}", camera_id.as_simple())))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        std::fs::remove_dir_all(&dir).ok();
+        (decoded.load(Ordering::SeqCst), written)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_frames_needed_for_each_capture_are_decoded() {
+        let (decoded, written) =
+            run_branch("ball", Duration::from_secs(1), Duration::from_secs(3)).await;
+        // ~75 frames flow through the tee; a handful per capture should reach the decoder.
+        assert!(
+            (2..=4).contains(&written),
+            "written = {written}, decoded = {decoded}"
+        );
+        assert!(
+            decoded <= written * 5,
+            "decoded = {decoded}, written = {written}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn black_and_white_footage_writes_no_thumbnail() {
+        for pattern in ["black", "white"] {
+            let (_, written) =
+                run_branch(pattern, Duration::from_secs(1), Duration::from_secs(2)).await;
+            assert_eq!(written, 0, "pattern {pattern}");
+        }
+    }
 }

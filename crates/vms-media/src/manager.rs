@@ -31,7 +31,7 @@ pub struct MediaConfig {
     /// Address and port for the RTSP relay server (e.g. "0.0.0.0:8554").
     pub rtsp_bind: String,
     /// Minimum spacing between timeline thumbnail captures, in seconds
-    /// (default: 10).
+    /// (default: 30).
     pub thumbnail_interval_secs: u64,
 }
 
@@ -41,7 +41,7 @@ impl Default for MediaConfig {
             recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
             rtsp_bind: "0.0.0.0:8554".into(),
-            thumbnail_interval_secs: 10,
+            thumbnail_interval_secs: 30,
         }
     }
 }
