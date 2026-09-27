@@ -1096,7 +1096,15 @@ fn detach_snapshot_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::cleanup_stale_faststart_tmp_files;
+    use super::{cleanup_stale_faststart_tmp_files, motion_wanted};
+
+    #[test]
+    fn motion_runs_when_enabled_or_required() {
+        assert!(motion_wanted(None, false));
+        assert!(motion_wanted(Some(true), false));
+        assert!(motion_wanted(Some(false), true));
+        assert!(!motion_wanted(Some(false), false));
+    }
     use uuid::Uuid;
 
     /// A scratch dir under the system temp dir, unique per test run, cleaned

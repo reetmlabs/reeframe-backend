@@ -2377,6 +2377,50 @@ mod tests {
     }
 
     #[test]
+    fn camera_event_trigger_needs_analytics_on_its_camera() {
+        let cam = Uuid::new_v4();
+        let triggers = vec![trigger_row(event_config(), None, Some(cam), true)];
+        let refs = derive_camera_refs(&[], &triggers);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].camera_id, cam);
+        assert!(refs[0].needs_analytics);
+    }
+
+    #[test]
+    fn unscoped_event_trigger_needs_analytics_on_every_referenced_camera() {
+        let (trigger_cam, node_cam) = (Uuid::new_v4(), Uuid::new_v4());
+        let triggers = vec![
+            trigger_row(
+                system_config(Some(trigger_cam)),
+                None,
+                Some(trigger_cam),
+                true,
+            ),
+            trigger_row(event_config(), None, None, true),
+        ];
+        let nodes = vec![action_node(extract_clip_config(Some(node_cam)))];
+        let refs = derive_camera_refs(&nodes, &triggers);
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().all(|r| r.needs_analytics));
+    }
+
+    #[test]
+    fn source_or_disabled_event_triggers_do_not_need_analytics() {
+        let cam = Uuid::new_v4();
+        let triggers = vec![
+            trigger_row(system_config(Some(cam)), None, Some(cam), true),
+            trigger_row(event_config(), Some(Uuid::new_v4()), None, true),
+            trigger_row(event_config(), None, Some(cam), false),
+        ];
+        let refs = derive_camera_refs(&[], &triggers);
+
+        assert_eq!(refs.len(), 1);
+        assert!(!refs[0].needs_analytics);
+    }
+
+    #[test]
     fn trigger_only_reference_gets_a_bare_ref_row() {
         let cam = Uuid::new_v4();
         let triggers = vec![trigger_row(system_config(Some(cam)), None, Some(cam), true)];
