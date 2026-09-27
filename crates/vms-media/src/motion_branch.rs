@@ -437,3 +437,69 @@ fn signal_to_event(camera_id: Uuid, signal: MotionSignal) -> Event {
     };
     Event::new(&TopicKey::Camera(camera_id), event_type, payload)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// Plays 3 s of live 25 fps H.264 into a tee with the motion branch
+    /// attached and returns how many frames reached the appsink.
+    async fn frames_reaching_appsink() -> usize {
+        gstreamer::init().unwrap();
+        let camera_id = Uuid::new_v4();
+        let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
+        let pipeline = gstreamer::parse::launch(&format!(
+            "videotestsrc is-live=true pattern=ball \
+             ! video/x-raw,width=320,height=240,framerate=25/1 \
+             ! x264enc tune=zerolatency key-int-max=25 ! h264parse \
+             ! tee name={tee_name} allow-not-linked=true"
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let handle = attach(&pipeline, &tee_name, camera_id, event_tx).unwrap();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let counter = count.clone();
+        pipeline
+            .by_name(&sink_name(camera_id))
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                gstreamer::PadProbeReturn::Ok
+            });
+
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let frames = count.load(Ordering::SeqCst);
+
+        handle.stop().await;
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        frames
+    }
+
+    #[tokio::test]
+    async fn only_the_sample_rate_reaches_the_analyzer() {
+        let frames = frames_reaching_appsink().await;
+        // 3 s at SAMPLE_RATE_FPS, plus slack for startup and the first frame.
+        assert!(
+            (3..=8).contains(&frames),
+            "expected about {} frames at {SAMPLE_RATE_FPS} fps over 3 s, got {frames}",
+            3 * SAMPLE_RATE_FPS
+        );
+    }
+
+    #[test]
+    fn every_relay_codec_has_a_software_decoder_candidate() {
+        for caps in ["video/x-h264", "video/x-h265", "image/jpeg", "video/x-av1"] {
+            assert!(!decoder_candidates(caps).is_empty(), "{caps}");
+        }
+    }
+}
