@@ -373,6 +373,14 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!(e)
     })?;
 
+    // Loaded before anything can start a camera, so no pipeline comes up
+    // with motion detection its camera has turned off.
+    for cam in camera_repo.list().await.unwrap_or_default() {
+        media_manager
+            .set_motion_detection_enabled(cam.id, cam.motion_detection_enabled)
+            .await;
+    }
+
     // -- Resource Manager --
     let resource_manager = ResourceManager::new(
         media_manager.clone(),

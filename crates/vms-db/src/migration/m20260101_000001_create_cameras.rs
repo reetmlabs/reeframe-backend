@@ -86,4 +86,5 @@ pub enum Camera {
     RetentionDiskThresholdPercent,
     DesiredRecording,
     Timezone,
+    MotionDetectionEnabled,
 }

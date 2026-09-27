@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -86,6 +86,12 @@ fn sub_tee_name(camera_id: Uuid) -> String {
     format!("cam_{}_subtee", camera_id.as_simple())
 }
 
+/// Motion runs when the camera's switch is on (unset counts as on) or a
+/// pipeline requires its events.
+fn motion_wanted(enabled: Option<bool>, required: bool) -> bool {
+    enabled.unwrap_or(true) || required
+}
+
 /// Remove leftover `*.faststart.tmp` files from a previous process
 /// lifetime. `remux_faststart` always writes to a fresh tmp path per
 /// attempt and renames it into place on success, so any tmp file still
@@ -159,6 +165,12 @@ pub struct MediaManager {
     /// act on it.
     pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     motion: Mutex<HashMap<Uuid, MotionHandle>>,
+    /// Each camera's `motion_detection_enabled`. A camera missing here counts
+    /// as enabled, matching the column default.
+    motion_enabled: Mutex<HashMap<Uuid, bool>>,
+    /// Cameras a pipeline needs motion events from, which keeps motion
+    /// running even when the camera's own switch is off.
+    motion_required: Mutex<HashSet<Uuid>>,
     thumbnails: Mutex<HashMap<Uuid, ThumbnailHandle>>,
 }
 
@@ -193,6 +205,8 @@ impl MediaManager {
             chunk_event_tx,
             pipeline_live_tx,
             motion: Mutex::new(HashMap::new()),
+            motion_enabled: Mutex::new(HashMap::new()),
+            motion_required: Mutex::new(HashSet::new()),
             thumbnails: Mutex::new(HashMap::new()),
         })
     }
@@ -296,8 +310,10 @@ impl MediaManager {
         pipeline: &gstreamer::Pipeline,
         tee_name: &str,
     ) {
-        if let Err(e) = self.start_motion_detection(camera_id, pipeline, tee_name) {
-            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
+        if self.motion_wanted(camera_id) {
+            if let Err(e) = self.start_motion_detection(camera_id, pipeline, tee_name) {
+                tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
+            }
         }
         if let Err(e) = self.start_thumbnail_capture(camera_id, pipeline, tee_name) {
             tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start thumbnail capture");
@@ -610,6 +626,65 @@ impl MediaManager {
             h.task.await.ok();
             tracing::info!(camera_id = %camera_id, "Sub-stream pipeline stopped");
         }
+    }
+
+    /// Apply a camera's `motion_detection_enabled` setting, attaching or
+    /// detaching its motion branch right away if the camera is live.
+    pub async fn set_motion_detection_enabled(&self, camera_id: Uuid, enabled: bool) {
+        self.motion_enabled
+            .lock()
+            .unwrap()
+            .insert(camera_id, enabled);
+        self.reconcile_motion(camera_id).await;
+    }
+
+    /// Keep motion detection running for `camera_id` while a pipeline
+    /// listens for its events, regardless of the camera's own setting.
+    pub async fn require_motion(&self, camera_id: Uuid) {
+        self.motion_required.lock().unwrap().insert(camera_id);
+        self.reconcile_motion(camera_id).await;
+    }
+
+    /// Undo [`require_motion`](Self::require_motion).
+    pub async fn release_motion(&self, camera_id: Uuid) {
+        self.motion_required.lock().unwrap().remove(&camera_id);
+        self.reconcile_motion(camera_id).await;
+    }
+
+    fn motion_wanted(&self, camera_id: Uuid) -> bool {
+        motion_wanted(
+            self.motion_enabled.lock().unwrap().get(&camera_id).copied(),
+            self.motion_required.lock().unwrap().contains(&camera_id),
+        )
+    }
+
+    /// Attach or detach the camera's motion branch to match
+    /// [`motion_wanted`](Self::motion_wanted). Does nothing to a camera that
+    /// isn't live; `start_live` checks the same rule when it comes up.
+    async fn reconcile_motion(&self, camera_id: Uuid) {
+        if !self.motion_wanted(camera_id) {
+            self.stop_motion_detection(camera_id).await;
+            return;
+        }
+        let Some((pipeline, tee_name)) = self.analytics_tee(camera_id) else {
+            return;
+        };
+        if let Err(e) = self.start_motion_detection(camera_id, &pipeline, &tee_name) {
+            tracing::warn!(camera_id = %camera_id, error = %e, "Failed to start motion detection");
+        }
+    }
+
+    /// The tee analytics branches attach to: the sub-stream's when it's
+    /// running, otherwise the main pipeline's.
+    fn analytics_tee(&self, camera_id: Uuid) -> Option<(gstreamer::Pipeline, String)> {
+        if let Some(h) = self.sub_streams.lock().unwrap().get(&camera_id) {
+            return Some((h.pipeline.clone(), sub_tee_name(camera_id)));
+        }
+        self.cameras
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .map(|h| (h.pipeline.clone(), main_tee_name(camera_id)))
     }
 
     /// Attach the motion/scene-change/tamper detection branch to

@@ -54,6 +54,9 @@ pub struct Model {
     /// recording coverage day boundaries. `None` inherits the global
     /// `[recordings] timezone` default.
     pub timezone: Option<String>,
+    /// Whether motion detection runs whenever the camera is live. A pipeline
+    /// with a camera `Event` trigger turns it on regardless.
+    pub motion_detection_enabled: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

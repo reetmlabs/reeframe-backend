@@ -74,6 +74,7 @@ pub async fn update_camera_timezone(
                 retention_days: None,
                 retention_disk_threshold_percent: None,
                 timezone: body.timezone,
+                motion_detection_enabled: None,
             },
         )
         .await?;

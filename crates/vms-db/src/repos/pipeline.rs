@@ -1219,9 +1219,10 @@ pub(super) fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid
 
 /// Which cameras a pipeline's nodes/triggers reference, and what each one
 /// needs. `needs_ring_buffer` is set by an `extract_clip` node.
-/// `needs_analytics` has no producer yet — no action or trigger type reads
-/// detections, so it's always `false` for now; this function is the one
-/// place that will need a new match arm once one does.
+/// `needs_analytics` is set by an enabled `Event` trigger that listens on a
+/// camera topic (no `source_id`), because motion detection is what publishes
+/// there. A camera-scoped one marks its own camera; an unscoped one marks
+/// every camera the pipeline references, since it subscribes to all of them.
 ///
 /// A camera is referenced by (a) any *enabled* trigger's resolved
 /// `camera_id`, or (b) any node whose action config carries an explicit
@@ -1257,22 +1258,29 @@ fn derive_camera_refs(
             continue;
         };
         let ring_buffer_secs = extract_clip_ring_buffer_secs(action_config);
-        let needs_analytics = false; // no analytics action/trigger type exists yet
 
         match camera_id_from_action_config(action_config) {
             Some(camera_id) => {
                 let entry = refs.entry(camera_id).or_insert((0, false));
                 entry.0 = entry.0.max(ring_buffer_secs);
-                entry.1 |= needs_analytics;
             }
-            None if ring_buffer_secs > 0 || needs_analytics => {
+            None if ring_buffer_secs > 0 => {
                 for &camera_id in &trigger_cameras {
                     let entry = refs.entry(camera_id).or_insert((0, false));
                     entry.0 = entry.0.max(ring_buffer_secs);
-                    entry.1 |= needs_analytics;
                 }
             }
             None => {}
+        }
+    }
+
+    let camera_event_triggers = triggers
+        .iter()
+        .filter(|t| t.enabled && t.trigger_type == CoreTriggerType::Event && t.source_id.is_none());
+    for trigger in camera_event_triggers {
+        match trigger.camera_id {
+            Some(camera_id) => refs.entry(camera_id).or_insert((0, false)).1 = true,
+            None => refs.values_mut().for_each(|entry| entry.1 = true),
         }
     }
 
@@ -2706,6 +2714,7 @@ mod tests {
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
             timezone: Set(None),
+            motion_detection_enabled: Set(true),
         }
         .insert(&repo.db)
         .await
@@ -2962,6 +2971,7 @@ mod tests {
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
             timezone: Set(None),
+            motion_detection_enabled: Set(true),
         }
         .insert(&repo.db)
         .await

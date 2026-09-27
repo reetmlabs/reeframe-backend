@@ -392,6 +392,7 @@ mod tests {
             ring_buffer_duration_secs: 300,
             ring_buffer_storage: RingBufferStorage::Memory,
             enabled: true,
+            motion_detection_enabled: true,
         })
         .await
         .unwrap()
