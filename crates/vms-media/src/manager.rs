@@ -595,6 +595,45 @@ impl MediaManager {
         }
     }
 
+    /// Point a running camera at new stream URLs. The main pipeline
+    /// reconnects to its new URL through the normal reconnect path, which
+    /// keeps every branch attached. A changed sub stream is closed along
+    /// with its relay and analytics, and reopened by whatever still needs it.
+    pub async fn set_stream_urls(
+        &self,
+        camera_id: Uuid,
+        rtsp_url: &str,
+        sub_rtsp_url: Option<&str>,
+    ) {
+        let (pipeline, main_changed, sub_changed) = {
+            let mut cameras = self.cameras.lock().unwrap();
+            let Some(h) = cameras.get_mut(&camera_id) else {
+                return;
+            };
+            let main_changed = h.rtsp_url != rtsp_url;
+            let sub_changed = h.sub_rtsp_url.as_deref() != sub_rtsp_url;
+            h.rtsp_url = rtsp_url.to_owned();
+            h.sub_rtsp_url = sub_rtsp_url.map(str::to_owned);
+            (h.pipeline.clone(), main_changed, sub_changed)
+        };
+
+        if main_changed {
+            if let Some(src) = pipeline.by_name(&format!("cam_{}_src", camera_id.as_simple())) {
+                src.set_property("location", rtsp_url);
+                // The monitor treats EOS as a dropped stream and reconnects.
+                let _ = pipeline.post_message(gstreamer::message::Eos::new());
+                tracing::info!(camera_id = %camera_id, "Main stream URL changed, reconnecting");
+            }
+        }
+        if sub_changed {
+            self.stop_motion_detection(camera_id).await;
+            self.stop_thumbnail_capture(camera_id).await;
+            self.detach_relay(camera_id, RelayQuality::Sub);
+            self.stop_sub_stream(camera_id).await;
+            self.reconcile_analytics(camera_id).await;
+        }
+    }
+
     /// Apply a camera's `motion_detection_enabled` setting, attaching or
     /// detaching its motion branch right away if the camera is live.
     pub async fn set_motion_detection_enabled(&self, camera_id: Uuid, enabled: bool) {

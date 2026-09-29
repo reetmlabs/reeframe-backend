@@ -259,6 +259,10 @@ pub async fn update_camera(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let body: UpdateCameraBody = parse_body(req).await?;
+    let urls_changed = body.rtsp_url.is_some()
+        || body.sub_rtsp_url.is_some()
+        || body.username.is_some()
+        || body.password.is_some();
 
     let input = UpdateCamera {
         name: body.name,
@@ -282,6 +286,15 @@ pub async fn update_camera(
     };
 
     let camera = state.camera_repo.update(id, input).await?;
+    if urls_changed && state.media_manager.is_running(id) {
+        if let Some((camera, password)) = state.camera_repo.get_decrypted(id).await? {
+            let (rtsp_url, sub_rtsp_url) = resolve_camera_urls(&camera, password.as_deref());
+            state
+                .media_manager
+                .set_stream_urls(id, &rtsp_url, sub_rtsp_url.as_deref())
+                .await;
+        }
+    }
     if body.motion_detection_enabled.is_some() {
         state
             .media_manager
