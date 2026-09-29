@@ -201,7 +201,7 @@ pub async fn create_camera(
             .ring_buffer_storage
             .unwrap_or(RingBufferStorage::Memory),
         enabled: body.enabled.unwrap_or(true),
-        motion_detection_enabled: body.motion_detection_enabled.unwrap_or(true),
+        motion_detection_enabled: body.motion_detection_enabled.unwrap_or(false),
         thumbnails_enabled: body.thumbnails_enabled.unwrap_or(false),
     };
 

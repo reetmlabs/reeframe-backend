@@ -37,6 +37,7 @@ mod m20260101_000034_add_pipeline_camera_ref_ring_buffer_secs;
 mod m20260101_000035_add_camera_timezone;
 mod m20260101_000036_add_camera_motion_detection_enabled;
 mod m20260101_000037_add_camera_thumbnails_enabled;
+mod m20260101_000038_turn_off_motion_detection_by_default;
 
 pub struct Migrator;
 
@@ -81,6 +82,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000035_add_camera_timezone::Migration),
             Box::new(m20260101_000036_add_camera_motion_detection_enabled::Migration),
             Box::new(m20260101_000037_add_camera_thumbnails_enabled::Migration),
+            Box::new(m20260101_000038_turn_off_motion_detection_by_default::Migration),
         ]
     }
 }
