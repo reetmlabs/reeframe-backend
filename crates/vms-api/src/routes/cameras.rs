@@ -412,15 +412,14 @@ fn parse_relay_quality(req: &mut Request) -> Result<Option<RelayQuality>, ApiErr
     }
 }
 
-/// The relay quality live view uses for `camera`: `requested` if given,
-/// otherwise the camera's `live_view_stream`. Sub falls back to main when
-/// the camera has no sub stream.
+/// The relay quality live view uses for `camera`. A camera pinned to
+/// `main` always gets main. Otherwise `requested` wins, defaulting to sub,
+/// and sub falls back to main when the camera has no sub stream.
 pub fn live_view_quality(camera: &camera::Model, requested: Option<RelayQuality>) -> RelayQuality {
-    let preferred = requested.unwrap_or(match camera.live_view_stream {
-        LiveViewStream::Sub => RelayQuality::Sub,
-        LiveViewStream::Main => RelayQuality::Main,
-    });
-    match preferred {
+    if camera.live_view_stream == LiveViewStream::Main {
+        return RelayQuality::Main;
+    }
+    match requested.unwrap_or(RelayQuality::Sub) {
         RelayQuality::Sub if camera.sub_rtsp_url.is_none() => RelayQuality::Main,
         q => q,
     }
@@ -430,9 +429,9 @@ pub fn live_view_quality(camera: &camera::Model, requested: Option<RelayQuality>
 ///
 /// Starts an RTSP relay mount for live view — bridged from the camera's main
 /// or sub-stream pipeline, starting whichever one is needed on demand if
-/// it isn't already running. Without `quality` it uses the camera's
-/// `live_view_stream`; sub falls back to main when the camera has no sub
-/// stream (see [`live_view_quality`]). Never requires recording.
+/// it isn't already running. Defaults to the sub stream, falling back to
+/// main without one; a camera whose `live_view_stream` is `main` always
+/// gets main (see [`live_view_quality`]). Never requires recording.
 /// Recording is a separate, explicit concern — see `POST
 /// /cameras/{id}/recording/start`. Probes the codec on first use (any
 /// quality — main and sub are assumed to share one encoding), then
@@ -508,3 +507,4 @@ pub async fn stop_relay(
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
+
