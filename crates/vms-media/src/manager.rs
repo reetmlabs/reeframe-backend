@@ -315,7 +315,7 @@ impl MediaManager {
         // the recording branch before that finishes lets `splitmuxsink` link
         // in ahead of it, which can permanently fail the video link. See
         // `camera_stream::wait_for_codec_wired`.
-        camera_stream::wait_for_codec_wired(&pipeline, camera_id).await;
+        camera_stream::wait_for_codec_wired(&pipeline, camera_id).await?;
 
         camera_stream::attach_recording_branch(
             camera_id,

@@ -438,11 +438,16 @@ const CODEC_WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEC_WIRE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Wait until the live pipeline's video codec is wired into `tee` (its sink
-/// pad linked), or `CODEC_WIRE_TIMEOUT` elapses. Attaching the recording
-/// branch before this finishes lets `splitmuxsink` link into `tee` first,
-/// which narrows `tee`'s negotiable caps and can permanently fail the video
-/// link — see `build_camera_stream`'s pad-added handler.
-pub(crate) async fn wait_for_codec_wired(gst_pipeline: &gstreamer::Pipeline, camera_id: Uuid) {
+/// pad linked). Attaching the recording branch before this finishes lets
+/// `splitmuxsink` link into `tee` first, which narrows `tee`'s negotiable
+/// caps and can permanently fail the video link — see
+/// `build_camera_stream`'s pad-added handler. Errors after
+/// `CODEC_WIRE_TIMEOUT`, since the branch would also be built without its
+/// converting parser and never write a file.
+pub(crate) async fn wait_for_codec_wired(
+    gst_pipeline: &gstreamer::Pipeline,
+    camera_id: Uuid,
+) -> Result<(), VmsError> {
     let tee_name = tee_name(camera_id);
     let deadline = tokio::time::Instant::now() + CODEC_WIRE_TIMEOUT;
     loop {
@@ -450,8 +455,14 @@ pub(crate) async fn wait_for_codec_wired(gst_pipeline: &gstreamer::Pipeline, cam
             .by_name(&tee_name)
             .and_then(|tee| tee.static_pad("sink"))
             .is_some_and(|p| p.is_linked());
-        if linked || tokio::time::Instant::now() >= deadline {
-            return;
+        if linked {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(VmsError::Media(format!(
+                "camera {camera_id} stream not connected after {}s",
+                CODEC_WIRE_TIMEOUT.as_secs()
+            )));
         }
         tokio::time::sleep(CODEC_WIRE_POLL_INTERVAL).await;
     }
