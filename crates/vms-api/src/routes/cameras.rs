@@ -42,6 +42,9 @@ pub struct CameraDto {
     /// record but not currently succeeding," distinct from an operator
     /// having stopped it on purpose.
     pub desired_recording: bool,
+    /// Whether motion detection runs while the camera is live. A pipeline
+    /// with an `Event` trigger on this camera keeps it running anyway.
+    pub motion_detection_enabled: bool,
     /// Main-quality (full resolution) RTSP relay URL, intended for
     /// full-screen live view. `null` until that relay is started.
     pub relay_url: Option<String>,
@@ -77,6 +80,7 @@ impl CameraDto {
             live,
             recording,
             desired_recording: m.desired_recording,
+            motion_detection_enabled: m.motion_detection_enabled,
             relay_url,
             sub_relay_url,
             created_at: m.created_at,
@@ -101,6 +105,7 @@ pub struct CreateCameraBody {
     pub ring_buffer_duration_secs: Option<i32>,
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
+    pub motion_detection_enabled: Option<bool>,
 }
 
 /// All fields optional — only supplied fields are updated.
@@ -119,6 +124,7 @@ pub struct UpdateCameraBody {
     pub ring_buffer_duration_secs: Option<i32>,
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
+    pub motion_detection_enabled: Option<bool>,
 }
 
 // -- Internal helpers --
@@ -190,9 +196,14 @@ pub async fn create_camera(
             .ring_buffer_storage
             .unwrap_or(RingBufferStorage::Memory),
         enabled: body.enabled.unwrap_or(true),
+        motion_detection_enabled: body.motion_detection_enabled.unwrap_or(true),
     };
 
     let camera = state.camera_repo.create(input).await?;
+    state
+        .media_manager
+        .set_motion_detection_enabled(camera.id, camera.motion_detection_enabled)
+        .await;
     res.status_code(StatusCode::CREATED);
     Ok(Json(CameraDto::from_model(
         camera, false, false, None, None,
@@ -248,9 +259,16 @@ pub async fn update_camera(
         retention_days: None,
         retention_disk_threshold_percent: None,
         timezone: None,
+        motion_detection_enabled: body.motion_detection_enabled,
     };
 
     let camera = state.camera_repo.update(id, input).await?;
+    if body.motion_detection_enabled.is_some() {
+        state
+            .media_manager
+            .set_motion_detection_enabled(id, camera.motion_detection_enabled)
+            .await;
+    }
     let live = state.media_manager.is_running(id);
     let recording = state.media_manager.is_recording(id);
     let relay_url = state.media_manager.relay_url(id, RelayQuality::Main);

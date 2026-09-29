@@ -390,8 +390,8 @@ impl ResourceManager {
                 tracing::debug!(%id, "DestinationPool start — not yet implemented");
                 Ok(())
             }
-            ResourceId::AnalyticsBranch(id) => {
-                tracing::debug!(%id, "AnalyticsBranch start — not yet implemented");
+            ResourceId::AnalyticsBranch(cam_id) => {
+                self.media.require_motion(*cam_id).await;
                 Ok(())
             }
         }
@@ -406,8 +406,8 @@ impl ResourceManager {
                 tracing::debug!(%id, "DestinationPool stop — not yet implemented");
                 Ok(())
             }
-            ResourceId::AnalyticsBranch(id) => {
-                tracing::debug!(%id, "AnalyticsBranch stop — not yet implemented");
+            ResourceId::AnalyticsBranch(cam_id) => {
+                self.media.release_motion(*cam_id).await;
                 Ok(())
             }
         }

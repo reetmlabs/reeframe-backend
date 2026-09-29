@@ -1219,9 +1219,10 @@ pub(super) fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid
 
 /// Which cameras a pipeline's nodes/triggers reference, and what each one
 /// needs. `needs_ring_buffer` is set by an `extract_clip` node.
-/// `needs_analytics` has no producer yet — no action or trigger type reads
-/// detections, so it's always `false` for now; this function is the one
-/// place that will need a new match arm once one does.
+/// `needs_analytics` is set by an enabled `Event` trigger that listens on a
+/// camera topic (no `source_id`), because motion detection is what publishes
+/// there. A camera-scoped one marks its own camera; an unscoped one marks
+/// every camera the pipeline references, since it subscribes to all of them.
 ///
 /// A camera is referenced by (a) any *enabled* trigger's resolved
 /// `camera_id`, or (b) any node whose action config carries an explicit
@@ -1257,22 +1258,29 @@ fn derive_camera_refs(
             continue;
         };
         let ring_buffer_secs = extract_clip_ring_buffer_secs(action_config);
-        let needs_analytics = false; // no analytics action/trigger type exists yet
 
         match camera_id_from_action_config(action_config) {
             Some(camera_id) => {
                 let entry = refs.entry(camera_id).or_insert((0, false));
                 entry.0 = entry.0.max(ring_buffer_secs);
-                entry.1 |= needs_analytics;
             }
-            None if ring_buffer_secs > 0 || needs_analytics => {
+            None if ring_buffer_secs > 0 => {
                 for &camera_id in &trigger_cameras {
                     let entry = refs.entry(camera_id).or_insert((0, false));
                     entry.0 = entry.0.max(ring_buffer_secs);
-                    entry.1 |= needs_analytics;
                 }
             }
             None => {}
+        }
+    }
+
+    let camera_event_triggers = triggers
+        .iter()
+        .filter(|t| t.enabled && t.trigger_type == CoreTriggerType::Event && t.source_id.is_none());
+    for trigger in camera_event_triggers {
+        match trigger.camera_id {
+            Some(camera_id) => refs.entry(camera_id).or_insert((0, false)).1 = true,
+            None => refs.values_mut().for_each(|entry| entry.1 = true),
         }
     }
 
@@ -2369,6 +2377,50 @@ mod tests {
     }
 
     #[test]
+    fn camera_event_trigger_needs_analytics_on_its_camera() {
+        let cam = Uuid::new_v4();
+        let triggers = vec![trigger_row(event_config(), None, Some(cam), true)];
+        let refs = derive_camera_refs(&[], &triggers);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].camera_id, cam);
+        assert!(refs[0].needs_analytics);
+    }
+
+    #[test]
+    fn unscoped_event_trigger_needs_analytics_on_every_referenced_camera() {
+        let (trigger_cam, node_cam) = (Uuid::new_v4(), Uuid::new_v4());
+        let triggers = vec![
+            trigger_row(
+                system_config(Some(trigger_cam)),
+                None,
+                Some(trigger_cam),
+                true,
+            ),
+            trigger_row(event_config(), None, None, true),
+        ];
+        let nodes = vec![action_node(extract_clip_config(Some(node_cam)))];
+        let refs = derive_camera_refs(&nodes, &triggers);
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().all(|r| r.needs_analytics));
+    }
+
+    #[test]
+    fn source_or_disabled_event_triggers_do_not_need_analytics() {
+        let cam = Uuid::new_v4();
+        let triggers = vec![
+            trigger_row(system_config(Some(cam)), None, Some(cam), true),
+            trigger_row(event_config(), Some(Uuid::new_v4()), None, true),
+            trigger_row(event_config(), None, Some(cam), false),
+        ];
+        let refs = derive_camera_refs(&[], &triggers);
+
+        assert_eq!(refs.len(), 1);
+        assert!(!refs[0].needs_analytics);
+    }
+
+    #[test]
     fn trigger_only_reference_gets_a_bare_ref_row() {
         let cam = Uuid::new_v4();
         let triggers = vec![trigger_row(system_config(Some(cam)), None, Some(cam), true)];
@@ -2706,6 +2758,7 @@ mod tests {
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
             timezone: Set(None),
+            motion_detection_enabled: Set(true),
         }
         .insert(&repo.db)
         .await
@@ -2962,6 +3015,7 @@ mod tests {
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
             timezone: Set(None),
+            motion_detection_enabled: Set(true),
         }
         .insert(&repo.db)
         .await

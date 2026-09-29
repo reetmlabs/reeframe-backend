@@ -24,6 +24,7 @@ pub struct CreateCamera {
     pub ring_buffer_duration_secs: i32,
     pub ring_buffer_storage: RingBufferStorage,
     pub enabled: bool,
+    pub motion_detection_enabled: bool,
 }
 
 pub struct UpdateCamera {
@@ -49,6 +50,7 @@ pub struct UpdateCamera {
     /// the global `[recordings] timezone` default). `Some(Some(tz))` = set
     /// an explicit IANA timezone override for this camera.
     pub timezone: Option<Option<String>>,
+    pub motion_detection_enabled: Option<bool>,
 }
 
 // -- Repository --
@@ -93,6 +95,7 @@ impl CameraRepo {
             retention_disk_threshold_percent: Set(None),
             desired_recording: Set(false),
             timezone: Set(None),
+            motion_detection_enabled: Set(input.motion_detection_enabled),
         };
         model.insert(&self.db).await.map_err(db_err)
     }
@@ -185,6 +188,9 @@ impl CameraRepo {
         }
         if let Some(v) = input.timezone {
             active.timezone = Set(v);
+        }
+        if let Some(v) = input.motion_detection_enabled {
+            active.motion_detection_enabled = Set(v);
         }
 
         active.updated_at = Set(now());
