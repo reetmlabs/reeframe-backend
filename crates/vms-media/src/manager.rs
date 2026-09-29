@@ -960,17 +960,6 @@ fn snapshot_from_tee(
         .link(&decodebin)
         .map_err(|e| VmsError::Media(format!("link queue->decodebin: {e}")))?;
 
-    // Link tee -> queue
-    let tee_src = tee
-        .request_pad_simple("src_%u")
-        .ok_or_else(|| VmsError::Media("tee: no src pad for snapshot".into()))?;
-    let queue_sink = queue
-        .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("snapshot queue has no sink pad".into()))?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee->snapshot queue: {e}")))?;
-
     // Wire decodebin's dynamic video src pad to videoconvert
     let convert_weak = convert.downgrade();
     decodebin.connect_pad_added(move |_, src_pad| {
@@ -1017,17 +1006,27 @@ fn snapshot_from_tee(
             .build(),
     );
 
-    // Bring branch elements up to the pipeline's current state
+    // Sink first, tee last, so no buffer reaches an element still in `Null`.
     for el in [
-        &queue,
-        &decodebin,
-        &convert,
-        &encoder,
         appsink.upcast_ref::<gstreamer::Element>(),
+        &encoder,
+        &convert,
+        &decodebin,
+        &queue,
     ] {
         el.sync_state_with_parent()
             .map_err(|e| VmsError::Media(format!("sync snapshot element: {e}")))?;
     }
+
+    let tee_src = tee
+        .request_pad_simple("src_%u")
+        .ok_or_else(|| VmsError::Media("tee: no src pad for snapshot".into()))?;
+    let queue_sink = queue
+        .static_pad("sink")
+        .ok_or_else(|| VmsError::Media("snapshot queue has no sink pad".into()))?;
+    tee_src
+        .link(&queue_sink)
+        .map_err(|e| VmsError::Media(format!("link tee->snapshot queue: {e}")))?;
 
     // Wait for one decoded+encoded frame (bounded by camera's keyframe interval)
     let frame_data = rx

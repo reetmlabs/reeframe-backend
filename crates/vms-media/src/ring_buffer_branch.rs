@@ -113,26 +113,24 @@ pub fn attach(
         .add(&appsink)
         .map_err(|e| VmsError::Media(format!("add ring buffer appsink: {e}")))?;
 
-    // -- Link tee -> queue -> appsink --
+    // -- Link queue -> appsink, bring both up sink first, then link the tee --
+    queue
+        .link(&appsink)
+        .map_err(|e| VmsError::Media(format!("link rbqueue->appsink: {e}")))?;
+    for el in [appsink.upcast_ref::<gstreamer::Element>(), &queue] {
+        el.sync_state_with_parent()
+            .map_err(|e| VmsError::Media(format!("sync ring buffer state: {e}")))?;
+    }
+
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
         VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
     })?;
     let queue_sink = queue
         .static_pad("sink")
         .ok_or_else(|| VmsError::Media("ring buffer queue has no sink pad".into()))?;
-
     tee_src
         .link(&queue_sink)
         .map_err(|e| VmsError::Media(format!("link tee->rbqueue: {e}")))?;
-    queue
-        .link(&appsink)
-        .map_err(|e| VmsError::Media(format!("link rbqueue->appsink: {e}")))?;
-
-    // -- Bring new elements to the pipeline's current state --
-    for el in [&queue, appsink.upcast_ref::<gstreamer::Element>()] {
-        el.sync_state_with_parent()
-            .map_err(|e| VmsError::Media(format!("sync ring buffer state: {e}")))?;
-    }
 
     tracing::info!(camera_id = %camera_id, "Ring buffer branch attached");
     Ok(())

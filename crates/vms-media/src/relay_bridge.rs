@@ -152,15 +152,6 @@ pub fn attach(
         .add_many([&queue, appsink.upcast_ref::<gstreamer::Element>()])
         .map_err(|e| VmsError::Media(format!("relay bridge add_many: {e}")))?;
 
-    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
-        VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
-    })?;
-    let queue_sink = queue
-        .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("relay bridge queue has no sink pad".into()))?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee->relayqueue: {e}")))?;
     queue
         .link(&appsink)
         .map_err(|e| VmsError::Media(format!("link relayqueue->appsink: {e}")))?;
@@ -283,10 +274,20 @@ pub fn attach(
             .build(),
     );
 
-    for el in [&queue, appsink.upcast_ref::<gstreamer::Element>()] {
+    // Sink first, tee last, so no buffer reaches an element still in `Null`.
+    for el in [appsink.upcast_ref::<gstreamer::Element>(), &queue] {
         el.sync_state_with_parent()
             .map_err(|e| VmsError::Media(format!("sync relay bridge element: {e}")))?;
     }
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
+    })?;
+    let queue_sink = queue
+        .static_pad("sink")
+        .ok_or_else(|| VmsError::Media("relay bridge queue has no sink pad".into()))?;
+    tee_src
+        .link(&queue_sink)
+        .map_err(|e| VmsError::Media(format!("link tee->relayqueue: {e}")))?;
 
     mounts.add_factory(mount_path, factory);
 
