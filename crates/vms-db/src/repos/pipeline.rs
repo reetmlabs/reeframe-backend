@@ -2759,6 +2759,7 @@ mod tests {
             desired_recording: Set(false),
             timezone: Set(None),
             motion_detection_enabled: Set(true),
+            thumbnails_enabled: Set(false),
         }
         .insert(&repo.db)
         .await
@@ -3016,6 +3017,7 @@ mod tests {
             desired_recording: Set(false),
             timezone: Set(None),
             motion_detection_enabled: Set(true),
+            thumbnails_enabled: Set(false),
         }
         .insert(&repo.db)
         .await

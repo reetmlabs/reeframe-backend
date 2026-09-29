@@ -379,6 +379,9 @@ async fn main() -> anyhow::Result<()> {
         media_manager
             .set_motion_detection_enabled(cam.id, cam.motion_detection_enabled)
             .await;
+        media_manager
+            .set_thumbnails_enabled(cam.id, cam.thumbnails_enabled)
+            .await;
     }
 
     // -- Resource Manager --

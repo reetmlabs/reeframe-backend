@@ -45,6 +45,8 @@ pub struct CameraDto {
     /// Whether motion detection runs while the camera is live. A pipeline
     /// with an `Event` trigger on this camera keeps it running anyway.
     pub motion_detection_enabled: bool,
+    /// Whether scrub-preview thumbnails are captured while the camera records.
+    pub thumbnails_enabled: bool,
     /// Main-quality (full resolution) RTSP relay URL, intended for
     /// full-screen live view. `null` until that relay is started.
     pub relay_url: Option<String>,
@@ -81,6 +83,7 @@ impl CameraDto {
             recording,
             desired_recording: m.desired_recording,
             motion_detection_enabled: m.motion_detection_enabled,
+            thumbnails_enabled: m.thumbnails_enabled,
             relay_url,
             sub_relay_url,
             created_at: m.created_at,
@@ -106,6 +109,7 @@ pub struct CreateCameraBody {
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
     pub motion_detection_enabled: Option<bool>,
+    pub thumbnails_enabled: Option<bool>,
 }
 
 /// All fields optional — only supplied fields are updated.
@@ -125,6 +129,7 @@ pub struct UpdateCameraBody {
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
     pub motion_detection_enabled: Option<bool>,
+    pub thumbnails_enabled: Option<bool>,
 }
 
 // -- Internal helpers --
@@ -197,12 +202,17 @@ pub async fn create_camera(
             .unwrap_or(RingBufferStorage::Memory),
         enabled: body.enabled.unwrap_or(true),
         motion_detection_enabled: body.motion_detection_enabled.unwrap_or(true),
+        thumbnails_enabled: body.thumbnails_enabled.unwrap_or(false),
     };
 
     let camera = state.camera_repo.create(input).await?;
     state
         .media_manager
         .set_motion_detection_enabled(camera.id, camera.motion_detection_enabled)
+        .await;
+    state
+        .media_manager
+        .set_thumbnails_enabled(camera.id, camera.thumbnails_enabled)
         .await;
     res.status_code(StatusCode::CREATED);
     Ok(Json(CameraDto::from_model(
@@ -260,6 +270,7 @@ pub async fn update_camera(
         retention_disk_threshold_percent: None,
         timezone: None,
         motion_detection_enabled: body.motion_detection_enabled,
+        thumbnails_enabled: body.thumbnails_enabled,
     };
 
     let camera = state.camera_repo.update(id, input).await?;
@@ -267,6 +278,12 @@ pub async fn update_camera(
         state
             .media_manager
             .set_motion_detection_enabled(id, camera.motion_detection_enabled)
+            .await;
+    }
+    if body.thumbnails_enabled.is_some() {
+        state
+            .media_manager
+            .set_thumbnails_enabled(id, camera.thumbnails_enabled)
             .await;
     }
     let live = state.media_manager.is_running(id);

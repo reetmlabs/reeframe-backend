@@ -78,6 +78,7 @@ pub async fn update_retention_policy(
                 retention_disk_threshold_percent: body.retention_disk_threshold_percent,
                 timezone: None,
                 motion_detection_enabled: None,
+                thumbnails_enabled: None,
             },
         )
         .await?;

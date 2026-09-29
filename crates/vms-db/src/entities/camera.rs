@@ -57,6 +57,8 @@ pub struct Model {
     /// Whether motion detection runs whenever the camera is live. A pipeline
     /// with a camera `Event` trigger turns it on regardless.
     pub motion_detection_enabled: bool,
+    /// Whether scrub-preview thumbnails are captured while the camera records.
+    pub thumbnails_enabled: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
