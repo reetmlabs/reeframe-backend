@@ -549,24 +549,17 @@ fn attach_recording_branch_locked(
     Ok(())
 }
 
-/// Link `tee -> queue -> [recparse ->] splitmuxsink` and bring the new
-/// elements up to the pipeline's state.
+/// Link `queue -> [recparse ->] splitmuxsink`, bring those elements up to
+/// the pipeline's state from the sink backwards, and only then connect the
+/// tee. Data reaching an element still in `Null` gets `FLUSHING`, which
+/// stops the queue's streaming task for good; `splitmuxsink`'s first state
+/// change can take seconds while its muxer plugin loads.
 fn link_recording_branch(
     tee: &gstreamer::Element,
     queue: &gstreamer::Element,
     recparse: Option<&gstreamer::Element>,
     splitmux: &gstreamer::Element,
 ) -> Result<(), VmsError> {
-    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
-        VmsError::Media("attach recording branch: tee has no src_%u pad template".into())
-    })?;
-    let queue_sink = queue.static_pad("sink").ok_or_else(|| {
-        VmsError::Media("attach recording branch: new queue has no sink pad".into())
-    })?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("attach recording branch: link tee->queue: {e}")))?;
-
     // Direct pad links throughout — `Element::link()`'s generic pad search
     // probes splitmuxsink's request pad speculatively and wrongly rejects it
     // as incompatible against upstream's already-fixed caps.
@@ -602,16 +595,28 @@ fn link_recording_branch(
         })?;
     }
 
-    let mut synced = vec![queue, splitmux];
-    if let Some(p) = recparse {
-        synced.push(p);
-    }
-    for el in synced {
+    let mut downstream_first = vec![splitmux];
+    downstream_first.extend(recparse);
+    downstream_first.push(queue);
+    for el in downstream_first {
         el.sync_state_with_parent().map_err(|e| {
             VmsError::Media(format!(
                 "attach recording branch: sync_state_with_parent: {e}"
             ))
         })?;
+    }
+
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media("attach recording branch: tee has no src_%u pad template".into())
+    })?;
+    let queue_sink = queue.static_pad("sink").ok_or_else(|| {
+        VmsError::Media("attach recording branch: new queue has no sink pad".into())
+    })?;
+    if let Err(e) = tee_src.link(&queue_sink) {
+        tee.release_request_pad(&tee_src);
+        return Err(VmsError::Media(format!(
+            "attach recording branch: link tee->queue: {e}"
+        )));
     }
     Ok(())
 }
