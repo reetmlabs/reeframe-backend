@@ -2760,6 +2760,7 @@ mod tests {
             timezone: Set(None),
             motion_detection_enabled: Set(true),
             thumbnails_enabled: Set(false),
+            live_view_stream: Set(crate::entities::camera::LiveViewStream::Sub),
         }
         .insert(&repo.db)
         .await
@@ -3018,6 +3019,7 @@ mod tests {
             timezone: Set(None),
             motion_detection_enabled: Set(true),
             thumbnails_enabled: Set(false),
+            live_view_stream: Set(crate::entities::camera::LiveViewStream::Sub),
         }
         .insert(&repo.db)
         .await

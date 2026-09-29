@@ -88,4 +88,5 @@ pub enum Camera {
     Timezone,
     MotionDetectionEnabled,
     ThumbnailsEnabled,
+    LiveViewStream,
 }

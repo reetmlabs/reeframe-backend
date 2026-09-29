@@ -394,6 +394,7 @@ mod tests {
             enabled: true,
             motion_detection_enabled: true,
             thumbnails_enabled: false,
+            live_view_stream: crate::entities::camera::LiveViewStream::Sub,
         })
         .await
         .unwrap()

@@ -79,6 +79,7 @@ pub async fn update_retention_policy(
                 timezone: None,
                 motion_detection_enabled: None,
                 thumbnails_enabled: None,
+                live_view_stream: None,
             },
         )
         .await?;

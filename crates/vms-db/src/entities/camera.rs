@@ -11,6 +11,18 @@ pub enum RingBufferStorage {
     Disk,
 }
 
+/// Which stream live view relays by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum LiveViewStream {
+    /// The sub stream, or the main stream when the camera has none.
+    #[sea_orm(string_value = "sub")]
+    Sub,
+    #[sea_orm(string_value = "main")]
+    Main,
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "cameras")]
 pub struct Model {
@@ -59,6 +71,7 @@ pub struct Model {
     pub motion_detection_enabled: bool,
     /// Whether scrub-preview thumbnails are captured while the camera records.
     pub thumbnails_enabled: bool,
+    pub live_view_stream: LiveViewStream,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
