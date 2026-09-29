@@ -8,9 +8,10 @@ use crate::dispatcher::ActionContext;
 
 /// Capture a single still frame from a running camera.
 ///
-/// Opens a fresh GStreamer pipeline against the camera's RTSP URL, waits for
-/// the first decoded frame, encodes it as JPEG or PNG, and saves it to the
-/// action output directory. Returns the file path as the node artifact.
+/// Taps the camera's running main stream, waits up to 5 s for the first
+/// decoded frame, encodes it as JPEG or PNG, and saves it to the action
+/// output directory. Fails if the camera isn't running. Returns the file
+/// path as the node artifact.
 pub async fn execute(
     node_id: NodeId,
     cfg: &SnapshotConfig,
