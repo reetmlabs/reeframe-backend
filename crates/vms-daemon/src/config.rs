@@ -41,7 +41,7 @@ impl Default for MediaConfig {
         Self {
             recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
-            thumbnail_interval_secs: 10,
+            thumbnail_interval_secs: 30,
         }
     }
 }
