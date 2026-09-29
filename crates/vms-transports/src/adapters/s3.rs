@@ -249,8 +249,7 @@ pub async fn deliver(
 
     // -- Upload artifact or text --
     if let Some(src) = artifact {
-        match stream_file_to_s3(&*store, src, &object_path, node_id, ctx.run_id, progress_tx).await
-        {
+        match stream_file_to_s3(&store, src, &object_path, node_id, ctx.run_id, progress_tx).await {
             Ok(()) => {
                 let object_url = format!("s3://{}/{}", bucket, key);
                 tracing::info!(

@@ -992,6 +992,7 @@ impl ReconnectPolicy {
 /// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
 /// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
 /// file is finalized on disk.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,

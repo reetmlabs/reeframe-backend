@@ -17,9 +17,7 @@ use vms_core::{
 };
 use vms_db::repos::PipelineRepo;
 
-use crate::{
-    pipeline_registry::RegistrySnapshot, time_helpers, EventBus, PipelineExecutor, PipelineRegistry,
-};
+use crate::{time_helpers, EventBus, PipelineExecutor, PipelineRegistry};
 
 /// Evaluates pipeline triggers and dispatches pipeline runs.
 ///
@@ -597,7 +595,7 @@ impl TriggerEvaluator {
 
                 // Disk metrics may be scoped to a filesystem path.
                 if let Some(tp) = t_path {
-                    if path.map_or(true, |p| p != tp.as_str()) {
+                    if path != Some(tp.as_str()) {
                         continue;
                     }
                 }
@@ -622,7 +620,7 @@ impl TriggerEvaluator {
                     if now.duration_since(observed_at).as_secs() as u32 >= *sustained_secs {
                         // Enforce cooldown.
                         let in_cooldown = *cooldown_secs > 0
-                            && self.stat_cooldowns.get(&key).map_or(false, |last| {
+                            && self.stat_cooldowns.get(&key).is_some_and(|last| {
                                 (now.duration_since(*last).as_secs() as u32) < *cooldown_secs
                             });
 

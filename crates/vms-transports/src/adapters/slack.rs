@@ -38,7 +38,7 @@ fn client() -> &'static reqwest::Client {
 ///
 /// **Bot Token mode** (`bot_token` + `channel` are set):
 /// - If the upstream node produced an **artifact file** → `files.getUploadURLExternal`
-///   + upload + `files.completeUploadExternal` (Slack's current upload flow).
+///   then upload, then `files.completeUploadExternal` (Slack's current upload flow).
 ///   The rendered `message_template` is posted as the file's initial comment.
 /// - If no artifact → `chat.postMessage` with the rendered text.
 ///
@@ -208,6 +208,7 @@ async fn post_message(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_file(
     client: &reqwest::Client,
     token: &str,

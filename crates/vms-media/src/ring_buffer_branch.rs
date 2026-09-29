@@ -53,7 +53,7 @@ pub fn attach(
 
     // -- queue --
     let queue = gstreamer::ElementFactory::make("queue")
-        .name(&queue_name(camera_id))
+        .name(queue_name(camera_id))
         .property("max-size-buffers", 60u32) // ~2 s at 30 fps
         .property("max-size-bytes", 0u32)
         .property("max-size-time", 0u64)
@@ -64,7 +64,7 @@ pub fn attach(
     // `drop = true` so a slow ring-buffer lock never stalls the recording branch.
     // `sync = false` so the appsink processes frames as fast as they arrive.
     let appsink = gstreamer_app::AppSink::builder()
-        .name(&sink_name(camera_id))
+        .name(sink_name(camera_id))
         .drop(true)
         .max_buffers(30u32)
         .sync(false)

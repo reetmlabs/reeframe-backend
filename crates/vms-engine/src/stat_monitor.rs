@@ -13,7 +13,7 @@ use vms_media::MediaManager;
 use crate::coverage::compute_day_coverage;
 use crate::recording_intent::reconcile_recording_intent;
 use crate::time_helpers::{local_to_utc, parse_iana_tz};
-use crate::{pipeline_registry::RegistrySnapshot, PipelineRegistry, TriggerEvaluator};
+use crate::{PipelineRegistry, TriggerEvaluator};
 
 /// A camera's own `timezone` override, if set, else `default_timezone`.
 fn resolve_camera_timezone(camera_timezone: Option<&str>, default_timezone: &str) -> chrono_tz::Tz {
@@ -670,7 +670,7 @@ impl StatMonitor {
                 }
 
                 if let Some(tp) = t_path {
-                    if path.map_or(true, |p| p != tp.as_str()) {
+                    if path != Some(tp.as_str()) {
                         continue;
                     }
                 }
@@ -717,7 +717,8 @@ impl StatMonitor {
         paths
     }
 
-    pub(crate) fn registry_snapshot(&self) -> Arc<RegistrySnapshot> {
+    #[cfg(test)]
+    pub(crate) fn registry_snapshot(&self) -> Arc<crate::pipeline_registry::RegistrySnapshot> {
         self.registry.snapshot()
     }
 
