@@ -357,7 +357,7 @@ pub async fn stop_recording(
     // recovery and reconnect handling keep trying to resume recording.
     state.camera_repo.set_desired_recording(id, false).await?;
 
-    state.media_manager.stop_recording(id)?;
+    state.media_manager.stop_recording(id).await?;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
@@ -439,7 +439,7 @@ pub async fn stop_relay(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let quality = parse_relay_quality(req)?;
-    state.media_manager.stop_relay(id, quality);
+    state.media_manager.stop_relay(id, quality).await;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }

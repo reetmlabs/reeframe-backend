@@ -87,6 +87,11 @@ pub struct MotionHandle {
 }
 
 impl MotionHandle {
+    /// The pipeline this branch is attached to.
+    pub(crate) fn pipeline(&self) -> &gstreamer::Pipeline {
+        &self.pipeline
+    }
+
     /// Detach the GStreamer elements, signal the analyzer task to stop, and
     /// wait for it to exit.
     pub async fn stop(self) {

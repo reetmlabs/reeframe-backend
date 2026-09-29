@@ -133,6 +133,11 @@ pub struct ThumbnailHandle {
 }
 
 impl ThumbnailHandle {
+    /// The pipeline this branch is attached to.
+    pub(crate) fn pipeline(&self) -> &gstreamer::Pipeline {
+        &self.pipeline
+    }
+
     pub async fn stop(self) {
         if let Err(e) = detach(&self.pipeline, self.camera_id) {
             tracing::warn!(camera_id = %self.camera_id, error = %e, "Failed to detach thumbnail branch");

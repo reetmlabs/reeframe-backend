@@ -34,7 +34,7 @@ pub async fn execute(
     };
 
     // -- Stop recording --
-    match media.stop_recording(camera_id) {
+    match media.stop_recording(camera_id).await {
         Ok(()) => {
             tracing::info!(
                 node_id = %node_id,
