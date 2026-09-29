@@ -399,6 +399,11 @@ fn link_decoder(
         .name(decode_name(camera_id))
         .build()
         .map_err(|e| VmsError::Media(format!("motion {factory}: {e}")))?;
+    // One thread is plenty for a sub stream; the default spawns one per core,
+    // each holding its own frame buffers.
+    if decoder.find_property("max-threads").is_some() {
+        decoder.set_property("max-threads", 1i32);
+    }
     pipeline
         .add(&decoder)
         .map_err(|e| VmsError::Media(format!("motion add {factory}: {e}")))?;
