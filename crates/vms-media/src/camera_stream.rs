@@ -86,6 +86,10 @@ pub(crate) struct ChunkNaming {
     /// Registered by a graceful drain, fired by `handle_fragment_closed`
     /// once `current_path`'s fragment closes.
     close_ack: Mutex<Option<(String, std::sync::mpsc::SyncSender<()>)>>,
+    /// Serializes attaching, rebuilding and detaching the recording branch.
+    /// The API, recording-intent resume and reconnect monitor can all reach
+    /// it at once, and its elements have fixed names.
+    recording_branch: Mutex<()>,
 }
 
 impl ChunkNaming {
@@ -95,6 +99,7 @@ impl ChunkNaming {
             codec: Mutex::new(None),
             current_path: Mutex::new(None),
             close_ack: Mutex::new(None),
+            recording_branch: Mutex::new(()),
         })
     }
 
@@ -478,6 +483,29 @@ pub(crate) fn attach_recording_branch(
     recording_dir: &Path,
     chunk_duration_secs: u64,
 ) -> Result<(), VmsError> {
+    let _guard = naming.recording_branch.lock().unwrap();
+    attach_recording_branch_locked(
+        camera_id,
+        gst_pipeline,
+        naming,
+        chunk_event_tx,
+        recording_dir,
+        chunk_duration_secs,
+    )
+}
+
+/// [`attach_recording_branch`] for a caller already holding
+/// `naming.recording_branch`. Removes whatever it added if any step fails,
+/// so a failed attach never leaves a half-linked branch that
+/// [`is_recording_attached`] would report as recording.
+fn attach_recording_branch_locked(
+    camera_id: Uuid,
+    gst_pipeline: &gstreamer::Pipeline,
+    naming: &Arc<ChunkNaming>,
+    chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
+    recording_dir: &Path,
+    chunk_duration_secs: u64,
+) -> Result<(), VmsError> {
     if is_recording_attached(camera_id, gst_pipeline) {
         return Ok(());
     }
@@ -499,9 +527,36 @@ pub(crate) fn attach_recording_branch(
         new_elements.push(p);
     }
     gst_pipeline
-        .add_many(new_elements)
+        .add_many(new_elements.iter().copied())
         .map_err(|e| VmsError::Media(format!("attach recording branch: add_many: {e}")))?;
 
+    let linked = link_recording_branch(&tee, &queue, recparse.as_ref(), &splitmux);
+    if let Err(e) = linked {
+        if let Some(queue_sink) = queue.static_pad("sink") {
+            if let Some(tee_src) = queue_sink.peer() {
+                tee_src.unlink(&queue_sink).ok();
+                tee.release_request_pad(&tee_src);
+            }
+        }
+        for el in &new_elements {
+            el.set_state(gstreamer::State::Null).ok();
+        }
+        gst_pipeline.remove_many(new_elements).ok();
+        return Err(e);
+    }
+
+    tracing::info!(camera_id = %camera_id, "Recording branch attached");
+    Ok(())
+}
+
+/// Link `tee -> queue -> [recparse ->] splitmuxsink` and bring the new
+/// elements up to the pipeline's state.
+fn link_recording_branch(
+    tee: &gstreamer::Element,
+    queue: &gstreamer::Element,
+    recparse: Option<&gstreamer::Element>,
+    splitmux: &gstreamer::Element,
+) -> Result<(), VmsError> {
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
         VmsError::Media("attach recording branch: tee has no src_%u pad template".into())
     })?;
@@ -522,7 +577,7 @@ pub(crate) fn attach_recording_branch(
         VmsError::Media("attach recording branch: splitmuxsink has no video pad template".into())
     })?;
 
-    if let Some(p) = &recparse {
+    if let Some(p) = recparse {
         let recparse_sink = p.static_pad("sink").ok_or_else(|| {
             VmsError::Media("attach recording branch: recparse has no sink pad".into())
         })?;
@@ -547,8 +602,8 @@ pub(crate) fn attach_recording_branch(
         })?;
     }
 
-    let mut synced = vec![&queue, &splitmux];
-    if let Some(p) = &recparse {
+    let mut synced = vec![queue, splitmux];
+    if let Some(p) = recparse {
         synced.push(p);
     }
     for el in synced {
@@ -558,8 +613,6 @@ pub(crate) fn attach_recording_branch(
             ))
         })?;
     }
-
-    tracing::info!(camera_id = %camera_id, "Recording branch attached");
     Ok(())
 }
 
@@ -582,6 +635,7 @@ pub(crate) fn detach_recording_branch(
     gst_pipeline: &gstreamer::Pipeline,
     naming: &Arc<ChunkNaming>,
 ) -> Result<(), VmsError> {
+    let _guard = naming.recording_branch.lock().unwrap();
     let Some(queue) = gst_pipeline.by_name(&recqueue_name(camera_id)) else {
         return Ok(());
     };
@@ -777,6 +831,7 @@ fn rebuild_recording_branch(
     recording_dir: &Path,
     chunk_duration_secs: u64,
 ) -> Result<(), VmsError> {
+    let _guard = naming.recording_branch.lock().unwrap();
     if !is_recording_attached(camera_id, gst_pipeline) {
         return Ok(());
     }
@@ -809,7 +864,7 @@ fn rebuild_recording_branch(
         .remove_many(old_elements)
         .map_err(|e| VmsError::Media(format!("rebuild recording branch: remove_many: {e}")))?;
 
-    attach_recording_branch(
+    attach_recording_branch_locked(
         camera_id,
         gst_pipeline,
         naming,
