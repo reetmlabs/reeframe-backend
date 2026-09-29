@@ -90,6 +90,11 @@ pub(crate) struct ChunkNaming {
     /// The API, recording-intent resume and reconnect monitor can all reach
     /// it at once, and its elements have fixed names.
     recording_branch: Mutex<()>,
+    /// Set while a detached recording branch finalizes its file. The EOS
+    /// pushed into it can be the pipeline's last sink going EOS, which the
+    /// bus reports as the whole pipeline ending; the monitor must not treat
+    /// that as the camera dropping.
+    finalizing_recording: std::sync::atomic::AtomicBool,
 }
 
 impl ChunkNaming {
@@ -100,6 +105,7 @@ impl ChunkNaming {
             current_path: Mutex::new(None),
             close_ack: Mutex::new(None),
             recording_branch: Mutex::new(()),
+            finalizing_recording: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -677,6 +683,9 @@ pub(crate) fn detach_recording_branch(
         .ok_or_else(|| VmsError::Media("recording tee src pad has no parent element".into()))?;
 
     let close_rx = naming.watch_current_close();
+    naming
+        .finalizing_recording
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
     let queue_sink_clone = queue_sink.clone();
@@ -690,6 +699,7 @@ pub(crate) fn detach_recording_branch(
 
     let tee_src_clone = tee_src.clone();
     let pipeline_clone = gst_pipeline.clone();
+    let naming = naming.clone();
     std::thread::spawn(move || {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(()) => tracing::info!(camera_id = %camera_id, "Recording branch unlinked from tee"),
@@ -718,6 +728,9 @@ pub(crate) fn detach_recording_branch(
             p.set_state(gstreamer::State::Null).ok();
             pipeline_clone.remove(&p).ok();
         }
+        naming
+            .finalizing_recording
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
     Ok(())
@@ -1028,6 +1041,10 @@ pub(crate) fn spawn_monitor(
                                 break 'watch true;
                             }
                             MessageView::Eos(_) => {
+                                if naming.finalizing_recording.load(std::sync::atomic::Ordering::SeqCst) {
+                                    tracing::debug!(camera_id = %camera_id, "EOS from a finalizing recording branch, ignored");
+                                    continue;
+                                }
                                 tracing::warn!(camera_id = %camera_id, "RTSP stream EOS — will reconnect");
                                 break 'watch true;
                             }
