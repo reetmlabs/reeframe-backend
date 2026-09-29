@@ -64,14 +64,10 @@ pub async fn execute(
     };
 
     // -- Start recording --
-    // `ctx.camera_rtsp_urls` only carries the main stream (populated from
-    // `MediaManager::rtsp_urls()`, not a DB lookup) — this handler has no way
-    // to resolve `sub_rtsp_url` the way the REST/ResourceManager start paths
-    // do, so no sub-stream pipeline is requested here; motion detection
-    // falls back to the main stream's tee automatically. A
-    // pipeline-triggered recording start is a rarer path than
-    // manual/pipeline-referenced start, so this is an acceptable trade-off
-    // rather than plumbing DB access into the action-handler layer for it.
+    // `ctx.camera_rtsp_urls` only lists cameras whose pipeline is already
+    // running, so this never starts one. The running camera keeps the sub
+    // stream it was started with, and analytics use that, so no sub URL is
+    // needed here.
     match media.start_recording(camera_id, rtsp_url, None).await {
         Ok(()) => {
             tracing::info!(
