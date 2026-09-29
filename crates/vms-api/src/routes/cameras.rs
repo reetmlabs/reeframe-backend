@@ -508,3 +508,71 @@ pub async fn stop_relay(
     Ok(())
 }
 
+#[cfg(test)]
+mod live_view_quality_tests {
+    use super::*;
+
+    fn camera(sub_rtsp_url: Option<&str>, live_view_stream: LiveViewStream) -> camera::Model {
+        let now = chrono::Utc::now().fixed_offset();
+        camera::Model {
+            id: Uuid::new_v4(),
+            name: "cam".into(),
+            description: None,
+            rtsp_url: "rtsp://cam/main".into(),
+            sub_rtsp_url: sub_rtsp_url.map(Into::into),
+            codec: None,
+            manufacturer: None,
+            model: None,
+            username: None,
+            password_enc: None,
+            extra_config: serde_json::json!({}),
+            ring_buffer_duration_secs: 30,
+            ring_buffer_storage: RingBufferStorage::Memory,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+            retention_days: None,
+            retention_disk_threshold_percent: None,
+            desired_recording: false,
+            timezone: None,
+            motion_detection_enabled: false,
+            thumbnails_enabled: false,
+            live_view_stream,
+        }
+    }
+
+    #[test]
+    fn defaults_to_the_sub_stream() {
+        let cam = camera(Some("rtsp://cam/sub"), LiveViewStream::Sub);
+        assert_eq!(live_view_quality(&cam, None), RelayQuality::Sub);
+    }
+
+    #[test]
+    fn falls_back_to_main_without_a_sub_stream() {
+        let cam = camera(None, LiveViewStream::Sub);
+        assert_eq!(live_view_quality(&cam, None), RelayQuality::Main);
+        assert_eq!(
+            live_view_quality(&cam, Some(RelayQuality::Sub)),
+            RelayQuality::Main
+        );
+    }
+
+    #[test]
+    fn a_camera_pinned_to_main_always_gets_main() {
+        let pinned = camera(Some("rtsp://cam/sub"), LiveViewStream::Main);
+        assert_eq!(live_view_quality(&pinned, None), RelayQuality::Main);
+        assert_eq!(
+            live_view_quality(&pinned, Some(RelayQuality::Sub)),
+            RelayQuality::Main
+        );
+    }
+
+    #[test]
+    fn an_explicit_main_request_is_honoured() {
+        let cam = camera(Some("rtsp://cam/sub"), LiveViewStream::Sub);
+        assert_eq!(
+            live_view_quality(&cam, Some(RelayQuality::Main)),
+            RelayQuality::Main
+        );
+    }
+}

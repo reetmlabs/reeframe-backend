@@ -1192,7 +1192,15 @@ fn detach_snapshot_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_stale_faststart_tmp_files, motion_wanted};
+    use super::{cleanup_stale_faststart_tmp_files, motion_wanted, thumbnails_wanted};
+
+    #[test]
+    fn thumbnails_run_only_while_recording_and_only_when_enabled() {
+        assert!(!thumbnails_wanted(None, true));
+        assert!(!thumbnails_wanted(Some(true), false));
+        assert!(!thumbnails_wanted(Some(false), true));
+        assert!(thumbnails_wanted(Some(true), true));
+    }
 
     #[test]
     fn motion_runs_when_enabled_or_required() {

@@ -1651,3 +1651,76 @@ mod recording_branch_avc_bridge_tests {
         assert!(is_recording_attached(camera_id, &pipeline));
     }
 }
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    fn pipeline_with_tee(camera_id: Uuid) -> gstreamer::Pipeline {
+        gstreamer::init().ok();
+        let pipeline = gstreamer::Pipeline::new();
+        let tee = gstreamer::ElementFactory::make("tee")
+            .name(tee_name(camera_id))
+            .build()
+            .unwrap();
+        let upstream = gstreamer::ElementFactory::make("capsfilter")
+            .property("caps", byte_stream_au_caps("video/x-h264"))
+            .build()
+            .unwrap();
+        pipeline.add_many([&upstream, &tee]).unwrap();
+        upstream.link(&tee).unwrap();
+        pipeline
+    }
+
+    #[test]
+    fn live_tee_tolerates_having_no_consumers() {
+        gstreamer::init().ok();
+        let (pipeline, _) = build_camera_stream(Uuid::new_v4(), "rtsp://127.0.0.1:1/x").unwrap();
+        let tee = pipeline
+            .iterate_elements()
+            .into_iter()
+            .flatten()
+            .find(|e| e.factory().is_some_and(|f| f.name() == "tee"))
+            .unwrap();
+        assert!(tee.property::<bool>("allow-not-linked"));
+    }
+
+    #[test]
+    fn concurrent_attaches_leave_exactly_one_recording_branch() {
+        let camera_id = Uuid::new_v4();
+        let pipeline = pipeline_with_tee(camera_id);
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let dir = std::env::temp_dir();
+
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        attach_recording_branch(camera_id, &pipeline, &naming, &tx, &dir, 60)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let tee = pipeline.by_name(&tee_name(camera_id)).unwrap();
+        assert_eq!(tee.src_pads().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codec_wait_fails_when_the_stream_never_connects() {
+        gstreamer::init().ok();
+        let camera_id = Uuid::new_v4();
+        let pipeline = gstreamer::Pipeline::new();
+        let tee = gstreamer::ElementFactory::make("tee")
+            .name(tee_name(camera_id))
+            .build()
+            .unwrap();
+        pipeline.add(&tee).unwrap();
+
+        assert!(wait_for_codec_wired(&pipeline, camera_id).await.is_err());
+    }
+}
