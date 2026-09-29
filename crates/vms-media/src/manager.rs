@@ -143,6 +143,9 @@ fn cleanup_stale_faststart_tmp_files(recording_dir: &Path) {
 pub struct MediaManager {
     config: MediaConfig,
     cameras: Mutex<HashMap<Uuid, CameraHandle>>,
+    /// Held for the whole of `start_live`, so two concurrent callers can't
+    /// each find the camera missing and build a second pipeline for it.
+    live_start: Mutex<()>,
     /// Optional per-camera sub-stream pipeline — exists only while the
     /// camera has a configured sub-stream and something needs it (motion
     /// detection by default; a future sub-quality relay tap will share it).
@@ -199,6 +202,7 @@ impl MediaManager {
         Ok(Self {
             config,
             cameras: Mutex::new(HashMap::new()),
+            live_start: Mutex::new(()),
             sub_streams: Mutex::new(HashMap::new()),
             relay,
             event_tx,
@@ -237,11 +241,9 @@ impl MediaManager {
         rtsp_url: &str,
         sub_rtsp_url: Option<&str>,
     ) -> Result<(), VmsError> {
-        {
-            let cameras = self.cameras.lock().unwrap();
-            if cameras.contains_key(&camera_id) {
-                return Ok(());
-            }
+        let _starting = self.live_start.lock().unwrap();
+        if self.cameras.lock().unwrap().contains_key(&camera_id) {
+            return Ok(());
         }
 
         let (pipeline, naming) = build_camera_stream(camera_id, rtsp_url)?;
@@ -249,7 +251,6 @@ impl MediaManager {
         pipeline
             .set_state(gstreamer::State::Playing)
             .map_err(|e| VmsError::Media(format!("start pipeline {camera_id}: {e}")))?;
-        let _ = self.pipeline_live_tx.send(camera_id);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let task = spawn_monitor(
@@ -273,6 +274,9 @@ impl MediaManager {
                 naming,
             },
         );
+        // Only after the camera is registered: listeners (recording intent)
+        // call back into `start_recording`, which must find it running.
+        let _ = self.pipeline_live_tx.send(camera_id);
 
         tracing::info!(camera_id = %camera_id, rtsp_url, "Live pipeline started");
 
