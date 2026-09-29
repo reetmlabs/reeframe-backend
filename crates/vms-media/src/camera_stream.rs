@@ -127,6 +127,12 @@ impl ChunkNaming {
     fn current_path(&self) -> Option<String> {
         self.current_path.lock().unwrap().clone()
     }
+
+    /// The main stream's RTP encoding name (e.g. `H264`), once its SDP has
+    /// been negotiated.
+    pub(crate) fn codec(&self) -> Option<String> {
+        self.codec.lock().unwrap().clone()
+    }
 }
 
 /// Build a per-camera "live" GStreamer pipeline — `rtspsrc -> [depay|parse]

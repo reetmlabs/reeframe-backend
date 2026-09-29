@@ -847,6 +847,16 @@ impl MediaManager {
         self.relay.codec(camera_id, quality)
     }
 
+    /// The codec the camera's main stream negotiated, if its pipeline is
+    /// running and connected.
+    pub fn main_codec(&self, camera_id: Uuid) -> Option<String> {
+        self.cameras
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .and_then(|h| h.naming.codec())
+    }
+
     /// Return `true` if a camera's live pipeline is currently running
     /// (independent of whether it's also recording — see
     /// [`is_recording`](Self::is_recording)).
