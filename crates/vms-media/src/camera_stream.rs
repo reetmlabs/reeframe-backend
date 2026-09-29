@@ -159,8 +159,12 @@ pub(crate) fn build_camera_stream(
         .map_err(|e| VmsError::Media(format!("rtspsrc: {e}")))?;
 
     // -- Tee (fan-out point — recording, relay, ring buffer, analytics all tap this) --
+    // `allow-not-linked`: every consumer attaches at runtime, so the tee must
+    // tolerate having none. Otherwise its first buffer fails with
+    // `not-linked` and the pipeline reconnects.
     let tee = gstreamer::ElementFactory::make("tee")
         .name(format!("cam_{}_tee", camera_id.as_simple()))
+        .property("allow-not-linked", true)
         .build()
         .map_err(|e| VmsError::Media(format!("tee: {e}")))?;
 
