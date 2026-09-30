@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libgstreamer1.0-dev \
         libgstreamer-plugins-base1.0-dev \
+        libgstreamer-plugins-bad1.0-dev \
+        libgstrtspserver-1.0-dev \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -52,13 +54,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # GStreamer core runtime
         libgstreamer1.0-0 \
         libgstreamer-plugins-base1.0-0 \
+        libgstreamer-plugins-bad1.0-0 \
+        # Built-in RTSP relay server
+        libgstrtspserver-1.0-0 \
         # Plugin sets required for RTSP receive + MP4 recording
         # good:  rtspsrc, rtph26{4,5}depay, rtpjpegdepay, splitmuxsink, mp4mux
         gstreamer1.0-plugins-good \
         # bad:   h264parse, h265parse, rtpav1depay, av1parse
         gstreamer1.0-plugins-bad \
-        # libav: broad codec decoding fallback (avdec_*)
+        # libav: software decoders (avdec_*) for motion and thumbnails
         gstreamer1.0-libav \
+        # ugly: x264enc, used by the transcode, watermark and merge actions
+        gstreamer1.0-plugins-ugly \
         # TLS + CA trust store (RTSPS, outbound HTTPS transports)
         libssl3 \
         ca-certificates \
@@ -83,14 +90,17 @@ USER reeframe
 # Default runtime configuration — all values can be overridden via environment
 # variables or a mounted config file at /etc/reeframe/config.toml.
 ENV VMS_DATABASE__URL="sqlite:///var/lib/reeframe/reeframe.db" \
+    VMS_MEDIA__RECORDING_DIR="/var/lib/reeframe/recordings" \
     VMS_API__BIND="0.0.0.0:8080" \
+    VMS_RTSP__BIND="0.0.0.0:8554" \
     RUST_LOG="info"
 
 # /var/lib/reeframe holds both the SQLite database and the recordings directory.
 # Mount a named volume here so data survives container restarts.
 VOLUME ["/var/lib/reeframe"]
 
-EXPOSE 8080
+# 8080: REST API. 8554: RTSP relay for live view.
+EXPOSE 8080 8554
 
 ENTRYPOINT ["/usr/local/bin/vms-daemon"]
 

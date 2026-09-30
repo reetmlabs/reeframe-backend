@@ -31,13 +31,15 @@ case "$1" in
 # Reeframe VMS environment — loaded by systemd before starting the daemon.
 # Protect this file: chmod 600 /etc/reeframe/env
 
-# REQUIRED — generate with: openssl rand -base64 32
+# REQUIRED — generate each with: openssl rand -base64 32
 # VMS_ENCRYPTION_KEY=
+# VMS_AUTH__JWT_SECRET=
 
 # Optional overrides (built-in defaults shown):
 # VMS_DATABASE__URL=sqlite:///var/lib/reeframe/reeframe.db
 # VMS_MEDIA__RECORDING_DIR=/var/lib/reeframe/recordings
 # VMS_API__BIND=0.0.0.0:8080
+# VMS_RTSP__BIND=0.0.0.0:8554
 # RUST_LOG=info
 EOF
             chmod 0600 /etc/reeframe/env
