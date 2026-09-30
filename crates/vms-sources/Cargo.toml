@@ -2,6 +2,7 @@
 name    = "vms-sources"
 version = "0.1.0"
 edition = "2021"
+license = "BSD-3-Clause"
 
 [dependencies]
 vms-core          = { path = "../vms-core" }
