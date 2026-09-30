@@ -22,16 +22,18 @@ This is the backend of **Reeframe**. The web UI and the optional multi-site Coor
 
 ### Resource usage
 
-Measured on an Intel i7-10750H, one daemon, cameras streaming 1080p H.264 at 4 Mbps with a 360p sub stream. CPU is the share of one core.
+Measured on an Intel i7-10750H with cameras streaming 1080p H.264 at 4 Mbps plus a 360p sub stream. Live view is one viewer per camera on the sub relay. CPU is the share of one core; memory is the daemon's resident size.
 
 | Mode | 1 camera | Each extra camera |
 |---|---|---|
-| Idle, no cameras | RESULT | – |
-| Recording | RESULT | RESULT |
-| Live view | RESULT | RESULT |
-| Live view and recording | RESULT | RESULT |
-| + thumbnails | RESULT | RESULT |
-| + motion detection | RESULT | RESULT |
+| Idle, no cameras | 35 MB, 0% | – |
+| Recording | 44 MB, 1.9% | +3.4 MB, +1.9% |
+| Live view | 34 MB, 1.0% | +3.7 MB, +1.1% |
+| Live view and recording | 42 MB, 2.1% | +5.8 MB, +2.8% |
+| + thumbnails | 112 MB, 2.1% | +12.5 MB, +2.7% |
+| + motion detection | 146 MB, 3.2% | +17 MB, +5.4% |
+
+Enabling thumbnails or motion detection loads the video decoders once, which is most of the jump for the first camera. The test streams are video noise, the hardest content to decode, so motion detection usually costs less on real footage.
 
 The release binary is 32 MB and links GStreamer from the system.
 
