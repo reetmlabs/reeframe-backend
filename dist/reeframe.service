@@ -39,6 +39,9 @@ PrivateTmp=true
 # The filesystem is read-only except for the recording/DB directory.
 ProtectSystem=strict
 ReadWritePaths=/var/lib/reeframe
+# The default database (./reeframe.db) is created here; the rest of the
+# filesystem is read-only under ProtectSystem=strict.
+WorkingDirectory=/var/lib/reeframe
 
 # No access to other users' home directories.
 ProtectHome=true
