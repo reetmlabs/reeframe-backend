@@ -111,6 +111,8 @@ curl -X POST localhost:8080/cameras/$CAM/relay/start -H "authorization: Bearer $
 # {"quality":"sub","relay_url":"rtsp://<host>:8554/<camera>/sub"}
 ```
 
+In Docker, `relay_url` contains the container's address; replace it with the Docker host's address to play the stream from another machine ([#94](https://github.com/reetmlabs/reeframe-backend/issues/94)).
+
 For scripts and other services, mint a long-lived API key with `vms-daemon token generate`.
 
 ## Building from source
