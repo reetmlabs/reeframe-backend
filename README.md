@@ -8,17 +8,17 @@ A lightweight, self-hosted video management system (VMS) backend in Rust. It rec
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
 
-This is the backend of **Reeframe**. The web UI and the optional multi-site Coordinator are separate projects.
+This is the backend of Reeframe. The web UI and the optional multi-site Coordinator are separate projects.
 
 ## Why Reeframe
 
-- **Lightweight.** One Rust daemon with no Python, Node or GPU dependencies. It runs comfortably on an arm64 board.
-- **Nothing runs unless something needs it.** Recording and live view are stream copies with no decoding. The sub stream, motion detection, thumbnails and pre-event buffers start only when a camera setting or an automation pipeline asks for them.
-- **One camera connection, many consumers.** Recording, the RTSP relay, pre-event clips, snapshots and analytics all share the camera's main and sub streams.
-- **Automation built in.** Pipelines connect triggers to actions and deliveries, so "on motion, cut a clip with 10 s before the event and send it to Telegram" needs no glue code.
-- **Fits into your stack.** Events come in from Home Assistant, MQTT, webhooks and more. Results go out to S3, SFTP, email, Slack, Telegram and webhooks.
-- **Built to keep recording.** Reconnects with backoff and a circuit breaker, repairs unfinished chunks after a crash, and resumes recordings after a restart.
-- **Open.** BSD-3-Clause, with no per-camera or per-channel fees.
+- It's one Rust daemon with no Python, Node or GPU dependencies, built for amd64 and arm64.
+- Recording and live view copy the camera's stream without decoding it. The sub stream, motion detection, thumbnails and pre-event buffers only start when a camera setting or an automation pipeline asks for them.
+- Each camera is opened once. Recording, the RTSP relay, pre-event clips, snapshots and analytics all share its main and sub streams.
+- Automation is built in. A pipeline like "on motion, cut a clip starting 10 s before the event and send it to Telegram" needs no glue code.
+- Events come in from Home Assistant, MQTT and webhooks, among others, and results go out to S3, SFTP, email, Slack, Telegram or a webhook.
+- Recording survives trouble: cameras reconnect with backoff and a circuit breaker, unfinished chunks are repaired after a crash, and recordings resume after a restart.
+- It's BSD-3-Clause, with no per-camera or per-channel fees.
 
 ### Resource usage
 
@@ -26,20 +26,20 @@ Measured on an Intel i7-10750H with cameras streaming 1080p H.264 at 4 Mbps plus
 
 | Mode | 1 camera | Each extra camera |
 |---|---|---|
-| Idle, no cameras | 35 MB, 0% | – |
+| Idle, no cameras | 35 MB, 0% | |
 | Recording | 44 MB, 1.9% | +3.4 MB, +1.9% |
 | Live view | 34 MB, 1.0% | +3.7 MB, +1.1% |
 | Live view and recording | 42 MB, 2.1% | +5.8 MB, +2.8% |
 | + thumbnails | 112 MB, 2.1% | +12.5 MB, +2.7% |
 | + motion detection | 146 MB, 3.2% | +17 MB, +5.4% |
 
-Enabling thumbnails or motion detection loads the video decoders once, which is most of the jump for the first camera. The test streams are video noise, the hardest content to decode, so motion detection usually costs less on real footage.
+Enabling thumbnails or motion detection loads the video decoders once, which is most of the jump for the first camera. The test streams are video noise, the hardest content to decode, so motion detection usually costs less on real footage. [docs/benchmark.md](docs/benchmark.md) describes the setup and has the scripts to reproduce it.
 
 The release binary is 32 MB and links GStreamer from the system.
 
 ## Pipelines
 
-A pipeline is a small graph: a **trigger** starts it, **actions** do the work, **conditions** and **forks** branch it, and **transports** deliver the result.
+A pipeline is a small graph. A trigger starts it, actions do the work, conditions and forks branch it, and transports deliver the result.
 
 ```mermaid
 flowchart LR
@@ -51,18 +51,18 @@ flowchart LR
     F --> TG["Telegram"]
 ```
 
-- **Triggers:** schedule (cron or interval), event (from a camera or an external source), system (camera disconnected, recording started, and so on), manual, and stat thresholds (CPU, RAM, disk).
-- **Actions:** `extract_clip`, `snapshot`, `start_recording`, `stop_recording`, `transcode`, `watermark`, `merge_clips`, `compress`, `encrypt`, `render_notification`, `delay`.
-- **Transports:** local disk, S3, SFTP, SMB (mounted share), email, Slack, Telegram, webhook.
+Triggers can be a schedule (cron or interval), an event from a camera or an external source, a system signal such as a camera disconnecting or a recording starting, a manual run, or a CPU, RAM or disk threshold.
+
+The actions are `extract_clip`, `snapshot`, `start_recording`, `stop_recording`, `transcode`, `watermark`, `merge_clips`, `compress`, `encrypt`, `render_notification` and `delay`. Results can go to local disk, S3, SFTP, an SMB share mounted on the host, email, Slack, Telegram or a webhook.
 
 Pipelines reload without a restart, and each camera only runs what its enabled pipelines need.
 
 ## Integrations
 
-- **Home Assistant:** HA events trigger Reeframe pipelines over the HA WebSocket API. Reeframe calls back into HA automations through webhooks.
-- **n8n and other workflow tools:** bidirectional. They start pipelines through inbound webhooks (`POST /webhooks/{id}`) or the REST API, and receive results through the webhook transport.
-- **MQTT, API polling and file watchers** as further event sources.
-- **MCP:** planned, so AI assistants can query cameras, recordings and events ([#92](https://github.com/reetmlabs/reeframe-backend/issues/92)).
+- Home Assistant events trigger Reeframe pipelines over the HA WebSocket API, and Reeframe calls back into HA automations through webhooks.
+- n8n and similar workflow tools work in both directions. They start pipelines through inbound webhooks (`POST /webhooks/{id}`) or the REST API, and receive results through the webhook transport.
+- MQTT, API polling and file watchers can also feed events in.
+- An MCP server, so AI assistants can query cameras, recordings and events, is planned ([#92](https://github.com/reetmlabs/reeframe-backend/issues/92)).
 
 ## Features
 
@@ -132,23 +132,14 @@ VMS_ENCRYPTION_KEY=... VMS_AUTH__JWT_SECRET=... ./target/release/vms-daemon
 
 ## Configuration
 
-Settings are read from `/etc/reeframe/config.toml`, then `./reeframe.toml`, then environment variables prefixed `VMS_` (`__` separates sections). Later sources win.
+Settings come from `/etc/reeframe/config.toml`, then `./reeframe.toml`, then environment variables prefixed `VMS_` (`__` separates sections), with later sources winning. Two keys are required:
 
-| Variable | Default | |
-|---|---|---|
-| `VMS_ENCRYPTION_KEY` | – | Required. Base64, 32 bytes. |
-| `VMS_AUTH__JWT_SECRET` | – | Required. Base64, 32 bytes. |
-| `VMS_DATABASE__URL` | `sqlite://./reeframe.db?mode=rwc` | SQLite, MySQL or PostgreSQL URL |
-| `VMS_MEDIA__RECORDING_DIR` | `/var/lib/reeframe/recordings` | |
-| `VMS_MEDIA__CHUNK_DURATION_SECS` | `300` | Length of each MP4 chunk |
-| `VMS_API__BIND` | `0.0.0.0:8080` | REST API |
-| `VMS_RTSP__BIND` | `0.0.0.0:8554` | RTSP relay |
-| `VMS_RECORDINGS__RETENTION_DAYS` | `30` | Delete recordings older than this; overridable per camera |
-| `VMS_RECORDINGS__RETENTION_DISK_THRESHOLD_PERCENT` | `90` | Delete the oldest recordings above this disk usage |
-| `VMS_RECORDINGS__TIMEZONE` | `UTC` | Day boundaries for coverage summaries |
-| `RUST_LOG` | `info` | Log filter |
+| Variable | |
+|---|---|
+| `VMS_ENCRYPTION_KEY` | Base64, 32 bytes. Encrypts camera credentials at rest. |
+| `VMS_AUTH__JWT_SECRET` | Base64, 32 bytes. Signs login tokens. |
 
-Most settings can also be changed at runtime through `PATCH /system/settings`.
+Everything else has a default: the database (SQLite unless you point it at MySQL or PostgreSQL), recording directory, retention, ports and per-camera options. [docs/configuration.md](docs/configuration.md) lists every setting.
 
 ## Architecture
 
@@ -170,7 +161,7 @@ Linux on amd64 and arm64, as a Docker image, a `.deb` package or a plain binary.
 
 ## Status
 
-Pre-1.0: the API and configuration can still change between releases.
+Reeframe is pre-1.0, so the API and configuration can still change between releases.
 
 ## Contributing
 
