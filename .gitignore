@@ -7,7 +7,6 @@ debug/
 Makefile
 Makefile.local.example
 recordings/
-docs/
 
 # Remove Cargo.lock from here if this becomes a library instead of a binary
 # Cargo.lock
