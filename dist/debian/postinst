@@ -36,7 +36,7 @@ case "$1" in
 # VMS_AUTH__JWT_SECRET=
 
 # Optional overrides (built-in defaults shown):
-# VMS_DATABASE__URL=sqlite:///var/lib/reeframe/reeframe.db
+# VMS_DATABASE__URL=sqlite:///var/lib/reeframe/reeframe.db?mode=rwc
 # VMS_MEDIA__RECORDING_DIR=/var/lib/reeframe/recordings
 # VMS_API__BIND=0.0.0.0:8080
 # VMS_RTSP__BIND=0.0.0.0:8554

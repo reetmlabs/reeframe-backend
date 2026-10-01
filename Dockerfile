@@ -89,7 +89,7 @@ USER reeframe
 
 # Default runtime configuration — all values can be overridden via environment
 # variables or a mounted config file at /etc/reeframe/config.toml.
-ENV VMS_DATABASE__URL="sqlite:///var/lib/reeframe/reeframe.db" \
+ENV VMS_DATABASE__URL="sqlite:///var/lib/reeframe/reeframe.db?mode=rwc" \
     VMS_MEDIA__RECORDING_DIR="/var/lib/reeframe/recordings" \
     VMS_API__BIND="0.0.0.0:8080" \
     VMS_RTSP__BIND="0.0.0.0:8554" \
