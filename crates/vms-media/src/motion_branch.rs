@@ -87,6 +87,11 @@ pub struct MotionHandle {
 }
 
 impl MotionHandle {
+    /// The pipeline this branch is attached to.
+    pub(crate) fn pipeline(&self) -> &gstreamer::Pipeline {
+        &self.pipeline
+    }
+
     /// Detach the GStreamer elements, signal the analyzer task to stop, and
     /// wait for it to exit.
     pub async fn stop(self) {
@@ -208,17 +213,6 @@ pub fn attach(
         gstreamer::PadProbeReturn::Remove
     });
 
-    // -- Link tee -> queue --
-    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
-        VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
-    })?;
-    let queue_sink = queue
-        .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("motion queue has no sink pad".into()))?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee->motionqueue: {e}")))?;
-
     // -- Appsink callback: forward raw frames --
     // `drop = true` + a small `max_buffers` means GStreamer itself sheds
     // frames under load; `try_send` on a small bounded channel sheds them
@@ -241,18 +235,30 @@ pub fn attach(
             .build(),
     );
 
-    // -- Bring new elements up to the pipeline's current state --
+    // -- Bring new elements up from the sink backwards, then link the tee --
+    // Data reaching an element still in `Null` gets `FLUSHING`, which stops
+    // the queue's streaming task for good.
     for el in [
-        &queue,
-        &rate,
-        &convert,
-        &scale,
-        &capsfilter,
         appsink.upcast_ref::<gstreamer::Element>(),
+        &capsfilter,
+        &scale,
+        &convert,
+        &rate,
+        &queue,
     ] {
         el.sync_state_with_parent()
             .map_err(|e| VmsError::Media(format!("sync motion element: {e}")))?;
     }
+
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
+    })?;
+    let queue_sink = queue
+        .static_pad("sink")
+        .ok_or_else(|| VmsError::Media("motion queue has no sink pad".into()))?;
+    tee_src
+        .link(&queue_sink)
+        .map_err(|e| VmsError::Media(format!("link tee->motionqueue: {e}")))?;
 
     // -- Analyzer task: owns the MotionAnalyzer, converts signals to Events --
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -398,6 +404,11 @@ fn link_decoder(
         .name(decode_name(camera_id))
         .build()
         .map_err(|e| VmsError::Media(format!("motion {factory}: {e}")))?;
+    // One thread is plenty for a sub stream; the default spawns one per core,
+    // each holding its own frame buffers.
+    if decoder.find_property("max-threads").is_some() {
+        decoder.set_property("max-threads", 1i32);
+    }
     pipeline
         .add(&decoder)
         .map_err(|e| VmsError::Media(format!("motion add {factory}: {e}")))?;

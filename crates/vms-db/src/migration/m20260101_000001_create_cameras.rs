@@ -87,4 +87,6 @@ pub enum Camera {
     DesiredRecording,
     Timezone,
     MotionDetectionEnabled,
+    ThumbnailsEnabled,
+    LiveViewStream,
 }

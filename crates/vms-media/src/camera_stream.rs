@@ -86,6 +86,15 @@ pub(crate) struct ChunkNaming {
     /// Registered by a graceful drain, fired by `handle_fragment_closed`
     /// once `current_path`'s fragment closes.
     close_ack: Mutex<Option<(String, std::sync::mpsc::SyncSender<()>)>>,
+    /// Serializes attaching, rebuilding and detaching the recording branch.
+    /// The API, recording-intent resume and reconnect monitor can all reach
+    /// it at once, and its elements have fixed names.
+    recording_branch: Mutex<()>,
+    /// Set while a detached recording branch finalizes its file. The EOS
+    /// pushed into it can be the pipeline's last sink going EOS, which the
+    /// bus reports as the whole pipeline ending; the monitor must not treat
+    /// that as the camera dropping.
+    finalizing_recording: std::sync::atomic::AtomicBool,
 }
 
 impl ChunkNaming {
@@ -95,6 +104,8 @@ impl ChunkNaming {
             codec: Mutex::new(None),
             current_path: Mutex::new(None),
             close_ack: Mutex::new(None),
+            recording_branch: Mutex::new(()),
+            finalizing_recording: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -121,6 +132,12 @@ impl ChunkNaming {
     /// waiting on (see `drain_recording_branch`).
     fn current_path(&self) -> Option<String> {
         self.current_path.lock().unwrap().clone()
+    }
+
+    /// The main stream's RTP encoding name (e.g. `H264`), once its SDP has
+    /// been negotiated.
+    pub(crate) fn codec(&self) -> Option<String> {
+        self.codec.lock().unwrap().clone()
     }
 }
 
@@ -159,8 +176,12 @@ pub(crate) fn build_camera_stream(
         .map_err(|e| VmsError::Media(format!("rtspsrc: {e}")))?;
 
     // -- Tee (fan-out point — recording, relay, ring buffer, analytics all tap this) --
+    // `allow-not-linked`: every consumer attaches at runtime, so the tee must
+    // tolerate having none. Otherwise its first buffer fails with
+    // `not-linked` and the pipeline reconnects.
     let tee = gstreamer::ElementFactory::make("tee")
         .name(format!("cam_{}_tee", camera_id.as_simple()))
+        .property("allow-not-linked", true)
         .build()
         .map_err(|e| VmsError::Media(format!("tee: {e}")))?;
 
@@ -423,11 +444,16 @@ const CODEC_WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEC_WIRE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Wait until the live pipeline's video codec is wired into `tee` (its sink
-/// pad linked), or `CODEC_WIRE_TIMEOUT` elapses. Attaching the recording
-/// branch before this finishes lets `splitmuxsink` link into `tee` first,
-/// which narrows `tee`'s negotiable caps and can permanently fail the video
-/// link — see `build_camera_stream`'s pad-added handler.
-pub(crate) async fn wait_for_codec_wired(gst_pipeline: &gstreamer::Pipeline, camera_id: Uuid) {
+/// pad linked). Attaching the recording branch before this finishes lets
+/// `splitmuxsink` link into `tee` first, which narrows `tee`'s negotiable
+/// caps and can permanently fail the video link — see
+/// `build_camera_stream`'s pad-added handler. Errors after
+/// `CODEC_WIRE_TIMEOUT`, since the branch would also be built without its
+/// converting parser and never write a file.
+pub(crate) async fn wait_for_codec_wired(
+    gst_pipeline: &gstreamer::Pipeline,
+    camera_id: Uuid,
+) -> Result<(), VmsError> {
     let tee_name = tee_name(camera_id);
     let deadline = tokio::time::Instant::now() + CODEC_WIRE_TIMEOUT;
     loop {
@@ -435,8 +461,14 @@ pub(crate) async fn wait_for_codec_wired(gst_pipeline: &gstreamer::Pipeline, cam
             .by_name(&tee_name)
             .and_then(|tee| tee.static_pad("sink"))
             .is_some_and(|p| p.is_linked());
-        if linked || tokio::time::Instant::now() >= deadline {
-            return;
+        if linked {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(VmsError::Media(format!(
+                "camera {camera_id} stream not connected after {}s",
+                CODEC_WIRE_TIMEOUT.as_secs()
+            )));
         }
         tokio::time::sleep(CODEC_WIRE_POLL_INTERVAL).await;
     }
@@ -474,6 +506,29 @@ pub(crate) fn attach_recording_branch(
     recording_dir: &Path,
     chunk_duration_secs: u64,
 ) -> Result<(), VmsError> {
+    let _guard = naming.recording_branch.lock().unwrap();
+    attach_recording_branch_locked(
+        camera_id,
+        gst_pipeline,
+        naming,
+        chunk_event_tx,
+        recording_dir,
+        chunk_duration_secs,
+    )
+}
+
+/// [`attach_recording_branch`] for a caller already holding
+/// `naming.recording_branch`. Removes whatever it added if any step fails,
+/// so a failed attach never leaves a half-linked branch that
+/// [`is_recording_attached`] would report as recording.
+fn attach_recording_branch_locked(
+    camera_id: Uuid,
+    gst_pipeline: &gstreamer::Pipeline,
+    naming: &Arc<ChunkNaming>,
+    chunk_event_tx: &mpsc::UnboundedSender<RecordingChunkEvent>,
+    recording_dir: &Path,
+    chunk_duration_secs: u64,
+) -> Result<(), VmsError> {
     if is_recording_attached(camera_id, gst_pipeline) {
         return Ok(());
     }
@@ -495,19 +550,39 @@ pub(crate) fn attach_recording_branch(
         new_elements.push(p);
     }
     gst_pipeline
-        .add_many(new_elements)
+        .add_many(new_elements.iter().copied())
         .map_err(|e| VmsError::Media(format!("attach recording branch: add_many: {e}")))?;
 
-    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
-        VmsError::Media("attach recording branch: tee has no src_%u pad template".into())
-    })?;
-    let queue_sink = queue.static_pad("sink").ok_or_else(|| {
-        VmsError::Media("attach recording branch: new queue has no sink pad".into())
-    })?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("attach recording branch: link tee->queue: {e}")))?;
+    let linked = link_recording_branch(&tee, &queue, recparse.as_ref(), &splitmux);
+    if let Err(e) = linked {
+        if let Some(queue_sink) = queue.static_pad("sink") {
+            if let Some(tee_src) = queue_sink.peer() {
+                tee_src.unlink(&queue_sink).ok();
+                tee.release_request_pad(&tee_src);
+            }
+        }
+        for el in &new_elements {
+            el.set_state(gstreamer::State::Null).ok();
+        }
+        gst_pipeline.remove_many(new_elements).ok();
+        return Err(e);
+    }
 
+    tracing::info!(camera_id = %camera_id, "Recording branch attached");
+    Ok(())
+}
+
+/// Link `queue -> [recparse ->] splitmuxsink`, bring those elements up to
+/// the pipeline's state from the sink backwards, and only then connect the
+/// tee. Data reaching an element still in `Null` gets `FLUSHING`, which
+/// stops the queue's streaming task for good; `splitmuxsink`'s first state
+/// change can take seconds while its muxer plugin loads.
+fn link_recording_branch(
+    tee: &gstreamer::Element,
+    queue: &gstreamer::Element,
+    recparse: Option<&gstreamer::Element>,
+    splitmux: &gstreamer::Element,
+) -> Result<(), VmsError> {
     // Direct pad links throughout — `Element::link()`'s generic pad search
     // probes splitmuxsink's request pad speculatively and wrongly rejects it
     // as incompatible against upstream's already-fixed caps.
@@ -518,7 +593,7 @@ pub(crate) fn attach_recording_branch(
         VmsError::Media("attach recording branch: splitmuxsink has no video pad template".into())
     })?;
 
-    if let Some(p) = &recparse {
+    if let Some(p) = recparse {
         let recparse_sink = p.static_pad("sink").ok_or_else(|| {
             VmsError::Media("attach recording branch: recparse has no sink pad".into())
         })?;
@@ -543,11 +618,10 @@ pub(crate) fn attach_recording_branch(
         })?;
     }
 
-    let mut synced = vec![&queue, &splitmux];
-    if let Some(p) = &recparse {
-        synced.push(p);
-    }
-    for el in synced {
+    let mut downstream_first = vec![splitmux];
+    downstream_first.extend(recparse);
+    downstream_first.push(queue);
+    for el in downstream_first {
         el.sync_state_with_parent().map_err(|e| {
             VmsError::Media(format!(
                 "attach recording branch: sync_state_with_parent: {e}"
@@ -555,7 +629,18 @@ pub(crate) fn attach_recording_branch(
         })?;
     }
 
-    tracing::info!(camera_id = %camera_id, "Recording branch attached");
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media("attach recording branch: tee has no src_%u pad template".into())
+    })?;
+    let queue_sink = queue.static_pad("sink").ok_or_else(|| {
+        VmsError::Media("attach recording branch: new queue has no sink pad".into())
+    })?;
+    if let Err(e) = tee_src.link(&queue_sink) {
+        tee.release_request_pad(&tee_src);
+        return Err(VmsError::Media(format!(
+            "attach recording branch: link tee->queue: {e}"
+        )));
+    }
     Ok(())
 }
 
@@ -578,6 +663,7 @@ pub(crate) fn detach_recording_branch(
     gst_pipeline: &gstreamer::Pipeline,
     naming: &Arc<ChunkNaming>,
 ) -> Result<(), VmsError> {
+    let _guard = naming.recording_branch.lock().unwrap();
     let Some(queue) = gst_pipeline.by_name(&recqueue_name(camera_id)) else {
         return Ok(());
     };
@@ -597,6 +683,9 @@ pub(crate) fn detach_recording_branch(
         .ok_or_else(|| VmsError::Media("recording tee src pad has no parent element".into()))?;
 
     let close_rx = naming.watch_current_close();
+    naming
+        .finalizing_recording
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
     let queue_sink_clone = queue_sink.clone();
@@ -610,6 +699,7 @@ pub(crate) fn detach_recording_branch(
 
     let tee_src_clone = tee_src.clone();
     let pipeline_clone = gst_pipeline.clone();
+    let naming = naming.clone();
     std::thread::spawn(move || {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(()) => tracing::info!(camera_id = %camera_id, "Recording branch unlinked from tee"),
@@ -638,6 +728,9 @@ pub(crate) fn detach_recording_branch(
             p.set_state(gstreamer::State::Null).ok();
             pipeline_clone.remove(&p).ok();
         }
+        naming
+            .finalizing_recording
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
     Ok(())
@@ -773,6 +866,7 @@ fn rebuild_recording_branch(
     recording_dir: &Path,
     chunk_duration_secs: u64,
 ) -> Result<(), VmsError> {
+    let _guard = naming.recording_branch.lock().unwrap();
     if !is_recording_attached(camera_id, gst_pipeline) {
         return Ok(());
     }
@@ -805,7 +899,7 @@ fn rebuild_recording_branch(
         .remove_many(old_elements)
         .map_err(|e| VmsError::Media(format!("rebuild recording branch: remove_many: {e}")))?;
 
-    attach_recording_branch(
+    attach_recording_branch_locked(
         camera_id,
         gst_pipeline,
         naming,
@@ -911,6 +1005,7 @@ impl ReconnectPolicy {
 /// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
 /// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
 /// file is finalized on disk.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,
@@ -946,6 +1041,10 @@ pub(crate) fn spawn_monitor(
                                 break 'watch true;
                             }
                             MessageView::Eos(_) => {
+                                if naming.finalizing_recording.load(std::sync::atomic::Ordering::SeqCst) {
+                                    tracing::debug!(camera_id = %camera_id, "EOS from a finalizing recording branch, ignored");
+                                    continue;
+                                }
                                 tracing::warn!(camera_id = %camera_id, "RTSP stream EOS — will reconnect");
                                 break 'watch true;
                             }
@@ -1567,5 +1666,78 @@ mod recording_branch_avc_bridge_tests {
         attach_recording_branch(camera_id, &pipeline, &naming, &tx, &dir, 60)
             .expect("recording branch must link even though tee's feed is byte-stream/au");
         assert!(is_recording_attached(camera_id, &pipeline));
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    fn pipeline_with_tee(camera_id: Uuid) -> gstreamer::Pipeline {
+        gstreamer::init().ok();
+        let pipeline = gstreamer::Pipeline::new();
+        let tee = gstreamer::ElementFactory::make("tee")
+            .name(tee_name(camera_id))
+            .build()
+            .unwrap();
+        let upstream = gstreamer::ElementFactory::make("capsfilter")
+            .property("caps", byte_stream_au_caps("video/x-h264"))
+            .build()
+            .unwrap();
+        pipeline.add_many([&upstream, &tee]).unwrap();
+        upstream.link(&tee).unwrap();
+        pipeline
+    }
+
+    #[test]
+    fn live_tee_tolerates_having_no_consumers() {
+        gstreamer::init().ok();
+        let (pipeline, _) = build_camera_stream(Uuid::new_v4(), "rtsp://127.0.0.1:1/x").unwrap();
+        let tee = pipeline
+            .iterate_elements()
+            .into_iter()
+            .flatten()
+            .find(|e| e.factory().is_some_and(|f| f.name() == "tee"))
+            .unwrap();
+        assert!(tee.property::<bool>("allow-not-linked"));
+    }
+
+    #[test]
+    fn concurrent_attaches_leave_exactly_one_recording_branch() {
+        let camera_id = Uuid::new_v4();
+        let pipeline = pipeline_with_tee(camera_id);
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let dir = std::env::temp_dir();
+
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        attach_recording_branch(camera_id, &pipeline, &naming, &tx, &dir, 60)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let tee = pipeline.by_name(&tee_name(camera_id)).unwrap();
+        assert_eq!(tee.src_pads().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codec_wait_fails_when_the_stream_never_connects() {
+        gstreamer::init().ok();
+        let camera_id = Uuid::new_v4();
+        let pipeline = gstreamer::Pipeline::new();
+        let tee = gstreamer::ElementFactory::make("tee")
+            .name(tee_name(camera_id))
+            .build()
+            .unwrap();
+        pipeline.add(&tee).unwrap();
+
+        assert!(wait_for_codec_wired(&pipeline, camera_id).await.is_err());
     }
 }

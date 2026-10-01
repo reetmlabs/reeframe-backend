@@ -133,6 +133,11 @@ pub struct ThumbnailHandle {
 }
 
 impl ThumbnailHandle {
+    /// The pipeline this branch is attached to.
+    pub(crate) fn pipeline(&self) -> &gstreamer::Pipeline {
+        &self.pipeline
+    }
+
     pub async fn stop(self) {
         if let Err(e) = detach(&self.pipeline, self.camera_id) {
             tracing::warn!(camera_id = %self.camera_id, error = %e, "Failed to detach thumbnail branch");
@@ -248,15 +253,9 @@ pub fn attach(
         }
     });
 
-    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
-        VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
-    })?;
     let queue_sink = queue
         .static_pad("sink")
         .ok_or_else(|| VmsError::Media("thumbnail queue has no sink pad".into()))?;
-    tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee->thumbqueue: {e}")))?;
 
     let gate = Arc::new(Mutex::new(CaptureGate::default()));
 
@@ -312,17 +311,26 @@ pub fn attach(
             .build(),
     );
 
+    // Sink first, tee last: data reaching an element still in `Null` gets
+    // `FLUSHING`, which stops the queue's streaming task for good.
     for el in [
-        &queue,
-        &decodebin,
-        &convert,
-        &capsfilter,
-        &encoder,
         appsink.upcast_ref::<gstreamer::Element>(),
+        &encoder,
+        &capsfilter,
+        &convert,
+        &decodebin,
+        &queue,
     ] {
         el.sync_state_with_parent()
             .map_err(|e| VmsError::Media(format!("sync thumbnail element: {e}")))?;
     }
+
+    let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
+        VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
+    })?;
+    tee_src
+        .link(&queue_sink)
+        .map_err(|e| VmsError::Media(format!("link tee->thumbqueue: {e}")))?;
 
     let cam_dir = thumbnails_dir.join(format!("cam_{}", camera_id.as_simple()));
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();

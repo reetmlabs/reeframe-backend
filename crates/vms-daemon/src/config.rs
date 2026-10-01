@@ -220,6 +220,8 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_AUTH__MODE`           | `auth.mode`                 |
 /// | `VMS_AUTH__JWT_SECRET`     | `auth.jwt_secret`           |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
+// `figment::Error` is large, but it is returned once, at startup.
+#[allow(clippy::result_large_err)]
 pub fn load() -> Result<AppConfig, figment::Error> {
     Figment::new()
         .merge(Serialized::defaults(AppConfig::default()))

@@ -244,14 +244,12 @@ impl RingBufferManager {
         let filename = format!("clip_{}_{}.mp4", camera_id.as_simple(), ts);
         let output_path = output_dir.join(&filename);
 
-        // Ring buffer always taps the main pipeline's tee (see
-        // `MediaManager::attach_ring_buffer`), so the main-quality relay's
-        // cached codec (if a main relay has ever been started) is the right
-        // one to reuse here — falls back to H264 if it hasn't.
-        let codec = self
-            .media
-            .relay_codec(camera_id, crate::relay::RelayQuality::Main)
-            .unwrap_or_else(|| "H264".to_owned());
+        // The ring buffer taps the main pipeline's tee (see
+        // `MediaManager::attach_ring_buffer`), so its frames use the main
+        // stream's codec.
+        let codec = self.media.main_codec(camera_id).ok_or_else(|| {
+            VmsError::Media(format!("main stream codec unknown for camera {camera_id}"))
+        })?;
 
         let out = output_path.clone();
         tokio::task::spawn_blocking(move || mux_to_mp4(frames, &out, &codec))

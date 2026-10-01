@@ -379,6 +379,9 @@ async fn main() -> anyhow::Result<()> {
         media_manager
             .set_motion_detection_enabled(cam.id, cam.motion_detection_enabled)
             .await;
+        media_manager
+            .set_thumbnails_enabled(cam.id, cam.thumbnails_enabled)
+            .await;
     }
 
     // -- Resource Manager --
@@ -450,38 +453,28 @@ async fn main() -> anyhow::Result<()> {
                     build_rtsp_url(sub, decrypted.username.as_deref(), password.as_deref())
                 });
 
+                // Only the stream live view will ask for, so a camera
+                // viewed through its sub stream doesn't hold its main relay.
+                let quality = vms_api::routes::live_view_quality(&decrypted, None);
                 match media_manager
                     .start_relay(
                         id,
-                        vms_media::RelayQuality::Main,
+                        quality,
                         &rtsp_url,
                         sub_rtsp_url.as_deref(),
                         Some(&codec),
                     )
                     .await
                 {
-                    Ok(_) => tracing::info!(camera_id = %id, codec, "Main relay auto-started"),
-                    Err(e) => {
-                        tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start main relay")
+                    Ok(_) => {
+                        tracing::info!(camera_id = %id, codec, ?quality, "Live view relay auto-started")
                     }
-                }
-
-                if sub_rtsp_url.is_some() {
-                    match media_manager
-                        .start_relay(
-                            id,
-                            vms_media::RelayQuality::Sub,
-                            &rtsp_url,
-                            sub_rtsp_url.as_deref(),
-                            Some(&codec),
-                        )
-                        .await
-                    {
-                        Ok(_) => tracing::info!(camera_id = %id, codec, "Sub relay auto-started"),
-                        Err(e) => {
-                            tracing::warn!(camera_id = %id, error = %e, "Failed to auto-start sub relay")
-                        }
-                    }
+                    Err(e) => tracing::warn!(
+                        camera_id = %id,
+                        error = %e,
+                        ?quality,
+                        "Failed to auto-start live view relay",
+                    ),
                 }
             }
         }

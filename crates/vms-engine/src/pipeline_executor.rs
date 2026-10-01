@@ -182,6 +182,7 @@ impl PipelineExecutor {
     /// For `Condition` nodes only the taken-branch child gets an
     /// `active_parents` increment; the other branch's child only gets the
     /// `remaining` decrement, so it will be skipped when it becomes ready.
+    #[allow(clippy::too_many_arguments)]
     async fn walk_dag(
         &self,
         dag: &vms_core::pipeline::PipelineDag,
@@ -363,11 +364,10 @@ pub(crate) fn child_is_active(
     if *parent_type != NodeType::Condition {
         return true;
     }
-    match (branch_taken, edge_type) {
-        (Some(true), Some(EdgeType::TrueBranch)) => true,
-        (Some(false), Some(EdgeType::FalseBranch)) => true,
-        _ => false,
-    }
+    matches!(
+        (branch_taken, edge_type),
+        (Some(true), Some(EdgeType::TrueBranch)) | (Some(false), Some(EdgeType::FalseBranch))
+    )
 }
 
 // -- Transport delivery retry --

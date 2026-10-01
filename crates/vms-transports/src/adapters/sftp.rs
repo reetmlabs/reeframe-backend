@@ -1,7 +1,7 @@
 use std::{
     io::{Read as _, Write as _},
     net::TcpStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use minijinja::Environment;
@@ -262,14 +262,15 @@ enum SftpPayload {
 
 // -- Blocking upload --
 
+#[allow(clippy::too_many_arguments)]
 fn upload_blocking(
     addr: &str,
     username: &str,
     password: Option<&str>,
     private_key: Option<&str>,
     key_passphrase: &str,
-    remote_dir: &PathBuf,
-    remote_file: &PathBuf,
+    remote_dir: &Path,
+    remote_file: &Path,
     payload: SftpPayload,
     node_id: NodeId,
     run_id: Option<Uuid>,
@@ -364,7 +365,7 @@ fn upload_blocking(
 
 // -- mkdir -p over SFTP --
 
-fn mkdir_all(sftp: &ssh2::Sftp, path: &PathBuf) -> Result<(), String> {
+fn mkdir_all(sftp: &ssh2::Sftp, path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component);

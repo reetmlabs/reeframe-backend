@@ -286,7 +286,7 @@ fn build_transport(
     Ok(builder.build())
 }
 
-fn mime_from_path(path: &std::path::PathBuf) -> ContentType {
+fn mime_from_path(path: &std::path::Path) -> ContentType {
     match path.extension().and_then(|e| e.to_str()) {
         Some("mp4") | Some("mov") | Some("avi") => ContentType::parse("video/mp4").unwrap(),
         Some("jpg") | Some("jpeg") => ContentType::parse("image/jpeg").unwrap(),

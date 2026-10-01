@@ -2,7 +2,7 @@ use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vms_db::{
-    entities::camera::{self, RingBufferStorage},
+    entities::camera::{self, LiveViewStream, RingBufferStorage},
     repos::camera::{CreateCamera, UpdateCamera},
 };
 use vms_media::RelayQuality;
@@ -45,6 +45,11 @@ pub struct CameraDto {
     /// Whether motion detection runs while the camera is live. A pipeline
     /// with an `Event` trigger on this camera keeps it running anyway.
     pub motion_detection_enabled: bool,
+    /// Whether scrub-preview thumbnails are captured while the camera records.
+    pub thumbnails_enabled: bool,
+    /// Which stream live view relays by default (`sub` falls back to `main`
+    /// when the camera has no sub stream).
+    pub live_view_stream: LiveViewStream,
     /// Main-quality (full resolution) RTSP relay URL, intended for
     /// full-screen live view. `null` until that relay is started.
     pub relay_url: Option<String>,
@@ -81,6 +86,8 @@ impl CameraDto {
             recording,
             desired_recording: m.desired_recording,
             motion_detection_enabled: m.motion_detection_enabled,
+            thumbnails_enabled: m.thumbnails_enabled,
+            live_view_stream: m.live_view_stream,
             relay_url,
             sub_relay_url,
             created_at: m.created_at,
@@ -106,6 +113,8 @@ pub struct CreateCameraBody {
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
     pub motion_detection_enabled: Option<bool>,
+    pub thumbnails_enabled: Option<bool>,
+    pub live_view_stream: Option<LiveViewStream>,
 }
 
 /// All fields optional — only supplied fields are updated.
@@ -125,6 +134,8 @@ pub struct UpdateCameraBody {
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
     pub motion_detection_enabled: Option<bool>,
+    pub thumbnails_enabled: Option<bool>,
+    pub live_view_stream: Option<LiveViewStream>,
 }
 
 // -- Internal helpers --
@@ -196,13 +207,19 @@ pub async fn create_camera(
             .ring_buffer_storage
             .unwrap_or(RingBufferStorage::Memory),
         enabled: body.enabled.unwrap_or(true),
-        motion_detection_enabled: body.motion_detection_enabled.unwrap_or(true),
+        motion_detection_enabled: body.motion_detection_enabled.unwrap_or(false),
+        thumbnails_enabled: body.thumbnails_enabled.unwrap_or(false),
+        live_view_stream: body.live_view_stream.unwrap_or(LiveViewStream::Sub),
     };
 
     let camera = state.camera_repo.create(input).await?;
     state
         .media_manager
         .set_motion_detection_enabled(camera.id, camera.motion_detection_enabled)
+        .await;
+    state
+        .media_manager
+        .set_thumbnails_enabled(camera.id, camera.thumbnails_enabled)
         .await;
     res.status_code(StatusCode::CREATED);
     Ok(Json(CameraDto::from_model(
@@ -242,6 +259,10 @@ pub async fn update_camera(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
     let body: UpdateCameraBody = parse_body(req).await?;
+    let urls_changed = body.rtsp_url.is_some()
+        || body.sub_rtsp_url.is_some()
+        || body.username.is_some()
+        || body.password.is_some();
 
     let input = UpdateCamera {
         name: body.name,
@@ -260,13 +281,30 @@ pub async fn update_camera(
         retention_disk_threshold_percent: None,
         timezone: None,
         motion_detection_enabled: body.motion_detection_enabled,
+        thumbnails_enabled: body.thumbnails_enabled,
+        live_view_stream: body.live_view_stream,
     };
 
     let camera = state.camera_repo.update(id, input).await?;
+    if urls_changed && state.media_manager.is_running(id) {
+        if let Some((camera, password)) = state.camera_repo.get_decrypted(id).await? {
+            let (rtsp_url, sub_rtsp_url) = resolve_camera_urls(&camera, password.as_deref());
+            state
+                .media_manager
+                .set_stream_urls(id, &rtsp_url, sub_rtsp_url.as_deref())
+                .await;
+        }
+    }
     if body.motion_detection_enabled.is_some() {
         state
             .media_manager
             .set_motion_detection_enabled(id, camera.motion_detection_enabled)
+            .await;
+    }
+    if body.thumbnails_enabled.is_some() {
+        state
+            .media_manager
+            .set_thumbnails_enabled(id, camera.thumbnails_enabled)
             .await;
     }
     let live = state.media_manager.is_running(id);
@@ -357,21 +395,33 @@ pub async fn stop_recording(
     // recovery and reconnect handling keep trying to resume recording.
     state.camera_repo.set_desired_recording(id, false).await?;
 
-    state.media_manager.stop_recording(id)?;
+    state.media_manager.stop_recording(id).await?;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
 
-/// Parse the `?quality=main|sub` query parameter. Defaults to `Main` when
-/// absent, matching the pre-existing single-relay behavior for callers that
-/// don't know about the sub-quality relay yet.
-fn parse_relay_quality(req: &mut Request) -> Result<RelayQuality, ApiError> {
+/// Parse the optional `?quality=main|sub` query parameter.
+fn parse_relay_quality(req: &mut Request) -> Result<Option<RelayQuality>, ApiError> {
     match req.query::<String>("quality").as_deref() {
-        None | Some("main") => Ok(RelayQuality::Main),
-        Some("sub") => Ok(RelayQuality::Sub),
+        None => Ok(None),
+        Some("main") => Ok(Some(RelayQuality::Main)),
+        Some("sub") => Ok(Some(RelayQuality::Sub)),
         Some(other) => Err(ApiError::bad_request(format!(
             "invalid quality '{other}' — expected 'main' or 'sub'"
         ))),
+    }
+}
+
+/// The relay quality live view uses for `camera`. A camera pinned to
+/// `main` always gets main. Otherwise `requested` wins, defaulting to sub,
+/// and sub falls back to main when the camera has no sub stream.
+pub fn live_view_quality(camera: &camera::Model, requested: Option<RelayQuality>) -> RelayQuality {
+    if camera.live_view_stream == LiveViewStream::Main {
+        return RelayQuality::Main;
+    }
+    match requested.unwrap_or(RelayQuality::Sub) {
+        RelayQuality::Sub if camera.sub_rtsp_url.is_none() => RelayQuality::Main,
+        q => q,
     }
 }
 
@@ -379,8 +429,9 @@ fn parse_relay_quality(req: &mut Request) -> Result<RelayQuality, ApiError> {
 ///
 /// Starts an RTSP relay mount for live view — bridged from the camera's main
 /// or sub-stream pipeline, starting whichever one is needed on demand if
-/// it isn't already running (`?quality=sub` requires a `sub_rtsp_url`
-/// configured, but never requires recording to have been started).
+/// it isn't already running. Defaults to the sub stream, falling back to
+/// main without one; a camera whose `live_view_stream` is `main` always
+/// gets main (see [`live_view_quality`]). Never requires recording.
 /// Recording is a separate, explicit concern — see `POST
 /// /cameras/{id}/recording/start`. Probes the codec on first use (any
 /// quality — main and sub are assumed to share one encoding), then
@@ -392,7 +443,7 @@ pub async fn start_relay(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
-    let quality = parse_relay_quality(req)?;
+    let requested = parse_relay_quality(req)?;
 
     let (camera, password) = state
         .camera_repo
@@ -404,6 +455,7 @@ pub async fn start_relay(
         return Err(ApiError::bad_request("camera is disabled"));
     }
 
+    let quality = live_view_quality(&camera, requested);
     let (rtsp_url, sub_rtsp_url) = resolve_camera_urls(&camera, password.as_deref());
 
     let had_cached_codec = camera.codec.is_some();
@@ -426,7 +478,13 @@ pub async fn start_relay(
     }
 
     let relay_url = state.media_manager.relay_url(id, quality);
-    Ok(Json(serde_json::json!({ "relay_url": relay_url })))
+    let quality = match quality {
+        RelayQuality::Main => "main",
+        RelayQuality::Sub => "sub",
+    };
+    Ok(Json(
+        serde_json::json!({ "relay_url": relay_url, "quality": quality }),
+    ))
 }
 
 /// POST /cameras/{id}/relay/stop?quality=main|sub
@@ -438,8 +496,83 @@ pub async fn stop_relay(
 ) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
-    let quality = parse_relay_quality(req)?;
-    state.media_manager.stop_relay(id, quality);
+    let requested = parse_relay_quality(req)?;
+    let camera = state
+        .camera_repo
+        .get(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
+    let quality = live_view_quality(&camera, requested);
+    state.media_manager.stop_relay(id, quality).await;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
+}
+
+#[cfg(test)]
+mod live_view_quality_tests {
+    use super::*;
+
+    fn camera(sub_rtsp_url: Option<&str>, live_view_stream: LiveViewStream) -> camera::Model {
+        let now = chrono::Utc::now().fixed_offset();
+        camera::Model {
+            id: Uuid::new_v4(),
+            name: "cam".into(),
+            description: None,
+            rtsp_url: "rtsp://cam/main".into(),
+            sub_rtsp_url: sub_rtsp_url.map(Into::into),
+            codec: None,
+            manufacturer: None,
+            model: None,
+            username: None,
+            password_enc: None,
+            extra_config: serde_json::json!({}),
+            ring_buffer_duration_secs: 30,
+            ring_buffer_storage: RingBufferStorage::Memory,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+            retention_days: None,
+            retention_disk_threshold_percent: None,
+            desired_recording: false,
+            timezone: None,
+            motion_detection_enabled: false,
+            thumbnails_enabled: false,
+            live_view_stream,
+        }
+    }
+
+    #[test]
+    fn defaults_to_the_sub_stream() {
+        let cam = camera(Some("rtsp://cam/sub"), LiveViewStream::Sub);
+        assert_eq!(live_view_quality(&cam, None), RelayQuality::Sub);
+    }
+
+    #[test]
+    fn falls_back_to_main_without_a_sub_stream() {
+        let cam = camera(None, LiveViewStream::Sub);
+        assert_eq!(live_view_quality(&cam, None), RelayQuality::Main);
+        assert_eq!(
+            live_view_quality(&cam, Some(RelayQuality::Sub)),
+            RelayQuality::Main
+        );
+    }
+
+    #[test]
+    fn a_camera_pinned_to_main_always_gets_main() {
+        let pinned = camera(Some("rtsp://cam/sub"), LiveViewStream::Main);
+        assert_eq!(live_view_quality(&pinned, None), RelayQuality::Main);
+        assert_eq!(
+            live_view_quality(&pinned, Some(RelayQuality::Sub)),
+            RelayQuality::Main
+        );
+    }
+
+    #[test]
+    fn an_explicit_main_request_is_honoured() {
+        let cam = camera(Some("rtsp://cam/sub"), LiveViewStream::Sub);
+        assert_eq!(
+            live_view_quality(&cam, Some(RelayQuality::Main)),
+            RelayQuality::Main
+        );
+    }
 }

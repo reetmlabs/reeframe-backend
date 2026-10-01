@@ -34,8 +34,10 @@ pub(crate) fn build_sub_stream(
         .build()
         .map_err(|e| VmsError::Media(format!("sub-stream rtspsrc: {e}")))?;
 
+    // Consumers attach at runtime, so the tee must tolerate having none.
     let tee = gstreamer::ElementFactory::make("tee")
         .name(format!("cam_{id}_subtee"))
+        .property("allow-not-linked", true)
         .build()
         .map_err(|e| VmsError::Media(format!("sub-stream tee: {e}")))?;
 

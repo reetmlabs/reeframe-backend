@@ -118,10 +118,10 @@ pub fn check_config_completeness(nodes: &[PipelineNode]) -> Vec<ValidationIssue>
                 }
             }
             CoreNodeType::Condition => {
-                if !node
+                if node
                     .condition_expr
                     .as_deref()
-                    .is_some_and(|e| !e.trim().is_empty())
+                    .is_none_or(|e| e.trim().is_empty())
                 {
                     issues.push(ValidationIssue::new(
                         ValidationCategory::ConfigIncomplete,
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn incomplete_transport_node_is_flagged() {
         let node = base_node(CoreNodeType::Transport);
-        let issues = check_config_completeness(&[node.clone()]);
+        let issues = check_config_completeness(std::slice::from_ref(&node));
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].category, ValidationCategory::ConfigIncomplete);
         assert_eq!(issues[0].severity, ValidationSeverity::Error);

@@ -61,6 +61,8 @@ impl MigrationTrait for Migration {
     }
 }
 
+// Variants are the table's column names.
+#[allow(clippy::enum_variant_names)]
 #[derive(Iden)]
 pub enum Event {
     #[iden = "events"]
