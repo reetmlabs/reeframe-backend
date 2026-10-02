@@ -55,7 +55,7 @@ Generate each with `openssl rand -base64 32`.
 | `auth.jwks_refresh_interval_secs` | `300` | How long fetched Coordinator keys are trusted |
 | `gateway.url` | unset | `host:port` of a Reeframe gateway for remote pairing |
 | `gateway.be_id` | unset | This backend's site ID from the Coordinator. Required with `gateway.url` or `auth.mode = "oidc"`. |
-| `log_level` | `info` | `trace`, `debug`, `info`, `warn` or `error`. `RUST_LOG` overrides it. |
+| `log_level` | `info` | Stored and reported, but not applied yet. Set the log filter with `RUST_LOG` instead, for example `RUST_LOG=info`. |
 
 Setting `OTEL_EXPORTER_OTLP_ENDPOINT` (or the traces or logs variant) turns on OpenTelemetry export. Prometheus metrics are always available at `/metrics`.
 
