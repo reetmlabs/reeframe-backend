@@ -18,8 +18,8 @@ use crate::{
 #[derive(Serialize)]
 pub struct SettingDto {
     pub key: &'static str,
-    /// `None` if the setting is sensitive (write-only — `auth.jwt_secret`
-    /// today) or hasn't been seeded into the DB yet.
+    /// `None` if the setting is sensitive and write-only (currently
+    /// `auth.jwt_secret`) or hasn't been seeded into the DB yet.
     pub value: Option<Value>,
     pub hot: bool,
     pub pending_restart: bool,
@@ -63,9 +63,9 @@ pub async fn list_settings(depot: &mut Depot) -> Result<Json<Vec<SettingDto>>, A
 ///
 /// Body is a `{key: value}` map. Unknown keys (including `database.url`/
 /// `encryption_key`, which are never in `KNOWN_SETTINGS`) reject the whole
-/// request before anything is written — no partial application. Hot keys
-/// (currently the two `recordings.*` retention settings) also take effect
-/// immediately; every other key is persisted with `pending_restart: true`.
+/// request before anything is written. Hot keys (currently the two
+/// `recordings.*` retention settings) take effect immediately; every other key
+/// is persisted with `pending_restart: true`.
 #[handler]
 pub async fn update_settings(
     req: &mut Request,
@@ -111,13 +111,11 @@ pub async fn update_settings(
 
 /// POST /system/config-file
 ///
-/// Body is a raw TOML file, same shape as `reeframe.toml`. Rejected with
-/// `400` if it doesn't parse onto `AppConfig` — nothing is touched in that
-/// case. On success: the existing on-disk file is backed up
-/// (`<path>.bak-<timestamp>`), the upload replaces it, and every known
-/// setting's value from the upload is synced into the `settings` table
-/// through the same upsert-and-hot-apply-or-flag path `PATCH
-/// /system/settings` uses.
+/// Body is a raw TOML file in the same shape as `reeframe.toml`. Returns `400`
+/// and changes nothing if it doesn't parse onto `AppConfig`. On success the
+/// existing file is backed up (`<path>.bak-<timestamp>`), the upload replaces
+/// it, and every known setting from the upload is synced into the `settings`
+/// table the same way `PATCH /system/settings` does it.
 #[handler]
 pub async fn upload_config_file(
     req: &mut Request,
@@ -171,10 +169,9 @@ pub async fn upload_config_file(
 
 // -- Hot-apply --
 
-/// Rebuild `RetentionConfig` from whatever is currently stored for both
-/// retention keys (not just the one that was just changed, since
-/// `StatMonitor::set_retention` replaces the whole config) and push it into
-/// the live poller — no restart needed.
+/// Rebuild `RetentionConfig` from the stored values of both retention keys and
+/// push it into the live poller. Both are read because
+/// `StatMonitor::set_retention` replaces the whole config.
 async fn apply_retention_now(state: &AppState) -> Result<(), ApiError> {
     let retention_days = current_number(state, "recordings.retention_days")
         .await?

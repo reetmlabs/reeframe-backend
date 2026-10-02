@@ -1,8 +1,8 @@
 //! Local authentication: first-run admin setup and username/password login.
 //!
-//! `POST /auth/setup` is the one intentionally unauthenticated *write*
-//! endpoint in the whole API — by design, since there is no admin yet to
-//! authenticate as. It refuses to run a second time once any user exists.
+//! `POST /auth/setup` is the only unauthenticated write endpoint in the API,
+//! because there is no admin to authenticate as yet. It refuses to run once
+//! any user exists.
 
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -18,13 +18,12 @@ use crate::{
     state::AppState,
 };
 
-/// Passwords shorter than this are rejected at setup/creation time. Not a
-/// full password policy — just a floor against trivially weak values.
+/// Passwords shorter than this are rejected at setup/creation time. This is a
+/// floor against trivially weak values, not a full password policy.
 const MIN_PASSWORD_LEN: usize = 8;
 
-/// Generic message for every login failure mode (unknown username, wrong
-/// password, disabled account) — distinguishing them in the response would
-/// let a caller enumerate valid usernames or account state.
+/// Generic message for every login failure (unknown username, wrong password,
+/// disabled account), so a caller can't enumerate usernames or account state.
 const INVALID_CREDENTIALS: &str = "invalid username or password";
 
 // -- DTOs --
@@ -83,7 +82,9 @@ pub struct AccessTokenResponse {
 
 // -- Handlers --
 
-/// POST /auth/setup — create the first admin user. `409` once any user exists.
+/// POST /auth/setup
+///
+/// Creates the first admin user. Returns `409` once any user exists.
 #[handler]
 pub async fn setup(req: &mut Request, depot: &mut Depot) -> Result<Json<AuthResponse>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
@@ -127,8 +128,10 @@ pub async fn login(req: &mut Request, depot: &mut Depot) -> Result<Json<AuthResp
     issue_tokens(state, user)
 }
 
-/// POST /auth/refresh — exchange a refresh token for a new access token.
-/// Does **not** rotate the refresh token itself.
+/// POST /auth/refresh
+///
+/// Exchanges a refresh token for a new access token. The refresh token itself
+/// is not rotated.
 #[handler]
 pub async fn refresh(
     req: &mut Request,
@@ -141,8 +144,8 @@ pub async fn refresh(
         .auth_provider
         .verify_refresh_token(&body.refresh_token)?;
 
-    // Re-fetch the user rather than trusting the claims' role/enabled state —
-    // both can have changed in the (potentially 30-day) window since the
+    // Re-fetch the user instead of trusting the claims' role/enabled state,
+    // since both can change in the (potentially 30-day) window since the
     // refresh token was issued.
     let user = state
         .user_repo
@@ -155,9 +158,10 @@ pub async fn refresh(
     Ok(Json(AccessTokenResponse { access_token }))
 }
 
-/// GET /auth/me — the caller's own identity, from the validated access token.
-/// Requires the auth middleware to have already run (it injects the
-/// [`AuthClaims`] this handler reads).
+/// GET /auth/me
+///
+/// The caller's own identity, from the validated access token. Requires the
+/// auth middleware to have run, since it injects the [`AuthClaims`] read here.
 #[handler]
 pub async fn me(depot: &mut Depot) -> Result<Json<UserDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
@@ -201,14 +205,11 @@ mod tests {
         UserRepo::new(db)
     }
 
-    /// The setup -> login -> refresh flow these
-    /// handlers drive works end-to-end through nothing but `UserRepo` and
-    /// `LocalJwtAuthProvider` — no `CoordinatorJwksAuthProvider` and no
-    /// `jwks_url` anywhere in this test. `main.rs` always constructs
-    /// `AppState::auth_provider` regardless of `[auth] mode`, and these
-    /// handlers only ever read `state.auth_provider`, never
-    /// `state.coordinator_auth_provider` — so this exercises exactly the
-    /// same code these routes run in production with Coordinator absent.
+    /// The setup, login and refresh flow works end to end with only `UserRepo`
+    /// and `LocalJwtAuthProvider`, with no `CoordinatorJwksAuthProvider` or
+    /// `jwks_url`. `main.rs` always builds `AppState::auth_provider` regardless
+    /// of `[auth] mode`, and these handlers only read `state.auth_provider`, so
+    /// this is the same code path production runs without a Coordinator.
     #[tokio::test]
     async fn setup_then_login_then_refresh_never_touches_coordinator() {
         let user_repo = test_user_repo().await;

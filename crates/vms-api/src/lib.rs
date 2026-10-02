@@ -1,4 +1,4 @@
-// vms-api — Salvo HTTP server, REST routes, JWT middleware.
+// vms-api: Salvo HTTP server, REST routes, JWT middleware.
 
 pub mod auth;
 pub mod coordinator_auth;

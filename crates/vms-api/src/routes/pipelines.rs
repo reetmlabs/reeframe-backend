@@ -32,8 +32,8 @@ pub struct PipelineDto {
 
 impl From<pipeline::Model> for PipelineDto {
     fn from(m: pipeline::Model) -> Self {
-        // Already computed and stored by PipelineRepo::revalidate — just
-        // counting, no graph analysis on this (hot, list-heavy) path.
+        // Issues are precomputed by PipelineRepo::revalidate, so this hot list
+        // path only counts them.
         let issues: Vec<ValidationIssue> =
             serde_json::from_value(m.validation_issues).unwrap_or_default();
         let validation_error_count = issues
@@ -193,7 +193,7 @@ pub async fn create_pipeline(
     Ok(Json(PipelineDto::from(pipeline)))
 }
 
-/// GET /pipelines/:id
+/// GET /pipelines/{id}
 #[handler]
 pub async fn get_pipeline(
     req: &mut Request,
@@ -211,7 +211,7 @@ pub async fn get_pipeline(
     Ok(Json(PipelineDto::from(pipeline)))
 }
 
-/// PATCH /pipelines/:id
+/// PATCH /pipelines/{id}
 #[handler]
 pub async fn update_pipeline(
     req: &mut Request,
@@ -221,7 +221,6 @@ pub async fn update_pipeline(
     let id = parse_id(req)?;
     let body: UpdatePipelineBody = parse_body(req).await?;
 
-    // Verify it exists first.
     state
         .pipeline_repo
         .get(id)
@@ -248,7 +247,7 @@ pub async fn update_pipeline(
     Ok(Json(PipelineDto::from(updated)))
 }
 
-/// DELETE /pipelines/:id
+/// DELETE /pipelines/{id}
 #[handler]
 pub async fn delete_pipeline(
     req: &mut Request,
@@ -273,7 +272,7 @@ pub async fn delete_pipeline(
     Ok(())
 }
 
-/// POST /pipelines/:id/enable
+/// POST /pipelines/{id}/enable
 #[handler]
 pub async fn enable_pipeline(
     req: &mut Request,
@@ -283,7 +282,7 @@ pub async fn enable_pipeline(
     set_enabled(req, depot, res, true).await
 }
 
-/// POST /pipelines/:id/disable
+/// POST /pipelines/{id}/disable
 #[handler]
 pub async fn disable_pipeline(
     req: &mut Request,
@@ -336,7 +335,7 @@ async fn set_enabled(
     Ok(())
 }
 
-/// POST /pipelines/:id/trigger
+/// POST /pipelines/{id}/trigger
 #[handler]
 pub async fn trigger_pipeline(
     req: &mut Request,
@@ -356,7 +355,7 @@ pub async fn trigger_pipeline(
     Ok(())
 }
 
-/// GET /pipelines/:id/validation
+/// GET /pipelines/{id}/validation
 #[handler]
 pub async fn get_pipeline_validation(
     req: &mut Request,
@@ -379,7 +378,7 @@ pub async fn get_pipeline_validation(
     ))
 }
 
-/// GET /pipelines/:id/runs
+/// GET /pipelines/{id}/runs
 #[handler]
 pub async fn list_runs(
     req: &mut Request,
@@ -397,7 +396,7 @@ pub async fn list_runs(
     Ok(Json(runs.into_iter().map(PipelineRunDto::from).collect()))
 }
 
-/// GET /pipelines/:id/runs/:run_id
+/// GET /pipelines/{id}/runs/{run_id}
 #[handler]
 pub async fn get_run(
     req: &mut Request,

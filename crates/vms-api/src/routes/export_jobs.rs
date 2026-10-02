@@ -56,11 +56,11 @@ impl From<export_job::Model> for ExportJobDto {
 
 /// POST /recordings/export
 ///
-/// Concatenates every chunk covering `[from, to)` into one downloadable
-/// file — the first/last chunk are trimmed to the exact requested boundary
-/// (see `vms_media::export_range`), middle chunks used in full. Runs in the
-/// background: this returns `202` with a job id immediately, the caller
-/// polls `GET /export-jobs/{id}` for progress.
+/// Concatenates every chunk covering `[from, to)` into one downloadable file.
+/// The first and last chunks are trimmed to the requested boundaries (see
+/// `vms_media::export_range`); middle chunks are used in full. The job runs in
+/// the background: this returns `202` with a job id and the caller polls
+/// `GET /export-jobs/{id}` for progress.
 #[handler]
 pub async fn create_export(
     req: &mut Request,
@@ -189,8 +189,7 @@ async fn run_export_job(
         .await
         .map_err(|e| e.to_string())?;
 
-    // The still-open chunk (if any) is actively being written by
-    // splitmuxsink — never read a file that's still being appended to.
+    // Skip the open chunk, if any: splitmuxsink is still appending to it.
     chunks.retain(|c| c.end_time.is_some());
 
     if chunks.is_empty() {

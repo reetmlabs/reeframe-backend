@@ -4,21 +4,19 @@ use vms_db::Migrator;
 
 use crate::state::AppState;
 
-/// GET /health — liveness. Only proves the HTTP server itself is up; no DB
+/// GET /health (liveness). Only proves the HTTP server is up. It does no DB
 /// or downstream checks, so it never blocks behind a slow database.
 #[handler]
 pub async fn health(res: &mut Response) {
     res.render(Json(serde_json::json!({"status": "ok"})));
 }
 
-/// GET /health/ready — readiness. Additionally checks the DB connection is
-/// alive and no migrations are pending, returning `503` until both are true.
+/// GET /health/ready (readiness). Also checks that the DB connection is alive
+/// and no migrations are pending, returning `503` until both are true.
 ///
-/// In practice the daemon always applies pending migrations at startup
-/// before it starts serving requests (see `main.rs`), so the pending-check
-/// here mostly guards against someone pointing two daemon versions at the
-/// same database rather than a normal day-2 failure mode — but it's cheap
-/// and matches what the endpoint's name promises.
+/// The daemon applies pending migrations at startup before serving requests,
+/// so the pending check mainly catches two daemon versions sharing one
+/// database.
 #[handler]
 pub async fn ready(depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");

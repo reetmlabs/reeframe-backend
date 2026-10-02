@@ -1,11 +1,10 @@
 //! Inbound webhook receiver for `webhook`-typed sources.
 //!
-//! Unlike the other source adapters, a webhook has no persistent connection
-//! for `SourceManager` to own — this route is mounted unconditionally and
-//! decides for itself, per request, whether to accept: the source must
-//! exist, be a `webhook`-typed source, be enabled, and be currently acquired
-//! by an enabled pipeline (`ResourceState::Running`). On acceptance it
-//! publishes an `Event` directly onto the Event Bus.
+//! A webhook has no persistent connection for `SourceManager` to own, so this
+//! route is always mounted and decides per request whether to accept. The
+//! source must exist, be `webhook`-typed, be enabled, and be acquired by an
+//! enabled pipeline (`ResourceState::Running`). Accepted requests are published
+//! as an `Event` directly onto the Event Bus.
 
 use salvo::prelude::*;
 use serde::Deserialize;
@@ -59,8 +58,8 @@ mod tests {
 
     #[test]
     fn empty_secrets_match_each_other() {
-        // Only reachable if `shared_secret` were configured as an empty
-        // string, which is a misconfiguration, not a code path to special-case.
+        // Only reachable with an empty `shared_secret`, which is a
+        // misconfiguration and not worth special-casing.
         assert!(secrets_match(b"", b""));
     }
 }
@@ -71,10 +70,8 @@ pub async fn receive_webhook(req: &mut Request, depot: &mut Depot) -> Result<(),
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let source_id = parse_id(req)?;
 
-    // Not found, wrong type, disabled, or not currently acquired all fold
-    // into the same 404 — an inbound caller can't distinguish "doesn't
-    // exist" from "exists but isn't accepting requests right now", which
-    // avoids leaking which of those is true.
+    // Not found, wrong type, disabled and not acquired all return the same 404
+    // so a caller can't tell whether the source exists.
     let not_found = || ApiError::not_found(format!("source {source_id} not found"));
 
     let source = state

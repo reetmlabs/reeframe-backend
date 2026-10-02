@@ -4,8 +4,8 @@ use vms_core::VmsError;
 
 /// API-level error: an HTTP status code plus a JSON `{"error": "..."}` body.
 ///
-/// Implements `Writer` so it can be used as the `Err` arm of a handler's
-/// `Result` return type directly — Salvo renders it without any extra wiring.
+/// Implements `Writer` so handlers can return it as the `Err` arm of their
+/// `Result` and Salvo renders it directly.
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,

@@ -1,13 +1,9 @@
-//! Pipeline node CRUD — `/pipelines/{id}/nodes[/{node_id}]`.
+//! Pipeline node CRUD: `/pipelines/{id}/nodes[/{node_id}]`. Edges and
+//! triggers have their own route modules.
 //!
-//! The missing write side of a shape that's been read by the DAG compiler
-//! for a while: before this, a pipeline's nodes could only ever be
-//! inserted directly into the database. Edges and triggers are the other
-//! two pieces of the same gap, handled by their own route modules.
-//!
-//! Response bodies return [`PipelineNode`] directly rather than a hand-built
-//! DTO — it already derives `Serialize`, has no sensitive fields, and is
-//! exactly the shape a pipeline-editing client needs.
+//! Responses return [`PipelineNode`] directly instead of a separate DTO: it
+//! already derives `Serialize`, has no sensitive fields, and is the shape a
+//! pipeline-editing client needs.
 
 use salvo::prelude::*;
 use serde::Deserialize;
@@ -22,9 +18,9 @@ use crate::{
 
 // -- Request bodies --
 
-/// Trigger fields carried by a `trigger_root` node — mirrors
-/// `pipeline_triggers::CreateTriggerBody` exactly, since saving this node is
-/// what creates/updates the pipeline's one row in that table (see
+/// Trigger fields carried by a `trigger_root` node. Matches
+/// `pipeline_triggers::CreateTriggerBody` because saving this node creates or
+/// updates the pipeline's single trigger row (see
 /// `PipelineRepo::upsert_node_trigger`).
 #[derive(Deserialize)]
 pub struct NodeTriggerBody {
@@ -53,7 +49,7 @@ pub struct CreateNodeBody {
     pub pos_y: Option<f64>,
 }
 
-/// All fields optional — only supplied fields are updated. `node_type`
+/// All fields are optional; only supplied fields are updated. `node_type`
 /// cannot be changed after creation; see [`UpdateNode`]'s doc comment.
 #[derive(Deserialize)]
 pub struct UpdateNodeBody {
@@ -167,10 +163,10 @@ pub async fn update_node(
     let (pipeline_id, node_id) = parse_pipeline_and_node_id(req)?;
     let body: UpdateNodeBody = parse_body(req).await?;
 
-    // Confirm the node belongs to this pipeline before touching it — without
-    // this, a valid node_id under the wrong pipeline_id in the URL would
-    // silently update someone else's node. Also needed to know its node_type,
-    // since `trigger` is only valid on a trigger_root node.
+    // Confirm the node belongs to this pipeline, otherwise a valid node_id
+    // under the wrong pipeline_id would update another pipeline's node. The
+    // lookup also gives us node_type, since `trigger` is only valid on a
+    // trigger_root node.
     let existing = require_node_in_pipeline(state, pipeline_id, node_id).await?;
     if body.trigger.is_some() && existing.node_type != NodeType::TriggerRoot {
         return Err(ApiError::bad_request(
@@ -217,8 +213,7 @@ pub async fn update_node(
 
 /// DELETE /pipelines/{id}/nodes/{node_id}
 ///
-/// Cascades to any edges referencing this node — see
-/// `PipelineRepo::delete_node`'s doc comment.
+/// Cascades to any edges referencing this node (see `PipelineRepo::delete_node`).
 #[handler]
 pub async fn delete_node(
     req: &mut Request,
@@ -231,9 +226,8 @@ pub async fn delete_node(
     let existing = require_node_in_pipeline(state, pipeline_id, node_id).await?;
     state.pipeline_repo.delete_node(node_id).await?;
     if existing.node_type == NodeType::TriggerRoot {
-        // No trigger_root node left to represent it — drop the pipeline's
-        // trigger row(s) too, rather than leaving an enabled trigger that
-        // silently keeps holding a source/camera resource open.
+        // With no trigger_root node left, drop the pipeline's trigger rows so
+        // an enabled trigger doesn't keep holding a source or camera open.
         state
             .pipeline_repo
             .delete_triggers_for_pipeline(pipeline_id)

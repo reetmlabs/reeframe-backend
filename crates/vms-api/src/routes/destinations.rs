@@ -81,7 +81,7 @@ pub struct CreateDestinationBody {
     pub enabled: Option<bool>,
 }
 
-/// All fields optional — only supplied fields are updated.
+/// All fields are optional; only supplied fields are updated.
 #[derive(Deserialize)]
 pub struct UpdateDestinationBody {
     pub name: Option<String>,
@@ -186,8 +186,8 @@ pub async fn update_destination(
         state.invalidate_transport(id);
     }
 
-    // Only a real enabled/disabled transition marks or clears dependent
-    // nodes — every other field change leaves them alone.
+    // Only an actual enabled/disabled transition marks or clears dependent
+    // nodes. Other field changes leave them alone.
     let affected = match (was_enabled, dest.enabled) {
         (true, false) => state.pipeline_repo.mark_destination_disabled(id).await?,
         (false, true) => state.pipeline_repo.clear_destination_unresolved(id).await?,
@@ -211,8 +211,8 @@ pub async fn delete_destination(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
 
-    // Nodes that pointed at this destination aren't dropped or left
-    // blocking the delete — they're unlinked and marked unresolved instead.
+    // Nodes that pointed at this destination are unlinked and marked
+    // unresolved, so they neither block the delete nor get dropped.
     let affected = state.pipeline_repo.unlink_deleted_destination(id).await?;
     state.dest_repo.delete(id).await?;
     state.refresh_pipelines().await?;

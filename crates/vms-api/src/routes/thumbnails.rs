@@ -1,6 +1,6 @@
-//! Timeline thumbnails: listing (index) and serving (JPEG bytes). No DB
-//! row per thumbnail — the on-disk `{unix_ms}.jpg` filename (written by
-//! `vms_media::thumbnail_branch`) *is* the index.
+//! Timeline thumbnails: listing (index) and serving (JPEG bytes). There is no
+//! DB row per thumbnail; the on-disk `{unix_ms}.jpg` filename written by
+//! `vms_media::thumbnail_branch` serves as the index.
 
 use std::path::Path;
 
@@ -27,8 +27,8 @@ pub struct ThumbnailDto {
 
 /// GET /cameras/{id}/recordings/{recording_id}/thumbnails
 ///
-/// Thumbnails within that chunk's `[start_time, end_time)` — open-ended
-/// (now) for a chunk still being written.
+/// Thumbnails within that chunk's `[start_time, end_time)`. For a chunk still
+/// being written, the end is now.
 #[handler]
 pub async fn list_thumbnails(
     req: &mut Request,
@@ -69,7 +69,7 @@ pub async fn list_thumbnails(
 /// GET /cameras/{id}/thumbnails/{filename}
 ///
 /// Serves one thumbnail JPEG off disk. `filename` is validated as
-/// `{digits}.jpg` before touching the filesystem (see below).
+/// `{digits}.jpg` before touching the filesystem.
 #[handler]
 pub async fn get_thumbnail(
     req: &mut Request,
@@ -112,8 +112,8 @@ fn parse_thumbnail_filename(req: &mut Request) -> Result<String, ApiError> {
     Ok(raw)
 }
 
-/// Accepts only `{digits}.jpg` — rejects anything a path-traversal attempt
-/// could use (`..`, `/`, etc.) before it ever reaches the filesystem.
+/// Accepts only `{digits}.jpg`, so path-traversal input (`..`, `/`, etc.) never
+/// reaches the filesystem.
 fn validate_thumbnail_filename(raw: &str) -> Result<(), ApiError> {
     let stem = raw
         .strip_suffix(".jpg")

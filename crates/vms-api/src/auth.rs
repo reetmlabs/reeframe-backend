@@ -1,4 +1,4 @@
-//! Local JWT issuance and verification — the community `AuthProvider`.
+//! Local JWT issuance and verification, the built-in `AuthProvider`.
 //!
 //! [`LocalJwtAuthProvider`] both issues tokens (`POST /auth/setup`,
 //! `POST /auth/login`, `POST /auth/refresh`) and verifies them
@@ -20,8 +20,8 @@ enum TokenType {
     Refresh,
 }
 
-/// JWT payload issued by this provider. Not part of the public API — callers
-/// get an opaque signed string back, never this struct directly.
+/// JWT payload issued by this provider. Private: callers only ever get the
+/// opaque signed string.
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: Uuid,
@@ -32,9 +32,8 @@ struct Claims {
     exp: i64,
 }
 
-/// The community `AuthProvider`: HS256 JWTs signed with a locally configured
-/// secret. No external dependency — this is what makes `[auth] mode =
-/// "local"` work with zero external services.
+/// HS256 JWTs signed with a locally configured secret. This lets
+/// `[auth] mode = "local"` work without any external service.
 #[derive(Clone)]
 pub struct LocalJwtAuthProvider {
     secret: String,
@@ -60,10 +59,9 @@ impl LocalJwtAuthProvider {
     }
 
     /// Verify a refresh token specifically, rejecting an access token
-    /// presented in its place. Not part of the generic [`AuthProvider`]
-    /// trait — refresh-grant semantics are specific to local JWT issuance,
-    /// not something every auth backend (SAML, OIDC) shares the same shape
-    /// for.
+    /// presented in its place. Kept off the generic [`AuthProvider`] trait
+    /// because refresh grants are specific to local JWT issuance and other
+    /// backends (SAML, OIDC) handle them differently.
     pub fn verify_refresh_token(&self, token: &str) -> Result<AuthClaims, VmsError> {
         let claims = self.decode_token(token)?;
         if claims.token_type != TokenType::Refresh {
@@ -197,8 +195,8 @@ mod tests {
     #[tokio::test]
     async fn expired_access_token_is_rejected() {
         // `jsonwebtoken`'s default `Validation` allows a 60s leeway on `exp`,
-        // so the TTL needs to be well past that for this to actually exercise
-        // expiry rejection rather than the leeway window.
+        // so the TTL must be well past that to test expiry rather than the
+        // leeway window.
         let provider = LocalJwtAuthProvider::new("test-secret", -120, 2_592_000);
         let token = provider.issue_access_token(&test_user()).unwrap();
 

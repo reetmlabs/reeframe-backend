@@ -54,9 +54,9 @@ use crate::{
     state::AppState,
 };
 
-/// Routes reachable without a valid access token: health, inbound webhooks
-/// (which have their own accept/reject logic instead), and the three auth
-/// endpoints whose entire purpose is obtaining or refreshing a token.
+/// Routes reachable without a valid access token: health, metrics, inbound
+/// webhooks (which do their own accept/reject check), and the three auth
+/// endpoints that obtain or refresh a token.
 fn public_routes() -> Router {
     Router::new()
         .push(
@@ -77,7 +77,7 @@ fn public_routes() -> Router {
         )
 }
 
-/// Everything else — gated behind [`AuthMiddleware`].
+/// Everything else, gated behind [`AuthMiddleware`].
 fn protected_routes() -> Router {
     Router::new()
         .hoop(AuthMiddleware)

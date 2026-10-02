@@ -13,23 +13,20 @@ use crate::{error::ApiError, state::AppState};
 /// `Authorization: Bearer` header is present.
 const API_KEY_HEADER: &str = "x-api-key";
 
-/// Gates every route it's applied to behind either a valid `Authorization:
-/// Bearer <access_token>` header or an `X-API-Key` header (verified via
-/// `AppState::api_key_repo`). On success, injects the resulting
-/// [`AuthClaims`] into the [`Depot`] for downstream handlers (e.g. `GET
-/// /auth/me`) to read.
+/// Requires either a valid `Authorization: Bearer <access_token>` header or
+/// an `X-API-Key` header (verified via `AppState::api_key_repo`). On success,
+/// injects the resulting [`AuthClaims`] into the [`Depot`] for handlers such
+/// as `GET /auth/me`.
 ///
 /// A bearer token is checked against `AppState::auth_provider` (local JWT)
-/// first, and only if that fails against `AppState::coordinator_auth_provider`
-/// (Coordinator-issued JWT) when one is configured — the two are
-/// independent, additive credential paths, not a replacement of one by the
-/// other; local auth keeps working with zero Coordinator dependency.
+/// first, then against `AppState::coordinator_auth_provider` (Coordinator-issued
+/// JWT) if one is configured. Both paths are accepted side by side, and local
+/// auth works without a Coordinator.
 ///
-/// Mounted on every route except `GET /health`, `POST /webhooks/{id}`
-/// (external callers can't present either credential — the webhook
-/// route does its own accept/reject check instead), and `POST
-/// /auth/{setup,login,refresh}` (issuing/refreshing a token can't itself
-/// require one).
+/// Mounted on every route except `GET /health`, `GET /health/ready`,
+/// `GET /metrics`, `POST /webhooks/{id}` (external callers have no credential;
+/// the webhook route does its own check) and `POST /auth/{setup,login,refresh}`
+/// (obtaining a token can't require one).
 pub struct AuthMiddleware;
 
 #[async_trait]
@@ -77,13 +74,11 @@ async fn verify_bearer_token(state: &AppState, token: &str) -> Result<AuthClaims
     verify_bearer_token_with(&state.auth_provider, coordinator, token).await
 }
 
-/// Tries `local` first; only falls back to `coordinator` (if configured)
-/// when local verification fails — a local token and a Coordinator token are
-/// never mistaken for each other (different signing algorithms), so this
-/// never masks a genuine local-auth failure with a misleading Coordinator
-/// error unless Coordinator trust is actually enabled. Generic over
-/// `&dyn AuthProvider` (rather than taking `&AppState` directly) so the
-/// routing logic is testable without constructing a full `AppState`.
+/// Tries `local` first and falls back to `coordinator` (if configured) only
+/// when local verification fails. The two token kinds use different signing
+/// algorithms, so one is never accepted as the other. When no Coordinator is
+/// configured, the local error is returned unchanged. Takes `&dyn AuthProvider`
+/// instead of `&AppState` so it is testable without a full `AppState`.
 async fn verify_bearer_token_with(
     local: &dyn AuthProvider,
     coordinator: Option<&dyn AuthProvider>,
@@ -110,8 +105,8 @@ async fn verify_api_key(state: &AppState, key: &str) -> Result<AuthClaims, VmsEr
         user_id: user.id,
         username: user.username,
         roles: vec![user.role.as_str().to_string()],
-        // API keys don't expire the way JWTs do — revocation is by deleting
-        // the row (`DELETE /users/{id}/api-keys/{key_id}`), not by time.
+        // API keys don't expire. They are revoked by deleting the row
+        // (`DELETE /users/{id}/api-keys/{key_id}`).
         expires_at: i64::MAX,
     })
 }
@@ -129,16 +124,14 @@ fn extract_api_key(req: &Request) -> Option<&str> {
 }
 
 /// Records `http_requests_total{route, method, status}` for every request
-/// that matches a route. Holds its own `Arc<Metrics>` (passed in at
-/// construction, in `build_router`) rather than reading it from the
-/// `Depot`, so it works whether it's mounted before or after the
-/// `affix-state` hoop.
+/// that matches a route. Holds its own `Arc<Metrics>` (passed in by
+/// `build_router`) instead of reading it from the `Depot`, so it works whether
+/// it is mounted before or after the `affix-state` hoop.
 ///
-/// `req.matched_path()` (the `matched-path` Salvo feature) is already
-/// populated by the time any hoop runs — Salvo resolves routing before
-/// dispatching the hoop chain — so it's safe to read before *or* after
-/// `ctrl.call_next()`. The status code is not: it's only final once the
-/// downstream chain has actually run, so that read happens after.
+/// Salvo resolves routing before running the hoop chain, so
+/// `req.matched_path()` (the `matched-path` feature) can be read at any point.
+/// The status code is only final after the downstream chain has run, so it is
+/// read after `ctrl.call_next()`.
 pub struct MetricsMiddleware {
     metrics: Arc<Metrics>,
 }
@@ -162,8 +155,8 @@ impl Handler for MetricsMiddleware {
 
         ctrl.call_next(req, depot, res).await;
 
-        // Unset means no handler explicitly set one — Salvo defaults that to
-        // 200 once every hoop has run, so mirror that here.
+        // Unset means no handler set a status; Salvo defaults that to 200, so
+        // record the same.
         let status = res.status_code.unwrap_or(StatusCode::OK);
         self.metrics
             .record_http_request(req.matched_path(), &method, status.as_u16());
@@ -204,8 +197,8 @@ mod tests {
 
     #[test]
     fn bearer_prefix_without_a_token_returns_empty_str_not_none() {
-        // "Bearer " with nothing after it still strips to an empty token —
-        // that's rejected later by `verify_token`, not here.
+        // "Bearer " with nothing after it strips to an empty token, which
+        // `verify_token` rejects later.
         let req = request_with_auth_header(Some("Bearer "));
         assert_eq!(extract_bearer_token(&req), Some(""));
     }
@@ -226,11 +219,10 @@ mod tests {
 
     // -- Dual-issuer bearer token verification --
     //
-    // Exercised with two `LocalJwtAuthProvider`s standing in for "local" and
-    // "coordinator" — the routing logic in `verify_bearer_token_with` is
-    // generic over any `AuthProvider`, so it doesn't need a real
-    // `CoordinatorJwksAuthProvider` (already covered by its own tests) to
-    // verify the fallback behavior itself.
+    // Two `LocalJwtAuthProvider`s stand in for "local" and "coordinator".
+    // `verify_bearer_token_with` accepts any `AuthProvider`, so the fallback
+    // logic can be tested without a real `CoordinatorJwksAuthProvider`, which
+    // has its own tests.
 
     use chrono::{FixedOffset, Utc};
     use vms_db::entities::user::{self, UserRole};

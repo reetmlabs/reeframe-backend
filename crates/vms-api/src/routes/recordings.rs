@@ -11,9 +11,8 @@ use crate::{
 
 // -- Response DTOs --
 
-/// A recording chunk as returned by the API. `file_path` (the on-disk
-/// location) is deliberately not exposed — callers only ever need
-/// `GET /recordings/{id}/stream` to actually fetch the bytes.
+/// A recording chunk as returned by the API. The on-disk `file_path` is not
+/// exposed; callers fetch the bytes through `GET /recordings/{id}/stream`.
 #[derive(Serialize)]
 pub struct RecordingDto {
     pub id: Uuid,
@@ -44,9 +43,9 @@ pub struct PlaybackDto {
     pub offset_secs: f64,
 }
 
-/// One precomputed daily-coverage row — see `vms_engine::coverage` for how
+/// One precomputed daily-coverage row. See `vms_engine::coverage` for how
 /// `session_ranges`/`coverage_seconds` are derived (a port of the frontend's
-/// own `RecordingModel::dailySummaries()` merge algorithm).
+/// `RecordingModel::dailySummaries()` merge algorithm).
 #[derive(Serialize)]
 pub struct DailyCoverageDto {
     pub camera_id: Uuid,
@@ -103,10 +102,9 @@ pub(crate) fn parse_query_datetime(
         })
 }
 
-/// A still-open row (`end_time IS NULL`) only proves the chunk is genuinely
-/// being written right now if its camera is actually recording. Otherwise
-/// it's an interrupted chunk that never got finalized or cleaned up —
-/// serving it would hand back a file that fails to play.
+/// An open row (`end_time IS NULL`) is only being written if its camera is
+/// recording. Otherwise it is an interrupted chunk that was never finalized,
+/// and serving it would return a file that fails to play.
 fn is_untrustworthy_open_chunk(
     end_time: Option<DateTime<FixedOffset>>,
     camera_is_recording: bool,
@@ -145,17 +143,16 @@ pub async fn list_recordings(
 
 /// GET /cameras/{id}/playback?at=<rfc3339>
 ///
-/// Resolves a specific instant to the chunk covering it, plus how far into
-/// that chunk it is — the entry point for "start playback from this point in
-/// the past." `stream_url` is Range-enabled MP4 (`GET /recordings/{id}/stream`);
-/// the caller loads it and seeks to `offset_secs`, no server-side transcoding
-/// needed since chunks are already faststart-remuxed on close.
+/// Resolves an instant to the chunk covering it and the offset into that
+/// chunk, for starting playback at a point in the past. `stream_url` is a
+/// Range-enabled MP4 (`GET /recordings/{id}/stream`); the caller loads it and
+/// seeks to `offset_secs`. No transcoding is needed because chunks are
+/// faststart-remuxed on close.
 ///
-/// If `at` falls in a gap (camera offline, outside all recorded history, or
-/// resolves only to a still-open chunk from a camera that isn't actually
-/// recording right now), responds `404` with the nearest chunk boundaries
-/// on either side so the caller can offer "jump to nearest available
-/// footage" instead of a dead end.
+/// If `at` falls in a gap (camera offline, outside recorded history, or only
+/// an open chunk from a camera that isn't recording), responds `404` with the
+/// nearest chunk boundaries on either side so the caller can jump to the
+/// nearest available footage.
 #[handler]
 pub async fn get_playback(
     req: &mut Request,
@@ -202,11 +199,11 @@ pub async fn get_playback(
 
 /// GET /recordings/{id}/stream
 ///
-/// Serves the chunk's MP4 file directly off disk with `Accept-Ranges: bytes`
-/// support (`salvo::fs::NamedFile` handles Range parsing, `206 Partial
-/// Content`, ETag/If-None-Match, etc.) — a browser/player `<video>` element
-/// can seek within it with zero server-side work per seek, since chunks are
-/// already faststart-remuxed (`moov` before `mdat`) when they're closed.
+/// Serves the chunk's MP4 file off disk with `Accept-Ranges: bytes` support
+/// (`salvo::fs::NamedFile` handles Range parsing, `206 Partial Content`,
+/// ETag/If-None-Match, etc.). A `<video>` element can seek without
+/// server-side work because chunks are faststart-remuxed (`moov` before
+/// `mdat`) when they close.
 #[handler]
 pub async fn stream_recording(
     req: &mut Request,
@@ -228,10 +225,9 @@ pub async fn stream_recording(
 
 /// GET /cameras/{id}/recordings/daily-summary?from=<yyyy-mm-dd>&to=<yyyy-mm-dd>
 ///
-/// Precomputed per-day coverage for one camera, `date` in `[from, to)` —
-/// `O(days)`, not `O(chunks)`. This is what a recordings panel should call
-/// for a whole visible range instead of `GET /cameras/{id}/recordings`
-/// followed by client-side bucketing.
+/// Precomputed per-day coverage for one camera, `date` in `[from, to)`. Costs
+/// `O(days)` instead of `O(chunks)`, so a recordings panel should use it for a
+/// visible range instead of bucketing `GET /cameras/{id}/recordings` itself.
 #[handler]
 pub async fn list_daily_summary(
     req: &mut Request,
@@ -256,8 +252,8 @@ pub async fn list_daily_summary(
 
 /// GET /recordings/daily-summary?camera_ids=<uuid,uuid,...>&from=&to=
 ///
-/// Same as [`list_daily_summary`], across multiple cameras in one call — the
-/// fleet-overview shape, one query instead of N per-camera requests.
+/// Same as [`list_daily_summary`] for multiple cameras in one query, for fleet
+/// overviews that would otherwise need one request per camera.
 #[handler]
 pub async fn list_daily_summary_bulk(
     req: &mut Request,

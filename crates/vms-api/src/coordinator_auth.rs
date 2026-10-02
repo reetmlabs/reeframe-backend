@@ -1,20 +1,17 @@
 //! Coordinator-issued JWT verification via JWKS.
 //!
-//! [`CoordinatorJwksAuthProvider`] is the second, independent `AuthProvider`
-//! this BE trusts, alongside [`crate::auth::LocalJwtAuthProvider`]. It fetches
-//! Coordinator's `GET /.well-known/jwks.json` and caches the result;
-//! verification of every token happens locally against that cache, so the BE
-//! never makes a network call to Coordinator on the request path — only when
-//! the cache is stale (see [`CoordinatorJwksAuthProvider::ensure_fresh`]).
+//! [`CoordinatorJwksAuthProvider`] is a second `AuthProvider` this server
+//! trusts, alongside [`crate::auth::LocalJwtAuthProvider`]. It fetches the
+//! Coordinator's `GET /.well-known/jwks.json` and verifies tokens locally
+//! against the cached key set, so the request path only calls the Coordinator
+//! when the cache is stale (see [`CoordinatorJwksAuthProvider::ensure_fresh`]).
 //!
-//! Claims shape mirrors `coordinator-auth::token::SiteTokenClaims` in the
-//! Coordinator repo exactly (`sub`, `username`, `aud`, `role`, `exp`) — both
-//! sides must agree since this decodes tokens Coordinator signs with its
-//! Ed25519 key. Coordinator's *other* token shape (`coordinator-auth::token::
-//! Claims`, `is_admin` instead of `aud`/`role`) is a general identity
-//! assertion never meant to reach a BE directly — `set_audience` below
-//! rejects it outright (it carries no `aud` claim at all) rather than this
-//! BE silently trusting a token that was never scoped to it.
+//! The claims match `coordinator-auth::token::SiteTokenClaims` in the
+//! Coordinator repo (`sub`, `username`, `aud`, `role`, `exp`), since this
+//! decodes tokens the Coordinator signs with its Ed25519 key. The Coordinator's
+//! other token shape (`coordinator-auth::token::Claims`, with `is_admin`
+//! instead of `aud`/`role`) is a general identity assertion. It has no `aud`
+//! claim, so `set_audience` rejects it.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,11 +23,10 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 use vms_core::{AuthClaims, AuthProvider, VmsError};
 
-/// BE only distinguishes admin/non-admin today (`vms_db::entities::user::
-/// UserRole`) — Coordinator's finer-grained roles (Admin/Auditor/Operator/
-/// Viewer) collapse to that binary until the BE grows real per-role
-/// permissions. Exactly "Admin" (case-insensitive) becomes `"admin"`;
-/// everything else becomes `"viewer"`, the least-privileged choice.
+/// This server only distinguishes admin and non-admin
+/// (`vms_db::entities::user::UserRole`), so the Coordinator's roles
+/// (Admin/Auditor/Operator/Viewer) collapse to that. "Admin" (case-insensitive)
+/// becomes `"admin"`; everything else becomes the least-privileged `"viewer"`.
 fn map_coordinator_role(role: &str) -> &'static str {
     if role.eq_ignore_ascii_case("admin") {
         "admin"
@@ -39,9 +35,8 @@ fn map_coordinator_role(role: &str) -> &'static str {
     }
 }
 
-/// Fetches the current key set from Coordinator's JWKS endpoint. A trait
-/// (rather than calling `reqwest` directly from the provider) so tests can
-/// substitute a fake key source instead of standing up a real HTTP server.
+/// Fetches the current key set from the Coordinator's JWKS endpoint. A trait
+/// so tests can substitute a fake key source for a real HTTP server.
 #[async_trait::async_trait]
 trait JwksFetcher: Send + Sync {
     async fn fetch(&self) -> Result<JwkSet, VmsError>;
@@ -65,15 +60,13 @@ impl JwksFetcher for HttpJwksFetcher {
     }
 }
 
-/// JWT payload issued by Coordinator. Not part of the public API — callers
-/// get an [`AuthClaims`] back, never this struct directly.
+/// JWT payload issued by the Coordinator. Private: callers get [`AuthClaims`].
 #[derive(Debug, Deserialize)]
 struct CoordinatorClaims {
     sub: Uuid,
     username: String,
-    // Never read directly — `Validation::set_audience` below makes decode()
-    // itself reject a mismatch, so this field's only job is being present
-    // for serde to require and validate against.
+    // Never read. `Validation::set_audience` makes decode() reject a mismatch;
+    // the field exists so serde requires it.
     #[allow(dead_code)]
     aud: Uuid,
     role: String,
@@ -85,11 +78,10 @@ struct Cache {
     fetched_at: Instant,
 }
 
-/// Verifies JWTs signed by a Coordinator instance's Ed25519 key, fetched
-/// from `[auth] jwks_url` and cached locally for `refresh_interval`. Only
-/// tokens whose `aud` claim matches `be_id` (this BE's own identity in
-/// Coordinator's `sites` table) are accepted — a token scoped to a
-/// different BE must never grant access here.
+/// Verifies JWTs signed by a Coordinator's Ed25519 key, fetched from
+/// `[auth] jwks_url` and cached for `refresh_interval`. Only tokens whose `aud`
+/// matches `be_id` (this server's identity in the Coordinator's `sites` table)
+/// are accepted, so a token scoped to another server is rejected.
 pub struct CoordinatorJwksAuthProvider {
     fetcher: Arc<dyn JwksFetcher>,
     refresh_interval: Duration,
@@ -122,16 +114,14 @@ impl CoordinatorJwksAuthProvider {
         }
     }
 
-    /// Fetches Coordinator's JWKS now and populates the cache. Called once
-    /// at boot (`main.rs`) so a misconfigured `jwks_url` fails startup
-    /// loudly rather than silently rejecting every Coordinator-issued token
-    /// at request time.
+    /// Fetches the Coordinator's JWKS and populates the cache. Called once at
+    /// boot so a misconfigured `jwks_url` fails startup instead of every
+    /// Coordinator-issued token being rejected at request time.
     pub async fn prefetch(&self) -> Result<(), VmsError> {
         self.force_refresh().await
     }
 
-    /// Refetches unconditionally and replaces the cache, regardless of its
-    /// current age.
+    /// Refetches and replaces the cache regardless of its age.
     async fn force_refresh(&self) -> Result<(), VmsError> {
         let keys = self.fetcher.fetch().await?;
         *self.cache.write().await = Some(Cache {
@@ -141,9 +131,8 @@ impl CoordinatorJwksAuthProvider {
         Ok(())
     }
 
-    /// Refetches only if the cache is empty or older than `refresh_interval`
-    /// — "periodic" means "at most once per refresh window," not a
-    /// background timer running independently of any verification attempt.
+    /// Refetches only if the cache is empty or older than `refresh_interval`.
+    /// Refresh happens lazily during verification; there is no background timer.
     async fn ensure_fresh(&self) -> Result<(), VmsError> {
         {
             let cache = self.cache.read().await;
@@ -178,8 +167,8 @@ impl AuthProvider for CoordinatorJwksAuthProvider {
 
         let mut jwk = self.find_key(&kid).await;
         if jwk.is_none() {
-            // Not in the cached set — could be a just-rotated key. Force one
-            // refresh and check again before rejecting.
+            // Not in the cached set, possibly a just-rotated key. Refresh once
+            // and check again before rejecting.
             self.force_refresh().await?;
             jwk = self.find_key(&kid).await;
         }
@@ -189,10 +178,9 @@ impl AuthProvider for CoordinatorJwksAuthProvider {
         let decoding_key = DecodingKey::from_jwk(&jwk)
             .map_err(|e| VmsError::Unauthorized(format!("invalid JWKS key: {e}")))?;
 
-        // `set_audience` makes jsonwebtoken itself reject a token whose `aud`
-        // doesn't match this BE's own id — including Coordinator's *other*
-        // token shape, which carries no `aud` claim at all and so can never
-        // pass this check.
+        // `set_audience` makes jsonwebtoken reject a token whose `aud` isn't
+        // this server's id, including the Coordinator's other token shape,
+        // which has no `aud` claim.
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_audience(&[self.be_id.to_string()]);
         let claims = decode::<CoordinatorClaims>(token, &decoding_key, &validation)
@@ -232,9 +220,8 @@ mod tests {
 
     use super::*;
 
-    /// A fake `JwksFetcher` that always returns whatever key set was handed
-    /// to it, and counts how many times it was called — used to assert the
-    /// staleness-gated refresh behaviour without a real HTTP server.
+    /// A `JwksFetcher` that returns a fixed key set and counts calls, for
+    /// testing the staleness-gated refresh without an HTTP server.
     struct FakeFetcher {
         keys: Mutex<JwkSet>,
         calls: AtomicUsize,
@@ -258,8 +245,8 @@ mod tests {
         exp: i64,
     }
 
-    /// Generates a fresh Ed25519 keypair plus the exact JWK shape
-    /// Coordinator serves from `.well-known/jwks.json` (RFC 8037 OKP).
+    /// Generates an Ed25519 keypair plus the JWK shape the Coordinator serves
+    /// from `.well-known/jwks.json` (RFC 8037 OKP).
     fn generate_keypair(kid: &str) -> (SigningKey, Jwk) {
         let signing_key = SigningKey::generate(&mut OsRng);
         let x = base64::Engine::encode(
@@ -402,9 +389,8 @@ mod tests {
         );
         let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4(), be_id));
 
-        // First call: cache is empty, forces a fetch. Second call: cache is
-        // immediately stale again (0ms window), so this must refetch before
-        // verifying rather than serving a verification off a stale cache.
+        // The first call fetches into the empty cache. With a 0ms window the
+        // cache is stale again by the second call, which must refetch.
         provider.verify_token(&token).await.unwrap();
         provider.verify_token(&token).await.unwrap();
 

@@ -1,17 +1,13 @@
-//! Pipeline trigger CRUD — `/pipelines/{id}/triggers[/{trigger_id}]`.
+//! Pipeline trigger CRUD: `/pipelines/{id}/triggers[/{trigger_id}]`.
 //!
-//! The last piece of the pipeline-graph-editing gap (nodes and edges have
-//! their own route modules; triggers here). This is also where a trigger's
-//! `source_id`/`camera_id` actually get set — the two FK columns used to
-//! derive `pipeline_source_refs`/`pipeline_camera_ref`.
+//! This is where a trigger's `source_id`/`camera_id` are set, the two FK
+//! columns used to derive `pipeline_source_refs`/`pipeline_camera_ref`.
 //!
-//! `config` is `vms_core::TriggerConfig` directly — its own serde tag
-//! (`trigger_type`) is the discriminator, so there's no separate
-//! `trigger_type` field to keep in sync with it (same reasoning as
-//! `action_config` in `pipeline_nodes.rs`). Responses return
-//! [`PipelineTrigger`] directly for the same reason both of those files
-//! return their core type as-is: it already derives `Serialize`, has no
-//! sensitive fields, and a hand-built DTO would just be the same shape twice.
+//! `config` is `vms_core::TriggerConfig` directly. Its serde tag
+//! (`trigger_type`) is the discriminator, so there is no separate
+//! `trigger_type` field to keep in sync (as with `action_config` in
+//! `pipeline_nodes.rs`). Responses return [`PipelineTrigger`] directly because
+//! it already derives `Serialize` and has no sensitive fields.
 
 use salvo::prelude::*;
 use serde::Deserialize;
@@ -39,7 +35,7 @@ fn default_enabled() -> bool {
     true
 }
 
-/// All fields optional — only supplied fields are updated. `config` may
+/// All fields are optional; only supplied fields are updated. `config` may
 /// change a trigger's parameters but not its variant; see [`UpdateTrigger`]'s
 /// doc comment.
 #[derive(Deserialize)]

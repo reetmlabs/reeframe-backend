@@ -1,8 +1,7 @@
-//! ONVIF device discovery — `POST /discovery/onvif/probe` (WS-Discovery) and
-//! `POST /discovery/onvif/resolve` (per-device main/sub stream URL
-//! resolution). Both are stateless and touch nothing in the DB; turning a
-//! discovered device into an actual camera is a separate `POST /cameras`
-//! call using whatever URLs `resolve` returned.
+//! ONVIF device discovery: `POST /discovery/onvif/probe` (WS-Discovery) and
+//! `POST /discovery/onvif/resolve` (per-device main/sub stream URLs). Both are
+//! stateless and never touch the DB. Adding a discovered device as a camera is
+//! a separate `POST /cameras` call with the URLs `resolve` returned.
 
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -19,7 +18,7 @@ const MAX_PROBE_TIMEOUT_SECS: u64 = 15;
 #[derive(Deserialize, Default)]
 pub struct ProbeBody {
     /// How long to wait for devices to reply, in seconds. Defaults to 3,
-    /// capped at 15 — the request blocks for this whole duration.
+    /// capped at 15. The request blocks for the whole duration.
     timeout_secs: Option<u64>,
 }
 
@@ -90,9 +89,8 @@ impl From<ResolvedStreams> for ResolvedStreamsDto {
 
 /// POST /discovery/onvif/resolve
 ///
-/// `username`/`password` are optional — most cameras require them for
-/// `GetProfiles`/`GetStreamUri`, but some test/dev cameras have no auth
-/// configured at all.
+/// `username`/`password` are optional. Most cameras require them for
+/// `GetProfiles`/`GetStreamUri`, but some test cameras have no auth configured.
 #[handler]
 pub async fn resolve(req: &mut Request) -> Result<Json<ResolvedStreamsDto>, ApiError> {
     let body: ResolveBody = parse_body(req).await?;

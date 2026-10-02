@@ -1,4 +1,4 @@
-//! Event-marker history for the scrub timeline — `GET /cameras/{id}/events`.
+//! Event-marker history for the scrub timeline (`GET /cameras/{id}/events`).
 
 use chrono::{DateTime, FixedOffset};
 use salvo::prelude::*;
@@ -36,7 +36,7 @@ impl From<vms_db::entities::event::Model> for EventDto {
 
 /// GET /cameras/{id}/events?from=<rfc3339>&to=<rfc3339>&type=<event_type>
 ///
-/// Markers for the scrub timeline, oldest first. `type` is optional/repeatable.
+/// Markers for the scrub timeline, oldest first. `type` is optional and repeatable.
 #[handler]
 pub async fn list_events(
     req: &mut Request,
