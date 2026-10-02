@@ -50,24 +50,23 @@ pub enum GapFill {
     BlackFrame,
     /// Freeze the last frame of the preceding clip.
     Freeze,
-    /// Skip the gap entirely (clips are joined seamlessly).
+    /// Skip the gap and join the clips directly.
     Skip,
 }
 
 /// Lossless compression algorithm used by the `compress` action.
 ///
-/// Rarely used — only for non-video artifacts such as JSON detection logs,
-/// CSV exports, and audit traces.  Video files are already entropy-coded by
-/// their codec; applying these algorithms yields no size reduction.  Use the
-/// `transcode` action (H.265 / AV1) to reduce video file size.
+/// Meant for non-video artifacts such as JSON detection logs, CSV exports,
+/// and audit traces. Video is already entropy-coded by its codec, so these
+/// algorithms do not shrink it; use `transcode` (H.265 / AV1) instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompressionAlgorithm {
-    /// Zstandard — best ratio/speed trade-off; recommended default.
+    /// Zstandard: best ratio/speed trade-off and the recommended default.
     Zstd,
-    /// Gzip — widely compatible; slower than Zstd at equivalent ratios.
+    /// Gzip: widely compatible, slower than Zstd at equivalent ratios.
     Gzip,
-    /// LZ4 — fastest decompression; lower ratio than Zstd.
+    /// LZ4: fastest decompression, lower ratio than Zstd.
     Lz4,
 }
 
@@ -79,7 +78,7 @@ pub enum CompressionAlgorithm {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptionAlgorithm {
-    /// AES-256 in Galois/Counter Mode — authenticated encryption.
+    /// AES-256 in Galois/Counter Mode (authenticated encryption).
     Aes256Gcm,
 }
 
@@ -105,9 +104,9 @@ pub enum WatermarkPosition {
 pub enum NotificationFormat {
     /// Plain text.
     Text,
-    /// HTML — suitable for email transports.
+    /// HTML, suitable for email transports.
     Html,
-    /// Markdown — suitable for Slack / Matrix / Teams transports.
+    /// Markdown, suitable for Slack / Matrix / Teams transports.
     Markdown,
 }
 
@@ -156,8 +155,8 @@ pub enum PtzCommand {
 /// Configuration for the `transcode` action.
 ///
 /// Re-encodes the upstream artifact to a different codec, bitrate, or
-/// resolution using FFmpeg.  This is the correct action for reducing video
-/// file size (not `compress`).
+/// resolution using FFmpeg. Use this action, rather than `compress`, to reduce
+/// video file size.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscodeConfig {
     /// Target codec name (e.g. `"h264"`, `"h265"`, `"vp9"`, `"av1"`).
@@ -166,7 +165,7 @@ pub struct TranscodeConfig {
     pub bitrate_kbps: u32,
     /// Optional resolution override (e.g. `"1920x1080"`); `None` keeps the source resolution.
     pub resolution: Option<String>,
-    /// Encoder preset (e.g. `"fast"`, `"slow"`) — passed directly to FFmpeg `-preset`.
+    /// Encoder preset (e.g. `"fast"`, `"slow"`), passed directly to FFmpeg `-preset`.
     pub preset: String,
     /// Container format for the output file (e.g. `"mp4"`, `"mkv"`).
     pub output_format: String,
@@ -178,13 +177,13 @@ pub struct TranscodeConfig {
 pub const EXTRACT_CLIP_KEYFRAME_SEARCH_SECS: u32 = 5;
 
 /// Upper bound on a camera's derived ring buffer size, regardless of how
-/// large any `extract_clip` node's `pre_event_secs + post_event_secs` is —
-/// keeps one misconfigured node from blowing up per-camera memory use.
+/// large any `extract_clip` node's `pre_event_secs + post_event_secs` is, so
+/// one misconfigured node cannot blow up per-camera memory use.
 pub const MAX_RING_BUFFER_SECS: u32 = 120;
 
 /// Extra ring buffer capacity beyond the bare minimum window, absorbing the
 /// jitter between when `event_pts` is captured and when `extract_clip`
-/// actually reads the buffer — otherwise eviction races the read.
+/// reads the buffer, so eviction does not race the read.
 pub const RING_BUFFER_EVICTION_SAFETY_SECS: u32 = 5;
 
 /// Configuration for the `extract_clip` action.
@@ -219,7 +218,7 @@ pub struct ExtractClipConfig {
 pub struct SnapshotConfig {
     /// Image format (e.g. `"jpeg"`, `"png"`).
     pub format: String,
-    /// JPEG quality 1–100 (ignored for lossless formats such as PNG).
+    /// JPEG quality 1-100 (ignored for lossless formats such as PNG).
     pub quality: u8,
     /// Camera to snapshot.  `None` inherits `camera_id` from the [`TriggerContext`].
     ///
@@ -249,7 +248,7 @@ pub struct MergeClipsConfig {
 pub struct CompressConfig {
     /// Compression algorithm to apply.
     pub algorithm: CompressionAlgorithm,
-    /// Compression level (algorithm-specific, e.g. 1–22 for Zstd).
+    /// Compression level (algorithm-specific, e.g. 1-22 for Zstd).
     pub level: u8,
 }
 
@@ -264,17 +263,17 @@ pub struct CompressConfig {
 /// ExtractClip -> Watermark -> Encrypt -> Transport(S3)
 /// ```
 ///
-/// The clip lands on S3 already encrypted; a bucket breach cannot expose
-/// footage without the key from the secrets backend.
+/// The clip lands on S3 already encrypted, so a bucket breach does not expose
+/// footage without the key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptConfig {
     /// Encryption algorithm to use.
     pub algorithm: EncryptionAlgorithm,
-    /// Logical name of the key in the key store / Vault.
+    /// Logical name of the encryption key.
     ///
-    /// The actual key material is never stored in the pipeline config.  The
-    /// executor resolves this name at run-time via the secrets backend
-    /// (HashiCorp Vault, AWS KMS, or a local key file for the community edition).
+    /// Key material is never stored in the pipeline config. `"default"` uses
+    /// the daemon's configured encryption key; any other name is read at
+    /// run-time from a base64 key file under `/etc/reeframe/keys/`.
     pub key_ref: String,
 }
 
@@ -285,7 +284,7 @@ pub struct EncryptConfig {
 pub struct WatermarkConfig {
     /// minijinja template evaluated at run-time with [`TriggerContext`] in scope.
     ///
-    /// Example: `"{{ camera_name }} — {{ fired_at }}"`.
+    /// Example: `"{{ camera_name }} | {{ fired_at }}"`.
     ///
     /// [`TriggerContext`]: crate::trigger::TriggerContext
     pub text_template: String,
@@ -309,8 +308,8 @@ pub struct RenderNotificationConfig {
     ///
     /// [`TriggerContext`]: crate::trigger::TriggerContext
     pub template: String,
-    /// Format of the rendered output — determines which transport types can
-    /// consume it directly.
+    /// Format of the rendered output, which determines which transport types
+    /// can consume it directly.
     pub format: NotificationFormat,
 }
 

@@ -3,7 +3,7 @@
 //! The Resource Manager applies a *Minimum Activation Principle*: a shared
 //! resource (camera pipeline, ring-buffer, analytics branch, destination pool)
 //! is started the first time its reference count goes from 0 -> 1 and stopped
-//! the moment it drops back to 1 -> 0.  This avoids duplicate GStreamer
+//! when it drops back from 1 -> 0. This avoids duplicate GStreamer
 //! pipelines or connection pools when multiple VMS pipelines reference the
 //! same camera or destination.
 //!
@@ -20,7 +20,7 @@ pub enum RingBufferMode {
     /// Frames are held in a `VecDeque` in process memory.
     Memory,
     /// Frames are written to a rolling temp file on disk.
-    /// Not yet implemented — falls back to `Memory` at runtime.
+    /// Not implemented: starting a ring buffer in this mode returns a config error.
     Disk,
 }
 

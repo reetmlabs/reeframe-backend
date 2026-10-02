@@ -43,10 +43,8 @@ pub enum TriggerType {
 }
 
 impl TriggerType {
-    /// Canonical snake_case string form — matches the `#[serde(rename_all =
-    /// "snake_case")]` wire representation, for use in error messages so
-    /// they read the same as the JSON a client actually sent (same
-    /// rationale as `NodeType::as_str()`/`EdgeType::as_str()`).
+    /// Snake_case form matching the serde wire representation, so error
+    /// messages use the same spelling as the JSON the client sent.
     pub fn as_str(&self) -> &'static str {
         match self {
             TriggerType::Schedule => "schedule",
@@ -106,15 +104,15 @@ pub enum SystemSignal {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StatMetric {
-    /// Percentage of total disk space consumed (0–100).
+    /// Percentage of total disk space consumed (0-100).
     DiskUsagePercent,
-    /// Percentage of physical RAM in use (0–100).
+    /// Percentage of physical RAM in use (0-100).
     RamUsagePercent,
-    /// Aggregate CPU utilisation across all cores (0–100).
+    /// Aggregate CPU utilisation across all cores (0-100).
     CpuUsagePercent,
     /// Ingest bitrate for a camera feed, in kilobits per second.
     FeedBitrateKbps,
-    /// Packet loss percentage for a camera feed (0–100).
+    /// Packet loss percentage for a camera feed (0-100).
     FeedPacketLossPercent,
 }
 
@@ -165,7 +163,7 @@ impl CompareOperator {
 pub enum TriggerConfig {
     /// Fires on a cron expression or fixed interval.
     Schedule {
-        /// The schedule cadence — cron or interval.
+        /// The schedule cadence: cron or interval.
         mode: ScheduleMode,
         /// IANA timezone name used to evaluate cron expressions.
         ///

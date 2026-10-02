@@ -25,21 +25,20 @@ use uuid::Uuid;
 /// `TopicKey::Camera(camera_id)`.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum TopicKey {
-    /// `camera/{id}/event` — events produced by the recording/analytics engine for one camera.
+    /// `camera/{id}/event`: events produced by the recording/analytics engine for one camera.
     Camera(Uuid),
-    /// `source/{id}/event` — events published by an external source adapter.
+    /// `source/{id}/event`: events published by an external source adapter.
     Source(Uuid),
-    /// `system/vms` — VMS-internal signals (feed_disconnected, startup, etc.).
+    /// `system/vms`: VMS-internal signals (feed_disconnected, startup, etc.).
     System,
-    /// `stat/vms` — periodic system metric snapshots (disk, RAM, CPU).
+    /// `stat/vms`: periodic system metric snapshots (disk, RAM, CPU).
     Stat,
 }
 
 impl TopicKey {
     /// Returns the canonical topic string for this key.
     ///
-    /// The string is stored on [`Event::topic`] and used for log filtering and
-    /// future message-broker integrations.
+    /// The string is stored on [`Event::topic`] and used for log filtering.
     pub fn topic_string(&self) -> String {
         match self {
             TopicKey::Camera(id) => format!("camera/{id}/event"),
@@ -65,7 +64,7 @@ pub struct Event {
     /// A short discriminator string such as `"motion_detected"` or
     /// `"object_detected"` used by trigger filters.
     pub event_type: String,
-    /// Arbitrary JSON payload — the structure depends on `event_type`.
+    /// Arbitrary JSON payload whose structure depends on `event_type`.
     ///
     /// Trigger filters written in `evalexpr` are evaluated against this value.
     pub payload: serde_json::Value,

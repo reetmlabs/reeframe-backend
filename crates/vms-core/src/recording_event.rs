@@ -1,22 +1,19 @@
 //! Recording-chunk lifecycle events.
 //!
-//! Distinct from [`crate::event::Event`] (the Event Bus's user-facing,
-//! trigger-eligible event stream) — this is a narrow, DB-bookkeeping-only
-//! channel. `vms-media` produces these as `splitmuxsink` opens/closes each
-//! recording chunk; a small consumer task elsewhere (with DB access, which
-//! `vms-media` deliberately has none of) turns them into `recordings` table
-//! rows. Living in `vms-core` for the same reason [`crate::event::Event`]
-//! does: both the producer (`vms-media`) and the consumer (`vms-daemon`)
-//! already depend on this crate, so neither needs a new cross-crate edge.
+//! This is a narrow channel used only for DB bookkeeping, separate from the
+//! trigger-eligible [`crate::event::Event`] stream. `vms-media` produces these
+//! as `splitmuxsink` opens and closes each recording chunk, and a consumer task
+//! with DB access (which `vms-media` deliberately lacks) turns them into
+//! `recordings` rows. The type lives here because both the producer
+//! (`vms-media`) and the consumer (`vms-daemon`) already depend on this crate.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-/// A recording chunk opening or closing, as observed directly off
-/// `splitmuxsink`'s own signals/bus messages — the one place that knows the
-/// real wall-clock instant a chunk started or finished, since deriving it
-/// from filenames or chunk-index arithmetic drifts silently across
-/// reconnects.
+/// A recording chunk opening or closing, taken directly from `splitmuxsink`
+/// signals and bus messages. Those are the only reliable source of a chunk's
+/// real start and end time; deriving it from filenames or chunk indices
+/// drifts across reconnects.
 #[derive(Debug, Clone)]
 pub enum RecordingChunkEvent {
     /// Fired synchronously from `splitmuxsink`'s `format-location-full`
@@ -36,12 +33,9 @@ pub enum RecordingChunkEvent {
         end_time: DateTime<Utc>,
         size_bytes: i64,
     },
-    /// A fragment that `splitmuxsink` opened but never actually wrote any
-    /// data to before closing — observed live as a byproduct of a
-    /// still-unresolved reconnect bug: every reconnect that survives long
-    /// enough eventually produces one genuinely empty (0-byte) fragment
-    /// right before erroring out. The still-open row `Opened` created for
-    /// it should be deleted outright, not backfilled as if it were a real
-    /// chunk.
+    /// A fragment that `splitmuxsink` opened and closed without writing any
+    /// data. An unresolved reconnect bug produces one such 0-byte fragment
+    /// right before a long-lived reconnect errors out. The open row created by
+    /// `Opened` should be deleted rather than backfilled as a real chunk.
     Discarded { camera_id: Uuid, file_path: String },
 }

@@ -1,4 +1,4 @@
-//! Pipeline DAG model — compile, validate, and walk the execution graph.
+//! Pipeline DAG model: compile, validate, and walk the execution graph.
 //!
 //! A VMS pipeline is a directed acyclic graph (DAG) of typed [`PipelineNode`]s
 //! connected by [`PipelineEdge`]s.  The graph is compiled once from raw
@@ -6,18 +6,18 @@
 //! and pre-computes the adjacency and topological-order maps needed by the
 //! executor.
 //!
-//! The compiled [`CompiledPipeline`] is held inside an `Arc` and stored in the
-//! Pipeline Registry behind an `ArcSwap` so pipelines can be hot-reloaded
-//! without pausing in-flight runs.
+//! Each [`CompiledPipeline`] is held in an `Arc` inside the Pipeline Registry's
+//! `ArcSwap` snapshot, so pipelines can be hot-reloaded without pausing
+//! in-flight runs.
 //!
 //! # Graph structure rules (enforced at compile time)
 //!
-//! 1. Exactly one parentless node — the trigger root.
+//! 1. Exactly one parentless node (the trigger root).
 //! 2. The parentless node must have `node_type = trigger_root`.
 //! 3. No cycles (detected via Kahn's algorithm).
 //! 4. `Transport` and `DeviceControl` nodes must be leaves (no outgoing edges).
 //! 5. `Condition` nodes must have exactly two outgoing edges: `true_branch` and `false_branch`.
-//! 6. `Condition` nodes must carry a non-empty `condition_expr`.
+//! 6. `Condition` nodes must carry a `condition_expr`.
 //! 7. `Transport` nodes must have a `destination_id`.
 
 use std::collections::{HashMap, VecDeque};
@@ -39,7 +39,7 @@ pub type NodeId = Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {
-    /// The pipeline entry point — always the single parentless node.
+    /// The pipeline entry point, always the single parentless node.
     ///
     /// The executor seeds this node's output from the [`TriggerContext`] and
     /// then walks the DAG from here.
@@ -50,11 +50,11 @@ pub enum NodeType {
     Action,
     /// A camera/NVR device command (PTZ, recording, quality switch).
     ///
-    /// Must be a leaf node — no outgoing edges allowed.
+    /// Must be a leaf node with no outgoing edges.
     DeviceControl,
     /// Delivers an artifact or message to an external destination.
     ///
-    /// Must be a leaf node — no outgoing edges allowed.
+    /// Must be a leaf node with no outgoing edges.
     Transport,
     /// Fan-out: passes the same output to all child nodes unconditionally.
     Fork,
@@ -64,9 +64,8 @@ pub enum NodeType {
 }
 
 impl NodeType {
-    /// Canonical snake_case string form — matches the `#[serde(rename_all =
-    /// "snake_case")]` wire representation, for use in error messages so
-    /// they read the same as the JSON a client actually sent.
+    /// Snake_case form matching the serde wire representation, so error
+    /// messages use the same spelling as the JSON the client sent.
     pub fn as_str(&self) -> &'static str {
         match self {
             NodeType::TriggerRoot => "trigger_root",
@@ -83,7 +82,7 @@ impl NodeType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeType {
-    /// Standard edge — used for all non-condition routing.
+    /// Standard edge, used for all non-condition routing.
     Default,
     /// Followed when a condition node's expression evaluates to `true`.
     TrueBranch,
@@ -92,9 +91,8 @@ pub enum EdgeType {
 }
 
 impl EdgeType {
-    /// Canonical snake_case string form — matches the `#[serde(rename_all =
-    /// "snake_case")]` wire representation, for use in error messages so
-    /// they read the same as the JSON a client actually sent.
+    /// Snake_case form matching the serde wire representation, so error
+    /// messages use the same spelling as the JSON the client sent.
     pub fn as_str(&self) -> &'static str {
         match self {
             EdgeType::Default => "default",
@@ -135,9 +133,8 @@ pub struct PipelineNode {
     pub pos_x: Option<f64>,
     /// Vertical canvas position (ignored at runtime, used by the UI only).
     pub pos_y: Option<f64>,
-    /// Set when `destination_id`'s destination is deleted or disabled,
-    /// instead of this row being dropped or the delete/disable being
-    /// blocked.
+    /// Set when `destination_id`'s destination is deleted or disabled. The
+    /// row is kept and the delete/disable is allowed to proceed.
     pub unresolved_reference: bool,
 }
 
@@ -152,7 +149,7 @@ pub struct PipelineEdge {
     pub from_node_id: NodeId,
     /// The node this edge terminates at.
     pub to_node_id: NodeId,
-    /// Routing label — only significant when `from_node_id` is a `Condition` node.
+    /// Routing label, only significant when `from_node_id` is a `Condition` node.
     pub edge_type: EdgeType,
 }
 
@@ -178,8 +175,8 @@ pub struct PipelineTrigger {
     /// unknown identifier); `None` once the filter evaluates successfully.
     pub last_error: Option<String>,
     pub last_error_at: Option<DateTime<Utc>>,
-    /// Set when `source_id`'s source is deleted or disabled, instead of
-    /// this row being dropped or the delete/disable being blocked.
+    /// Set when `source_id`'s source is deleted or disabled. The row is kept
+    /// and the delete/disable is allowed to proceed.
     pub unresolved_reference: bool,
 }
 
@@ -189,23 +186,24 @@ pub struct PipelineTrigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineCameraRef {
     pub camera_id: Uuid,
-    /// Pipeline has an `extract_clip` node — needs the ring-buffer appsink branch.
+    /// Pipeline has an `extract_clip` node, so it needs the ring-buffer appsink branch.
     pub needs_ring_buffer: bool,
     /// Seconds the ring buffer must hold to satisfy every `extract_clip`
-    /// node referencing this camera — `pre_event_secs +
+    /// node referencing this camera: `pre_event_secs +
     /// EXTRACT_CLIP_KEYFRAME_SEARCH_SECS + post_event_secs`, maxed across
     /// them and capped at `MAX_RING_BUFFER_SECS`. `0` when
     /// `needs_ring_buffer` is `false`.
     pub ring_buffer_secs: u32,
-    /// Pipeline has an analytics trigger or action — needs the ONNX appsink branch.
+    /// Pipeline has an enabled `Event` trigger on this camera's topic, so the
+    /// camera needs its analytics (motion detection) branch.
     pub needs_analytics: bool,
 }
 
 /// A pipeline loaded, validated, and ready for execution.
 ///
-/// Held behind `Arc` inside `ArcSwap<HashMap<Uuid, Arc<CompiledPipeline>>>` in
-/// the Pipeline Registry.  Because the inner `Arc` is cheap to clone, worker
-/// threads can take a snapshot of the registry without blocking reloads.
+/// The Pipeline Registry holds these as `Arc<CompiledPipeline>` inside an
+/// `ArcSwap` snapshot, so runs keep their `Arc` while a reload swaps in a new
+/// snapshot.
 #[derive(Debug, Clone)]
 pub struct CompiledPipeline {
     /// UUID of the `pipelines` table row.
@@ -231,14 +229,13 @@ pub struct CompiledPipeline {
 ///
 /// Built once by [`PipelineDag::compile`] from raw node and edge rows.  All
 /// maps are `HashMap` keyed by [`NodeId`] so per-node lookups are O(1).
-/// The struct is cheap to clone because it lives behind `Arc<CompiledPipeline>`.
 #[derive(Debug, Clone)]
 pub struct PipelineDag {
     /// All nodes in the pipeline, keyed by their UUID.
     pub nodes: HashMap<NodeId, PipelineNode>,
     /// All edges in the pipeline (retained for serialization and debugging).
     pub edges: Vec<PipelineEdge>,
-    /// Nodes in topological order — root first, leaves last.
+    /// Nodes in topological order, root first and leaves last.
     ///
     /// The executor walks this slice to determine scheduling order.
     pub topological_order: Vec<NodeId>,
@@ -249,17 +246,17 @@ pub struct PipelineDag {
     /// Used to determine when all parent outputs are available before
     /// scheduling a node.
     pub parents: HashMap<NodeId, Vec<NodeId>>,
-    /// `(from, to) -> EdgeType` — required for condition-node routing.
+    /// `(from, to) -> EdgeType`, used for condition-node routing.
     pub edge_types: HashMap<(NodeId, NodeId), EdgeType>,
-    /// The single parentless node — always a [`NodeType::TriggerRoot`].
+    /// The single parentless node, always a [`NodeType::TriggerRoot`].
     pub root_id: NodeId,
 }
 
 impl PipelineDag {
     /// Validate raw nodes + edges and build the compiled DAG.
     ///
-    /// This is the only constructor for [`PipelineDag`].  It enforces all
-    /// structural rules from the design specification before returning:
+    /// This is the only constructor for [`PipelineDag`]. It enforces these
+    /// structural rules:
     ///
     /// 1. Exactly one node with no parents (the trigger root).
     /// 2. That root node must be of type `trigger_root`.
@@ -336,7 +333,7 @@ impl PipelineDag {
         // -- Rule 3: no cycles --
         let topological_order = kahn_topological_sort(&node_map, &adjacency, &parents)?;
 
-        // -- Rules 4–7: per-node structural checks --
+        // -- Rules 4-7: per-node structural checks --
         for node in node_map.values() {
             let children = &adjacency[&node.id];
 
@@ -404,7 +401,7 @@ impl PipelineDag {
     /// Returns the children of `node_id` that should be enqueued for execution.
     ///
     /// For [`NodeType::Condition`] nodes, only the branch matching `branch_taken`
-    /// is returned — `true` selects the `true_branch` edge, `false` selects
+    /// is returned: `true` selects the `true_branch` edge, `false` selects
     /// `false_branch`.  For all other node types every child is returned.
     ///
     /// Returns an empty `Vec` if `node_id` is not in the graph.
@@ -434,20 +431,14 @@ impl PipelineDag {
 /// ::compile`'s rules (exactly one root, leaf constraints, branch counts) to
 /// already hold.
 ///
-/// Used to validate a single new edge incrementally while a pipeline's
-/// graph is still under construction — mid-edit, a pipeline is *expected* to
-/// have nodes with no parents yet, or a `Condition` node with only one of
-/// its two branches wired so far. Those states aren't cycles, so
-/// `PipelineDag::compile`'s full rule set (which does treat "not exactly one
-/// root" as an error) isn't the right check to run here. Cycle-freedom, on
-/// the other hand, is meaningful at any point during construction: no
-/// sequence of individually-valid edge additions can ever produce a cycle
-/// except the one edge that actually closes the loop, so checking it on
-/// every add is both correct and precise about which edge caused the problem.
+/// Used to validate each new edge while a pipeline is still being edited. A
+/// half-built graph legitimately has extra parentless nodes or a `Condition`
+/// with one branch wired, which `compile` would reject, but cycle-freedom
+/// holds at every step. Checking on each add pins the error on the edge that
+/// closes the loop.
 ///
-/// References to node IDs not present in `nodes` are ignored — that's a
-/// referential-integrity concern for the caller (typically already
-/// guaranteed by the database's foreign keys), not a cycle concern.
+/// Edges referencing node IDs not in `nodes` are ignored; referential
+/// integrity is the caller's concern (usually the database's foreign keys).
 pub fn check_no_cycle(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Result<(), VmsError> {
     let node_map: HashMap<NodeId, PipelineNode> =
         nodes.iter().cloned().map(|n| (n.id, n)).collect();
@@ -640,9 +631,8 @@ mod tests {
 
     #[test]
     fn check_no_cycle_allows_a_graph_with_unwired_nodes() {
-        // Two nodes with no edge between them at all isn't a cycle — it's
-        // just an incomplete graph, which `check_no_cycle` must tolerate
-        // (unlike `PipelineDag::compile`'s "exactly one root" rule).
+        // Two unconnected nodes form an incomplete graph, not a cycle. Unlike
+        // `PipelineDag::compile`'s "exactly one root" rule, this must accept it.
         let pid = Uuid::new_v4();
         let root = root_node(pid);
         let transport = transport_node(pid, Uuid::new_v4());
@@ -651,9 +641,8 @@ mod tests {
 
     #[test]
     fn check_no_cycle_allows_a_condition_node_with_only_one_branch_wired() {
-        // Mid-construction: a condition node with just its true_branch
-        // wired isn't valid per `PipelineDag::compile`'s rule 5, but it's
-        // not a cycle either — `check_no_cycle` must accept it.
+        // A condition node with only its true_branch wired fails
+        // `PipelineDag::compile`'s rule 5 but is not a cycle, so it is accepted.
         let pid = Uuid::new_v4();
         let root = root_node(pid);
         let cond = PipelineNode {
@@ -696,8 +685,8 @@ mod tests {
 
     #[test]
     fn check_no_cycle_ignores_edges_to_unknown_nodes() {
-        // A referential-integrity problem, not a cycle — `check_no_cycle`
-        // leaves that concern to the caller (the database's foreign keys).
+        // Dangling node references are a referential-integrity problem, left
+        // to the caller (the database's foreign keys).
         let pid = Uuid::new_v4();
         let root = root_node(pid);
         let root_id = root.id;

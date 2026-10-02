@@ -1,15 +1,5 @@
-//! Async plugin trait definitions for the open-core extension seams.
-//!
-//! These four traits are the *only* places where the community (BSD-3-Clause)
-//! core touches enterprise behaviour.  Enterprise crates provide concrete
-//! implementations; the community edition ships no-op or minimal stubs.
-//!
-//! | Trait | Community impl | Enterprise impl |
-//! |-------|----------------|-----------------|
-//! | [`AuthProvider`] | Local JWT validation + Coordinator-issued JWT trust (JWKS) | SAML 2.0, LDAP/AD, SCIM, MFA |
-//! | [`AnalyticsProvider`] | ONNX Runtime object detection | Facial recognition, LPR, crowd analytics, custom models |
-//! | [`AuditSink`] | Structured `tracing` output | Tamper-proof append-only store (GDPR/SOC2/HIPAA) |
-//! | [`ClusterCoordinator`] | No-op (single-host) | Raft consensus, active-active failover, multi-site |
+//! Async plugin traits for swappable backends: authentication, analytics,
+//! audit logging and multi-node coordination.
 //!
 //! All traits are `async` (via [`async_trait`]) and `dyn`-safe so they can be
 //! held behind `Arc<dyn Trait>` in the engine's service registry.
@@ -24,11 +14,9 @@ use crate::error::VmsError;
 
 /// Verifies API tokens and manages authenticated sessions.
 ///
-/// The community implementation validates HS256 JWTs signed by the local key
-/// store, plus JWTs issued by a Coordinator instance (verified locally
-/// against its cached JWKS — Coordinator is core infrastructure, not an
-/// enterprise add-on). Enterprise implementations can additionally delegate
-/// to an external IdP via SAML 2.0 or LDAP.
+/// The built-in implementations validate HS256 JWTs signed with a locally
+/// configured secret, and JWTs issued by a Coordinator instance (verified
+/// against its cached JWKS).
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
     /// Verify `token` and return the claims it carries.
@@ -61,12 +49,9 @@ pub struct AuthClaims {
 
 // -- Analytics provider --
 
-/// Runs AI inference on camera frames and returns detections.
+/// Runs inference on camera frames and returns detections.
 ///
-/// The community implementation uses ONNX Runtime for general object detection
-/// (person, vehicle, animal).  Enterprise implementations can add facial
-/// recognition, licence-plate reading, crowd analytics, and custom model
-/// loading.
+/// The workspace ships no implementation of this trait.
 #[async_trait]
 pub trait AnalyticsProvider: Send + Sync {
     /// Run inference on a raw `frame_data` byte slice from `camera_id`.
@@ -85,7 +70,7 @@ pub trait AnalyticsProvider: Send + Sync {
         timestamp_ns: u64,
     ) -> Result<Vec<Detection>, VmsError>;
 
-    /// A short human-readable name for this provider (e.g. `"onnx-object-detection"`).
+    /// A short human-readable name for this provider (e.g. `"object-detection"`).
     fn provider_name(&self) -> &'static str;
 
     /// The set of detection capabilities this provider supports.
@@ -134,11 +119,11 @@ pub enum AnalyticsCapability {
     MotionDetection,
     /// Detection of abrupt scene changes (camera tamper, cut, etc.).
     SceneChange,
-    /// Identification of individuals by face. *(Enterprise)*
+    /// Identification of individuals by face.
     FacialRecognition,
-    /// Reading of vehicle licence plates. *(Enterprise)*
+    /// Reading of vehicle licence plates.
     LicensePlateRecognition,
-    /// Counting the number of people in a region. *(Enterprise)*
+    /// Counting the number of people in a region.
     PeopleCounting,
     /// A provider-specific capability not covered by the standard variants.
     Custom(String),
@@ -148,9 +133,7 @@ pub enum AnalyticsCapability {
 
 /// Records security-relevant events for compliance and forensics.
 ///
-/// The community implementation emits structured [`tracing`] log lines at the
-/// `INFO` level.  Enterprise implementations write to a tamper-proof,
-/// append-only store with built-in GDPR/SOC2/HIPAA report generation.
+/// The workspace ships no implementation of this trait.
 #[async_trait]
 pub trait AuditSink: Send + Sync {
     /// Persist one audit entry.
@@ -201,11 +184,10 @@ pub enum AuditOutcome {
 
 // -- Cluster coordinator --
 
-/// Manages distributed state and failover across VMS nodes.
+/// Manages camera ownership and leadership across VMS nodes.
 ///
-/// The community implementation is a no-op that assumes single-host
-/// deployment.  The enterprise implementation uses Raft consensus to provide
-/// active-active camera failover and multi-site replication.
+/// The workspace ships no implementation of this trait; a deployment is
+/// currently a single host.
 #[async_trait]
 pub trait ClusterCoordinator: Send + Sync {
     /// Try to acquire exclusive ownership of a camera pipeline on this node.
@@ -227,9 +209,9 @@ pub trait ClusterCoordinator: Send + Sync {
     /// Returns [`VmsError::Config`] if the coordinator is not reachable.
     async fn release_camera_lease(&self, camera_id: Uuid) -> Result<(), VmsError>;
 
-    /// Returns `true` if this node is the current Raft leader.
+    /// Returns `true` if this node is the current cluster leader.
     ///
-    /// In the community no-op implementation this always returns `true`.
+    /// A single-host implementation should always return `true`.
     async fn is_leader(&self) -> bool;
 
     /// The stable identifier for this VMS node in the cluster.
