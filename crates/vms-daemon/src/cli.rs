@@ -89,13 +89,13 @@ async fn resolve_user(
     let mut users = user_repo.list().await?;
     match users.len() {
         0 => Err(anyhow::anyhow!(
-            "no users exist yet — complete first-run setup (POST /auth/setup) before minting a token"
+            "no users exist yet, complete first-run setup (POST /auth/setup) before minting a token"
         )),
         1 => Ok(users.remove(0)),
         _ => {
             let names: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
             Err(anyhow::anyhow!(
-                "multiple users exist — pass --username <name> (one of: {})",
+                "multiple users exist, pass --username <name> (one of: {})",
                 names.join(", ")
             ))
         }
@@ -116,7 +116,7 @@ async fn generate(
         .await?;
 
     eprintln!(
-        "Token minted for user '{}' (key id: {}) — shown once, store it now. \
+        "Token minted for user '{}' (key id: {}), shown once, store it now. \
          The FE authenticates with it via the `x-api-key` header.",
         user.username, created.model.id
     );

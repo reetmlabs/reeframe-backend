@@ -457,7 +457,7 @@ impl TriggerEvaluator {
                                     pipeline_id = %pipeline_id,
                                     trigger_id  = %trigger_id,
                                     error       = %e,
-                                    "trigger filter expression failed — skipping"
+                                    "trigger filter expression failed, skipping"
                                 );
                                 if trigger.last_error.as_deref() != Some(e.to_string().as_str()) {
                                     self.set_trigger_error(trigger_id, e.to_string()).await;
@@ -638,7 +638,7 @@ impl TriggerEvaluator {
                     // next rising edge requires a fresh sustained period.
                     tracing::info!(
                         pipeline_id = %pipeline.id, trigger_id = %trigger.id, actual,
-                        "Stat trigger condition no longer met — sustained timer reset",
+                        "Stat trigger condition no longer met, sustained timer reset",
                     );
                 }
             }
@@ -690,7 +690,7 @@ impl TriggerEvaluator {
         let Some(pipeline) = self.registry.get(ctx.pipeline_id) else {
             tracing::warn!(
                 pipeline_id = %ctx.pipeline_id,
-                "Pipeline not found in registry at fire time — skipping",
+                "Pipeline not found in registry at fire time, skipping",
             );
             return;
         };

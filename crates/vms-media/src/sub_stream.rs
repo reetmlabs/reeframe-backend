@@ -89,7 +89,7 @@ pub(crate) fn build_sub_stream(
 
         // -- First connection: create depay + parse for the negotiated codec --
         let Some(codec) = codec_for(&encoding) else {
-            tracing::warn!(camera_id = %cam_id, encoding, "sub-stream: unsupported RTP encoding — camera feed ignored");
+            tracing::warn!(camera_id = %cam_id, encoding, "sub-stream: unsupported RTP encoding, camera feed ignored");
             return;
         };
 
@@ -177,12 +177,12 @@ pub(crate) fn spawn_sub_monitor(
                                     camera_id = %camera_id,
                                     error = %err.error(),
                                     debug = ?err.debug(),
-                                    "Sub-stream GStreamer error — will reconnect",
+                                    "Sub-stream GStreamer error, will reconnect",
                                 );
                                 break 'watch true;
                             }
                             MessageView::Eos(_) => {
-                                tracing::warn!(camera_id = %camera_id, "Sub-stream RTSP EOS — will reconnect");
+                                tracing::warn!(camera_id = %camera_id, "Sub-stream RTSP EOS, will reconnect");
                                 break 'watch true;
                             }
                             MessageView::Warning(w) => {
@@ -225,7 +225,7 @@ pub(crate) fn spawn_sub_monitor(
                             camera_id = %camera_id,
                             consecutive_failures = policy.consecutive_failures(),
                             cooldown_secs = cooldown.as_secs(),
-                            "Sub-stream circuit breaker open — too many reconnect failures \
+                            "Sub-stream circuit breaker open, too many reconnect failures \
                              in a row, cooling down before the next attempt",
                         );
                         tokio::select! {

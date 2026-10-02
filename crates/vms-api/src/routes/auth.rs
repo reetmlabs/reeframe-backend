@@ -167,7 +167,7 @@ pub async fn me(depot: &mut Depot) -> Result<Json<UserDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let claims = depot
         .obtain::<AuthClaims>()
-        .expect("AuthClaims not in depot — auth middleware did not run");
+        .expect("AuthClaims not in depot, auth middleware did not run");
 
     let user = state
         .user_repo

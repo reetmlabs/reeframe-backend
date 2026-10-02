@@ -97,7 +97,7 @@ impl PipelineRegistry {
                         pipeline_id = %row.id,
                         name         = %row.name,
                         error        = %e,
-                        "Pipeline failed to compile — skipping"
+                        "Pipeline failed to compile, skipping"
                     );
                 }
             }

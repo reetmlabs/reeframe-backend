@@ -822,7 +822,7 @@ impl PipelineRepo {
         let effective_config = input.config.clone().unwrap_or(existing_config);
         if trigger_type_from_config(&effective_config) != existing_type {
             return Err(VmsError::DagValidation(format!(
-                "cannot change trigger type from {} to {} — delete and recreate instead",
+                "cannot change trigger type from {} to {}, delete and recreate instead",
                 existing_type.as_str(),
                 trigger_type_from_config(&effective_config).as_str()
             )));
@@ -1664,7 +1664,7 @@ fn validate_trigger_shape(
         TriggerConfig::Event { .. } => {
             if source_id.is_some() && camera_id.is_some() {
                 return Err(VmsError::DagValidation(
-                    "event trigger cannot set both source_id and camera_id — only one \
+                    "event trigger cannot set both source_id and camera_id, only one \
                      is ever used to subscribe, so the other would silently never match"
                         .into(),
                 ));

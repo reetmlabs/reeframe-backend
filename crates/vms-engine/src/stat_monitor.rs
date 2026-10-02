@@ -592,7 +592,7 @@ impl StatMonitor {
                 recording_id = %row.id,
                 file_path = %row.file_path,
                 error = %e,
-                "Retention sweep: failed to delete file on disk — DB row will still be removed",
+                "Retention sweep: failed to delete file on disk, DB row will still be removed",
             );
         }
         match repo.delete(row.id).await {

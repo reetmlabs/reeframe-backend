@@ -397,7 +397,7 @@ impl MediaManager {
                 if !self.sub_streams.lock().unwrap().contains_key(&camera_id) {
                     let sub_url = sub_rtsp_url.ok_or_else(|| {
                         VmsError::Media(format!(
-                            "camera {camera_id} has no sub-stream configured — cannot start sub relay"
+                            "camera {camera_id} has no sub-stream configured, cannot start sub relay"
                         ))
                     })?;
                     self.start_sub_stream(camera_id, sub_url)?;
@@ -835,7 +835,7 @@ impl MediaManager {
                 .get(&camera_id)
                 .ok_or_else(|| {
                     VmsError::Media(format!(
-                        "camera {camera_id} is not running — cannot attach ring buffer"
+                        "camera {camera_id} is not running, cannot attach ring buffer"
                     ))
                 })?
                 .pipeline
@@ -1102,7 +1102,7 @@ fn snapshot_from_tee(
         .recv_timeout(std::time::Duration::from_secs(5))
         .map_err(|_| {
             VmsError::Media(format!(
-                "snapshot timeout for camera {camera_id} — no frame within 5 s"
+                "snapshot timeout for camera {camera_id}, no frame within 5 s"
             ))
         })?;
 
@@ -1159,7 +1159,7 @@ fn detach_snapshot_branch(
             Ok(()) => tracing::info!(camera_id = %camera_id, "Snapshot branch detached"),
             Err(_) => tracing::warn!(
                 camera_id = %camera_id,
-                "snapshot detach probe timed out — releasing tee pad anyway",
+                "snapshot detach probe timed out, releasing tee pad anyway",
             ),
         }
         tee_clone.release_request_pad(&tee_src_clone);

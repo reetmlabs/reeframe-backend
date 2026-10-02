@@ -589,7 +589,7 @@ pub fn check_artifact_lineage(
                 Some(node.id),
                 format!(
                     "{} node has no Extract Clip or Snapshot node in its ancestor chain on at \
-                     least one reachable path — it will fail at runtime with \"no upstream \
+                     least one reachable path, it will fail at runtime with \"no upstream \
                      artifact\"",
                     node.node_type.as_str()
                 ),
@@ -601,7 +601,7 @@ pub fn check_artifact_lineage(
                 ValidationCategory::MergeSingleSource,
                 Some(node.id),
                 "merge_clips node can end up with only one upstream artifact on at least one \
-                 reachable path — it will silently pass that clip through unchanged instead of \
+                 reachable path, it will silently pass that clip through unchanged instead of \
                  merging anything",
             ));
         }

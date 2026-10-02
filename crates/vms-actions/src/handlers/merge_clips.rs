@@ -60,7 +60,7 @@ pub async fn execute(
             node_id = %node_id,
             gap_fill = ?cfg.gap_fill,
             "merge_clips: BlackFrame and Freeze gap modes require resolution probing \
-             (not yet implemented) — falling back to Skip mode"
+             (not yet implemented), falling back to Skip mode"
         );
     }
 

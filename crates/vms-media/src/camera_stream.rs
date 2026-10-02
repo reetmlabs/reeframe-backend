@@ -219,7 +219,7 @@ pub(crate) fn build_camera_stream(
             tracing::debug!(
                 camera_id = %cam_id,
                 encoding = structure.get::<&str>("encoding-name").unwrap_or("unknown"),
-                "Audio stream detected — skipped (video-only pipeline)",
+                "Audio stream detected, skipped (video-only pipeline)",
             );
             return;
         }
@@ -254,7 +254,7 @@ pub(crate) fn build_camera_stream(
 
         // -- First connection: create depay + parse for the negotiated codec --
         let Some(codec) = codec_for(&encoding) else {
-            tracing::warn!(camera_id = %cam_id, encoding, "Unsupported RTP encoding — camera feed ignored");
+            tracing::warn!(camera_id = %cam_id, encoding, "Unsupported RTP encoding, camera feed ignored");
             return;
         };
 
@@ -685,7 +685,7 @@ pub(crate) fn detach_recording_branch(
             Ok(()) => tracing::info!(camera_id = %camera_id, "Recording branch unlinked from tee"),
             Err(_) => tracing::warn!(
                 camera_id = %camera_id,
-                "recording branch unlink probe timed out — releasing tee pad anyway",
+                "recording branch unlink probe timed out, releasing tee pad anyway",
             ),
         }
         tee.release_request_pad(&tee_src_clone);
@@ -696,7 +696,7 @@ pub(crate) fn detach_recording_branch(
         } else {
             tracing::warn!(
                 camera_id = %camera_id,
-                "recording branch drain timed out — its last chunk may be truncated",
+                "recording branch drain timed out, its last chunk may be truncated",
             );
         }
 
@@ -769,7 +769,7 @@ async fn drain_recording_branch(
             _ = &mut deadline => {
                 tracing::warn!(
                     camera_id = %camera_id,
-                    "recording branch drain timed out — indexing its last chunk from disk instead of leaving it open forever",
+                    "recording branch drain timed out, indexing its last chunk from disk instead of leaving it open forever",
                 );
                 if let Some(file_path) = naming.current_path() {
                     naming.close_ack.lock().unwrap().take();
@@ -993,7 +993,7 @@ pub(crate) fn spawn_monitor(
                                     camera_id = %camera_id,
                                     error = %err.error(),
                                     debug = ?err.debug(),
-                                    "GStreamer error — will reconnect",
+                                    "GStreamer error, will reconnect",
                                 );
                                 break 'watch true;
                             }
@@ -1002,7 +1002,7 @@ pub(crate) fn spawn_monitor(
                                     tracing::debug!(camera_id = %camera_id, "EOS from a finalizing recording branch, ignored");
                                     continue;
                                 }
-                                tracing::warn!(camera_id = %camera_id, "RTSP stream EOS — will reconnect");
+                                tracing::warn!(camera_id = %camera_id, "RTSP stream EOS, will reconnect");
                                 break 'watch true;
                             }
                             MessageView::Warning(w) => {
@@ -1065,7 +1065,7 @@ pub(crate) fn spawn_monitor(
                             camera_id = %camera_id,
                             consecutive_failures = policy.consecutive_failures(),
                             cooldown_secs = cooldown.as_secs(),
-                            "Circuit breaker open — too many reconnect failures in a row, \
+                            "Circuit breaker open, too many reconnect failures in a row, \
                              cooling down before the next attempt",
                         );
                         tokio::select! {
@@ -1079,7 +1079,7 @@ pub(crate) fn spawn_monitor(
                     tracing::error!(
                         camera_id = %camera_id,
                         error = %e,
-                        "Pipeline not fully stopped yet — will retry rebuild",
+                        "Pipeline not fully stopped yet, will retry rebuild",
                     );
                     continue 'reconnect;
                 }
@@ -1095,7 +1095,7 @@ pub(crate) fn spawn_monitor(
                     tracing::error!(
                         camera_id = %camera_id,
                         error = %e,
-                        "Failed to rebuild recording branch — will retry",
+                        "Failed to rebuild recording branch, will retry",
                     );
                     continue 'reconnect;
                 }
@@ -1203,7 +1203,7 @@ fn finalize_fragment_file(
             camera_id = %camera_id,
             file_path,
             size_bytes = on_disk_size,
-            "Discarding empty/garbage fragment — not indexing it as a real chunk",
+            "Discarding empty/garbage fragment, not indexing it as a real chunk",
         );
         std::fs::remove_file(&file_path).ok();
         let _ = chunk_event_tx.send(RecordingChunkEvent::Discarded {
@@ -1227,7 +1227,7 @@ fn finalize_fragment_file(
                 camera_id = %camera_id,
                 file_path,
                 error = %e,
-                "Faststart remux failed — chunk stays playable, just not progressively seekable",
+                "Faststart remux failed, chunk stays playable, just not progressively seekable",
             );
         }
     }

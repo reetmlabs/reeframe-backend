@@ -93,7 +93,7 @@ impl EventBus {
             }
             Err(_) => {
                 self.channels.remove(key);
-                tracing::trace!(topic = %key.topic_string(), "event dropped — no active receivers, channel pruned");
+                tracing::trace!(topic = %key.topic_string(), "event dropped, no active receivers, channel pruned");
             }
         }
     }

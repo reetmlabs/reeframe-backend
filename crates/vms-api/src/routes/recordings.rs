@@ -81,7 +81,7 @@ fn parse_query_date(req: &mut Request, name: &str) -> Result<chrono::NaiveDate, 
         .query::<String>(name)
         .ok_or_else(|| ApiError::bad_request(format!("missing '{name}' query parameter")))?;
     chrono::NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
-        .map_err(|_| ApiError::bad_request(format!("invalid '{name}' — expected yyyy-mm-dd")))
+        .map_err(|_| ApiError::bad_request(format!("invalid '{name}', expected yyyy-mm-dd")))
 }
 
 /// Parse an RFC 3339 datetime out of a query parameter, e.g.
@@ -97,7 +97,7 @@ pub(crate) fn parse_query_datetime(
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|_| {
             ApiError::bad_request(format!(
-                "invalid '{name}' — expected RFC 3339, e.g. 2026-07-01T14:00:00Z"
+                "invalid '{name}', expected RFC 3339, e.g. 2026-07-01T14:00:00Z"
             ))
         })
 }
@@ -275,7 +275,7 @@ pub async fn list_daily_summary_bulk(
         .map(|s| s.trim().parse::<Uuid>())
         .collect::<Result<_, _>>()
         .map_err(|_| {
-            ApiError::bad_request("invalid 'camera_ids' — expected comma-separated UUIDs")
+            ApiError::bad_request("invalid 'camera_ids', expected comma-separated UUIDs")
         })?;
 
     let rows = state

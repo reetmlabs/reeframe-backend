@@ -323,7 +323,7 @@ pub async fn resolve_dynamic_settings(
             Some(row) => {
                 let value: serde_json::Value = serde_json::from_str(&row.value)?;
                 if let Err(e) = apply_setting_value(cfg, meta.key, &value) {
-                    tracing::warn!(key = meta.key, error = %e, "Stored setting value is invalid — keeping the config-file/env value instead");
+                    tracing::warn!(key = meta.key, error = %e, "Stored setting value is invalid, keeping the config-file/env value instead");
                     continue;
                 }
                 if row.pending_restart {

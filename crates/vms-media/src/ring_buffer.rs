@@ -398,7 +398,7 @@ fn mux_to_mp4(frames: Vec<TimestampedFrame>, output: &Path, codec: &str) -> Resu
             None => {
                 pipeline.set_state(gstreamer::State::Null).ok();
                 return Err(VmsError::Media(
-                    "clip mux pipeline produced no EOS — aborting".into(),
+                    "clip mux pipeline produced no EOS, aborting".into(),
                 ));
             }
         }

@@ -192,7 +192,7 @@ fn parse_resolution(res: &str) -> Result<(i32, i32), VmsError> {
     let parts: Vec<&str> = res.split('x').collect();
     if parts.len() != 2 {
         return Err(VmsError::Media(format!(
-            "invalid resolution '{res}' — expected WxH (e.g. 1920x1080)"
+            "invalid resolution '{res}', expected WxH (e.g. 1920x1080)"
         )));
     }
     let w = parts[0]

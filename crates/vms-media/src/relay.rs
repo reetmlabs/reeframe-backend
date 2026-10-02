@@ -283,7 +283,7 @@ fn probe_codec_blocking(url: &str) -> Result<String, VmsError> {
     let result = rx
         .recv_timeout(std::time::Duration::from_secs(10))
         .map_err(|_| {
-            VmsError::Media("codec probe timed out — camera did not respond in 10 s".into())
+            VmsError::Media("codec probe timed out, camera did not respond in 10 s".into())
         });
 
     pipeline.set_state(gstreamer::State::Null).ok();

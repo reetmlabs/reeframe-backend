@@ -104,7 +104,7 @@ impl Crypto {
         let cipher = Aes256Gcm::new_from_slice(&self.key)
             .map_err(|_| VmsError::Encryption("failed to initialise cipher".into()))?;
         let plaintext = cipher.decrypt(nonce, ct).map_err(|_| {
-            VmsError::Encryption("decryption failed — invalid key or corrupted data".into())
+            VmsError::Encryption("decryption failed, invalid key or corrupted data".into())
         })?;
         String::from_utf8(plaintext)
             .map_err(|e| VmsError::Encryption(format!("plaintext is not valid UTF-8: {e}")))

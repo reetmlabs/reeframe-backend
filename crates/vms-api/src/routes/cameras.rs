@@ -404,7 +404,7 @@ fn parse_relay_quality(req: &mut Request) -> Result<Option<RelayQuality>, ApiErr
         Some("main") => Ok(Some(RelayQuality::Main)),
         Some("sub") => Ok(Some(RelayQuality::Sub)),
         Some(other) => Err(ApiError::bad_request(format!(
-            "invalid quality '{other}' — expected 'main' or 'sub'"
+            "invalid quality '{other}', expected 'main' or 'sub'"
         ))),
     }
 }

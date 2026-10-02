@@ -425,7 +425,7 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
             // nothing is flowing, so forcing the teardown is safe.
             tracing::warn!(
                 camera_id = %camera_id,
-                "thumbnail detach probe timed out — forcing removal directly",
+                "thumbnail detach probe timed out, forcing removal directly",
             );
             if let Some(id) = probe_id {
                 tee_src_clone.remove_probe(id);

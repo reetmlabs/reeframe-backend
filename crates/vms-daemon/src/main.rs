@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     eprintln!(
-        "Reeframe VMS daemon v{} — starting",
+        "Reeframe VMS daemon v{}, starting",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     if cfg.auth.mode != "local" && cfg.auth.mode != "oidc" {
         tracing::error!(
             mode = %cfg.auth.mode,
-            "Unsupported [auth] mode — must be 'local' or 'oidc'"
+            "Unsupported [auth] mode, must be 'local' or 'oidc'"
         );
         return Err(anyhow::anyhow!("unsupported auth mode: {}", cfg.auth.mode));
     }
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         })?;
         let be_id = cfg.gateway.be_id.ok_or_else(|| {
             tracing::error!(
-                "[auth] mode = \"oidc\" requires [gateway] be_id to be set — it's the expected \
+                "[auth] mode = \"oidc\" requires [gateway] be_id to be set, it's the expected \
                  `aud` for every Coordinator-issued token this BE accepts"
             );
             anyhow::anyhow!("missing gateway.be_id for oidc auth mode")
@@ -419,7 +419,7 @@ async fn main() -> anyhow::Result<()> {
                 if !media_manager.is_running(id) {
                     tracing::debug!(
                         camera_id = %id,
-                        "Skipping relay auto-start — camera pipeline is not running"
+                        "Skipping relay auto-start, camera pipeline is not running"
                     );
                     continue;
                 }
@@ -597,16 +597,16 @@ async fn main() -> anyhow::Result<()> {
     let server_handle = server.handle();
     let server_task = tokio::spawn(server.serve(router));
 
-    tracing::info!("VMS Daemon started — press Ctrl+C or send SIGTERM to stop");
+    tracing::info!("VMS Daemon started, press Ctrl+C or send SIGTERM to stop");
     eprintln!(
-        "Reeframe VMS daemon v{} — listening on {}",
+        "Reeframe VMS daemon v{}, listening on {}",
         env!("CARGO_PKG_VERSION"),
         cfg.api.bind
     );
 
     // -- Wait for shutdown signal --
     shutdown_signal().await;
-    tracing::info!("Shutdown signal received — draining HTTP connections (10 s timeout)");
+    tracing::info!("Shutdown signal received, draining HTTP connections (10 s timeout)");
 
     server_handle.stop_graceful(std::time::Duration::from_secs(10));
     server_task.await.ok();

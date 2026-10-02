@@ -51,7 +51,7 @@ pub async fn reconcile_recording_intent(
         .await
     {
         Ok(()) => {
-            tracing::info!(camera_id = %camera_id, "Recording intent reconciled — recording resumed")
+            tracing::info!(camera_id = %camera_id, "Recording intent reconciled, recording resumed")
         }
         Err(e) => {
             tracing::warn!(camera_id = %camera_id, error = %e, "Recording intent: failed to resume recording")

@@ -341,7 +341,7 @@ pub fn detach(
             // is flowing, so forcing the teardown is safe.
             tracing::warn!(
                 camera_id = %camera_id,
-                "relay bridge detach probe timed out — forcing removal directly",
+                "relay bridge detach probe timed out, forcing removal directly",
             );
             if let Some(id) = probe_id {
                 tee_src_clone.remove_probe(id);

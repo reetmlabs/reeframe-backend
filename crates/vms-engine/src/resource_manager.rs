@@ -146,7 +146,7 @@ impl ResourceManager {
                 for _ in 0..(before - after) {
                     if let Err(e) = self.release(id.clone()).await {
                         tracing::error!(resource = ?id, error = %e,
-                            "Failed to release resource during registry sync — continuing");
+                            "Failed to release resource during registry sync, continuing");
                     }
                 }
             }
@@ -158,7 +158,7 @@ impl ResourceManager {
                 for _ in 0..(after - before) {
                     if let Err(e) = self.acquire(id.clone()).await {
                         tracing::error!(resource = ?id, error = %e,
-                            "Failed to acquire resource during registry sync — continuing");
+                            "Failed to acquire resource during registry sync, continuing");
                     }
                 }
             }
@@ -179,7 +179,7 @@ impl ResourceManager {
                     .start(camera_id, secs, RingBufferMode::Memory)
                 {
                     tracing::error!(%camera_id, error = %e,
-                        "Failed to grow ring buffer during registry sync — continuing");
+                        "Failed to grow ring buffer during registry sync, continuing");
                 }
             }
         }
@@ -340,7 +340,7 @@ impl ResourceManager {
         if running {
             if let Err(e) = self.stop(&id).await {
                 tracing::error!(%source_id, error = %e,
-                    "Failed to stop source during disable — continuing");
+                    "Failed to stop source during disable, continuing");
             }
         }
         if let Some(mut e) = self.entries.get_mut(&id) {
@@ -381,7 +381,7 @@ impl ResourceManager {
             }
             ResourceId::Source(id) => self.start_source(*id).await,
             ResourceId::DestinationPool(id) => {
-                tracing::debug!(%id, "DestinationPool start — not yet implemented");
+                tracing::debug!(%id, "DestinationPool start, not yet implemented");
                 Ok(())
             }
             ResourceId::AnalyticsBranch(cam_id) => {
@@ -397,7 +397,7 @@ impl ResourceManager {
             ResourceId::RingBuffer(cam_id) => self.ring_buffers.stop(*cam_id),
             ResourceId::Source(id) => self.source_manager.stop(*id).await,
             ResourceId::DestinationPool(id) => {
-                tracing::debug!(%id, "DestinationPool stop — not yet implemented");
+                tracing::debug!(%id, "DestinationPool stop, not yet implemented");
                 Ok(())
             }
             ResourceId::AnalyticsBranch(cam_id) => {

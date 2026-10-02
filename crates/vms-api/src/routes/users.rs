@@ -122,7 +122,7 @@ pub async fn delete_api_key(
 fn require_self(depot: &Depot, user_id: Uuid) -> Result<(), ApiError> {
     let claims = depot
         .obtain::<AuthClaims>()
-        .expect("AuthClaims not in depot — auth middleware did not run");
+        .expect("AuthClaims not in depot, auth middleware did not run");
     if claims.user_id != user_id {
         return Err(ApiError::forbidden("cannot manage another user's API keys"));
     }

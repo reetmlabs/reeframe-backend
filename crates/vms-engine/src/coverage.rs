@@ -127,7 +127,7 @@ pub fn compute_day_coverage(chunks: &[recording::Model]) -> DailyCoverageResult 
     DailyCoverageResult {
         coverage_seconds,
         session_ranges: serde_json::to_value(&sessions)
-            .expect("SessionRange is plain data — serialization cannot fail"),
+            .expect("SessionRange is plain data, serialization cannot fail"),
         chunk_count: chunks.len() as i32,
         total_size_bytes,
     }
