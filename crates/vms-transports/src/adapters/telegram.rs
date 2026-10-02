@@ -26,9 +26,9 @@ fn resolve_bot_token(cfg: &serde_json::Value) -> Option<String> {
 }
 
 /// Map a notification format to Telegram's `parse_mode` value. Markdown uses
-/// Telegram's legacy "Markdown" mode rather than "MarkdownV2", since the
-/// latter requires escaping rules for arbitrary rendered text that aren't
-/// implemented here. `Text` needs no parse_mode.
+/// Telegram's legacy "Markdown" mode because "MarkdownV2" needs escaping rules
+/// for arbitrary rendered text that aren't implemented here. `Text` needs no
+/// parse_mode.
 fn parse_mode_for(format: Option<&NotificationFormat>) -> Option<&'static str> {
     match format {
         Some(NotificationFormat::Html) => Some("HTML"),
@@ -105,9 +105,8 @@ pub async fn deliver(
 
     let env = Environment::new();
 
-    // An explicit message_template is the transport's own text, not the
-    // upstream render_notification node's, so its format only applies to
-    // the fallback (first_text) case.
+    // An explicit message_template is the transport's own text, so the upstream
+    // render_notification format only applies to the fallback (first_text) case.
     let (message_text, parse_mode): (Option<String>, Option<&str>) =
         match transport_cfg.and_then(|c| c.message_template.as_deref()) {
             Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
@@ -129,7 +128,7 @@ pub async fn deliver(
 
     // -- Send document or message --
     if let Some(src) = artifact {
-        // -- Stream file as document — no full buffer in memory --
+        // -- Stream file as a document without buffering it in memory --
         let filename = src
             .file_name()
             .and_then(|n| n.to_str())

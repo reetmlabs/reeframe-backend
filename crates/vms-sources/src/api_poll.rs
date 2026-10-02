@@ -1,8 +1,8 @@
 //! API poller source adapter.
 //!
 //! Polls a REST endpoint on a fixed interval and publishes an [`Event`] per
-//! poll — or, when `change_detect_field` is set, only when the extracted
-//! field's value actually changes between polls.
+//! poll. When `change_detect_field` is set, it publishes only when the
+//! extracted field's value changes between polls.
 
 use std::time::Duration;
 
@@ -38,8 +38,8 @@ fn default_method() -> String {
     "GET".to_string()
 }
 
-/// Per-request timeout — bounds how long a hung server can block a poll
-/// cycle even without cancellation.
+/// Per-request timeout, so a hung server can't block a poll cycle
+/// indefinitely even without cancellation.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn spawn(
@@ -80,7 +80,7 @@ pub fn spawn(
                             let event =
                                 Event::new(&TopicKey::Source(source_id), "api_poll_result", payload);
                             if event_tx.send(event).is_err() {
-                                return; // Event Bus forwarder is gone — nothing left to notify.
+                                return; // The Event Bus forwarder is gone, so nobody is listening.
                             }
                         }
                         Ok(None) => {} // no change since the last poll
@@ -180,7 +180,7 @@ mod tests {
         );
     }
 
-    // Zero interval is rejected synchronously — it would otherwise spin the
+    // Zero interval is rejected synchronously; it would otherwise spin the
     // poll loop as fast as the HTTP client allows.
     #[test]
     fn zero_interval_returns_error() {

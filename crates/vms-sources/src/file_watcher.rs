@@ -72,7 +72,7 @@ pub fn spawn(
                         });
                         let event = Event::new(&TopicKey::Source(source_id), "fs_change", payload);
                         if event_tx.send(event).is_err() {
-                            return; // Event Bus forwarder is gone — nothing left to notify.
+                            return; // The Event Bus forwarder is gone, so nobody is listening.
                         }
                     }
                 }
@@ -137,8 +137,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // An invalid path is rejected synchronously — the caller finds out
-    // immediately rather than the background task failing silently.
+    // An invalid path is rejected synchronously instead of failing silently
+    // inside the background task.
     #[test]
     fn nonexistent_path_returns_error() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

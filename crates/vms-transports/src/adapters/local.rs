@@ -21,8 +21,8 @@ const CHUNK_SIZE: usize = 256 * 1024;
 /// { "path": "/var/lib/reeframe/exports" }
 /// ```
 ///
-/// Files are copied in 256 KB chunks — the source file is never fully loaded
-/// into memory.  Progress is reported via `progress_tx` after each chunk.
+/// Files are copied in 256 KB chunks so the source file is never fully loaded
+/// into memory. Progress is reported via `progress_tx` after each chunk.
 ///
 /// Template variables:
 /// | Variable        | Value |

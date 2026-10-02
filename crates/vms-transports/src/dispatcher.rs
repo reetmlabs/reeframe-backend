@@ -14,13 +14,13 @@ use crate::adapters::{email, local, s3, sftp, slack, smb, telegram, webhook};
 /// Dispatches `Transport` pipeline nodes to the correct delivery adapter.
 ///
 /// The executor calls [`dispatch`] after looking up and decrypting the
-/// destination row.  Each adapter receives the destination config (credentials
+/// destination row. Each adapter receives the destination config (credentials
 /// already decrypted), the node-level template overrides, the full [`NodeInput`]
 /// (artifacts and rendered text from upstream nodes), and an optional
 /// `progress_tx` channel for mid-transfer progress reporting.
 ///
-/// Adapters not yet implemented return [`NodeOutput::failure`] with a clear
-/// diagnostic so pipelines degrade gracefully rather than panicking.
+/// Destination types without an adapter return [`NodeOutput::failure`] with a
+/// diagnostic instead of panicking.
 ///
 /// [`dispatch`]: TransportDispatcher::dispatch
 pub struct TransportDispatcher;

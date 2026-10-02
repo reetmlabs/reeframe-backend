@@ -31,8 +31,7 @@ pub fn invalidate(dest_id: Uuid) {
 }
 
 /// Resolve the sender address, falling back to `username` when `from` isn't
-/// set. For most SMTP providers the two are the same address, and today
-/// nothing ever submits a `from` separate from the login username.
+/// set. Most SMTP providers use the login username as the sender address.
 fn resolve_from(cfg: &serde_json::Value, username: Option<&str>) -> Option<String> {
     cfg.get("from")
         .and_then(|v| v.as_str())
@@ -75,7 +74,7 @@ fn body_content_type(format: Option<&NotificationFormat>) -> ContentType {
 /// If the upstream node produced an **artifact file** it is attached to the email.
 /// The body text comes from `message_template` in `transport_cfg`, or raw upstream
 /// text from `render_notification` if no template is set.
-/// `progress_tx` is accepted but unused (single HTTP-like call with no chunking).
+/// `progress_tx` is accepted but unused, since the message is sent in one SMTP call.
 pub async fn deliver(
     node_id: NodeId,
     dest: &destination::Model,
@@ -153,9 +152,8 @@ pub async fn deliver(
     };
 
     // -- Render body --
-    // An explicit message_template is the transport's own text, not the
-    // upstream render_notification node's, so its format only applies to
-    // the fallback (first_text) case.
+    // An explicit message_template is the transport's own text, so the upstream
+    // render_notification format only applies to the fallback (first_text) case.
     let (body_text, body_format) = match transport_cfg.and_then(|c| c.message_template.as_deref()) {
         Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
             Ok(s) => (s, None),

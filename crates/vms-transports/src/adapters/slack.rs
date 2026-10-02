@@ -28,7 +28,7 @@ fn client() -> &'static reqwest::Client {
 /// }
 /// ```
 ///
-/// Two modes — the adapter picks based on what config fields are present:
+/// Two modes, chosen by which config fields are present:
 ///
 /// **Incoming Webhook mode** (`webhook_url` is set):
 /// - Text-only. Posts the rendered `message_template` (or upstream text) as a
@@ -37,10 +37,10 @@ fn client() -> &'static reqwest::Client {
 ///   the adapter falls back to sending its filename in the text.
 ///
 /// **Bot Token mode** (`bot_token` + `channel` are set):
-/// - If the upstream node produced an **artifact file** → `files.getUploadURLExternal`
-///   then upload, then `files.completeUploadExternal` (Slack's current upload flow).
+/// - If the upstream node produced an **artifact file**, call `files.getUploadURLExternal`,
+///   upload the bytes, then call `files.completeUploadExternal` (Slack's current upload flow).
 ///   The rendered `message_template` is posted as the file's initial comment.
-/// - If no artifact → `chat.postMessage` with the rendered text.
+/// - Otherwise, call `chat.postMessage` with the rendered text.
 ///
 /// `webhook_url` takes priority when both are present. `progress_tx` is accepted
 /// but unused (no chunked protocol at this layer).
@@ -219,7 +219,7 @@ async fn upload_file(
     node_id: NodeId,
     dest: &destination::Model,
 ) -> NodeOutput {
-    // -- Step 1: get upload URL --
+    // -- Get the upload URL --
     let file_len = match tokio::fs::metadata(src).await {
         Ok(m) => m.len(),
         Err(e) => return NodeOutput::failure(node_id, format!("slack: stat artifact: {e}")),
@@ -263,7 +263,7 @@ async fn upload_file(
         None => return NodeOutput::failure(node_id, "slack: getUploadURLExternal missing file_id"),
     };
 
-    // -- Step 2: stream file bytes --
+    // -- Stream the file bytes --
     let file = match tokio::fs::File::open(src).await {
         Ok(f) => f,
         Err(e) => return NodeOutput::failure(node_id, format!("slack: open artifact: {e}")),
@@ -280,7 +280,7 @@ async fn upload_file(
         return NodeOutput::failure(node_id, format!("slack: file upload failed: {e}"));
     }
 
-    // -- Step 3: complete upload --
+    // -- Complete the upload --
     let mut complete_body = serde_json::json!({
         "files":   [{ "id": file_id }],
         "channel_id": channel,

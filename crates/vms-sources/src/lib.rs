@@ -1,7 +1,7 @@
-//! `vms-sources` — external source adapters (MQTT, webhook, HA WS, poller, file watcher).
+//! External source adapters: MQTT, webhook, Home Assistant WebSocket, API poller and file watcher.
 //!
 //! [`SourceManager`] owns the lazy-start / eager-stop lifecycle for every
-//! adapter; the Resource Manager (`vms-engine`) drives it the same way it
+//! adapter. The Resource Manager in `vms-engine` drives it the same way it
 //! drives camera pipelines.
 
 mod api_poll;
