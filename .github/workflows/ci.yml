@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # SQLite-only in CI — no external DB required
+  # CI uses SQLite only, so no external database is needed
   DATABASE_URL: sqlite:./feeds.db?mode=rwc
 
 jobs:
@@ -49,7 +49,7 @@ jobs:
             gstreamer1.0-libav
 
       # ----------------------------------------------------------------
-      # Cargo cache — keyed on Cargo.lock so it's invalidated on dep changes
+      # Cargo cache, keyed on Cargo.lock so dependency changes invalidate it
       # ----------------------------------------------------------------
       - name: Cache cargo registry & build artifacts
         uses: actions/cache@v4
@@ -73,6 +73,12 @@ jobs:
       # ----------------------------------------------------------------
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Every dependency must use a license allowed in deny.toml
+      - name: License check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
 
       # ----------------------------------------------------------------
       # Build
