@@ -26,7 +26,7 @@ futures    = "0.3"
 # Web framework (Salvo replaces axum)
 salvo = { version = "0.91", features = ["anyhow", "affix-state", "jwt-auth", "cors", "matched-path"] }
 
-# Database (SeaORM — SQLite, MySQL, PostgreSQL)
+# Database (SeaORM: SQLite, MySQL, PostgreSQL)
 sea-orm           = { version = "2.0.0-rc.37", features = [
     "sqlx-sqlite", "sqlx-mysql", "sqlx-postgres",
     "runtime-tokio-rustls", "macros",
@@ -88,7 +88,7 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 prometheus         = { version = "0.14", default-features = false }
 
-# OTLP tracing/logs export (additive — only active when an
+# OTLP tracing/logs export (additive, only active when an
 # OTEL_EXPORTER_OTLP_*_ENDPOINT env var is set; see vms-daemon::main::init_tracing)
 opentelemetry                  = "0.32"
 opentelemetry_sdk              = "0.32"

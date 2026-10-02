@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-test_camera_server.py — Configurable multi-stream RTSP test server.
+test_camera_server.py: Configurable multi-stream RTSP test server.
 
 Two operating modes:
 
-  FILE / V4L2 MODE  — transcode a local file or USB camera at multiple
+  FILE / V4L2 MODE : transcode a local file or USB camera at multiple
                       resolutions and serve N feeds per resolution.
 
-  IP CAMERA MODE    — connect to an IP camera's own RTSP streams and
+  IP CAMERA MODE   : connect to an IP camera's own RTSP streams and
                       re-serve each as N independent feeds.  The camera
                       already provides the desired resolutions; this server
                       just forwards (decode → re-encode) them.
@@ -16,7 +16,7 @@ Usage:
   # File / V4L2 mode (SOURCE required)
   python3 test_camera_server.py [--port PORT] [--profile NAME:WxH:KBPS[:N]]... SOURCE
 
-  # IP camera mode (no SOURCE — use --stream instead)
+  # IP camera mode (no SOURCE: use --stream instead)
   python3 test_camera_server.py [--port PORT] --stream NAME:RTSP_URL[:KBPS[:N]]...
 
 SOURCE:
@@ -28,19 +28,19 @@ OPTIONS:
 
   --profile NAME:WxH:KBPS[:N]
       (File / V4L2 mode) Named encode profile.  Repeatable.
-        NAME — mount-point prefix           e.g. "low", "high"
-        WxH  — output resolution            e.g. 640x360
-        KBPS — x264 target bitrate (kbps)   e.g. 1000
-        N    — number of feeds (default 1)
+        NAME: mount-point prefix           e.g. "low", "high"
+        WxH : output resolution            e.g. 640x360
+        KBPS: x264 target bitrate (kbps)   e.g. 1000
+        N   : number of feeds (default 1)
       N>1 → /NAME1 … /NAMEN.  N=1 → /NAME.
       Default: low:640x360:1000  high:1920x1080:4000
 
   --stream NAME:RTSP_URL[:KBPS[:N]]
       (IP camera mode) Re-stream an IP camera's own RTSP URL.  Repeatable.
-        NAME     — mount-point prefix           e.g. "low", "high"
-        RTSP_URL — source URL from the camera   e.g. rtsp://192.168.1.10/stream2
-        KBPS     — re-encode bitrate (default 4000)
-        N        — number of feeds (default 1)
+        NAME    : mount-point prefix           e.g. "low", "high"
+        RTSP_URL: source URL from the camera   e.g. rtsp://192.168.1.10/stream2
+        KBPS    : re-encode bitrate (default 4000)
+        N       : number of feeds (default 1)
       The camera provides the resolution; no scaling is applied.
 
 Examples:
@@ -54,7 +54,7 @@ Examples:
   # V4L2 USB camera, one 720p feed
   python3 test_camera_server.py --profile hd:1280x720:2000 /dev/video0
 
-  # IP camera — re-serve its high & low streams, 3 feeds each
+  # IP camera: re-serve its high & low streams, 3 feeds each
   python3 test_camera_server.py \\
       --stream high:rtsp://192.168.1.10/stream1:4000:3 \\
       --stream low:rtsp://192.168.1.10/stream2:1000:3
@@ -92,7 +92,7 @@ def _parse_profile(s: str) -> tuple:
     parts = s.split(":")
     if len(parts) not in (3, 4):
         raise argparse.ArgumentTypeError(
-            f"invalid profile {s!r} — expected NAME:WxH:KBPS[:N]"
+            f"invalid profile {s!r}: expected NAME:WxH:KBPS[:N]"
         )
     name = parts[0]
     try:
@@ -100,7 +100,7 @@ def _parse_profile(s: str) -> tuple:
         width, height = int(w_str), int(h_str)
     except (ValueError, AttributeError):
         raise argparse.ArgumentTypeError(
-            f"invalid resolution in {s!r} — expected WIDTHxHEIGHT (e.g. 640x360)"
+            f"invalid resolution in {s!r}: expected WIDTHxHEIGHT (e.g. 640x360)"
         )
     try:
         bitrate = int(parts[2])
@@ -114,7 +114,7 @@ def _parse_profile(s: str) -> tuple:
                 raise ValueError
         except ValueError:
             raise argparse.ArgumentTypeError(
-                f"invalid count in {s!r} — must be a positive integer"
+                f"invalid count in {s!r}: must be a positive integer"
             )
     return (name, width, height, bitrate, count)
 
@@ -125,7 +125,7 @@ def _parse_stream(s: str) -> tuple:
 
     The RTSP URL itself contains colons (``rtsp://host:port/path``), so plain
     splitting is unreliable.  Instead we strip integer-only tokens from the
-    *right* of the colon-split list — those are count and bitrate — and
+    *right* of the colon-split list (count and bitrate) and
     reassemble what remains as the URL.
     """
     colon = s.index(":")          # guaranteed to exist (argparse validates)
@@ -143,11 +143,11 @@ def _parse_stream(s: str) -> tuple:
     url = ":".join(parts)
     if not url.startswith(("rtsp://", "rtsps://")):
         raise argparse.ArgumentTypeError(
-            f"invalid stream {s!r} — URL must start with rtsp:// or rtsps://"
+            f"invalid stream {s!r}: URL must start with rtsp:// or rtsps://"
         )
     if count < 1:
         raise argparse.ArgumentTypeError(
-            f"invalid count in {s!r} — must be a positive integer"
+            f"invalid count in {s!r}: must be a positive integer"
         )
     return (name, url, bitrate, count)
 
@@ -181,7 +181,7 @@ def _launch_from_ip_camera(url: str, bitrate: int) -> str:
     """
     Pipeline: IP camera RTSP URL → decode → x264enc → rtph264pay.
 
-    No scaling — the camera provides the stream at the desired resolution.
+    No scaling: the camera provides the stream at the desired resolution.
     latency=100 gives rtspsrc a small jitter buffer without adding noticeable
     delay. The media=video filter is needed because decodebin has only one
     sink pad: without it, a camera's audio pad loses the auto-link race and
@@ -206,7 +206,7 @@ def _make_factory(
     Create a shared RTSP media factory from a gst-launch pipeline string.
 
     ``loop_on_eos=True`` installs a bus handler that seeks back to position 0
-    when the pipeline signals EOS — used for looping file sources.
+    when the pipeline signals EOS: used for looping file sources.
     """
     factory = GstRtspServer.RTSPMediaFactory()
     factory.set_launch(launch_str)
@@ -223,7 +223,7 @@ def _make_factory(
 
             def on_bus_message(_bus: Gst.Bus, message: Gst.Message) -> None:
                 if message.type == Gst.MessageType.EOS:
-                    print(f"[loop] EOS on {eos_label} — seeking to start")
+                    print(f"[loop] EOS on {eos_label}: seeking to start")
                     pipeline.seek_simple(
                         Gst.Format.TIME,
                         Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
@@ -302,7 +302,7 @@ def main() -> None:
     server.set_service(args.port)
     mounts: GstRtspServer.RTSPMountPoints = server.get_mount_points()
 
-    # (path, description) — collected for the info banner
+    # (path, description): collected for the info banner
     registered: list[tuple[str, str]] = []
 
     # ------------------------------------------------------------------

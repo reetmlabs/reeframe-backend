@@ -5,7 +5,7 @@ Maintainer: Reeframe contributors <https://github.com/reetmlabs/reeframe-backend
 Section: video
 Priority: optional
 Homepage: https://github.com/reetmlabs/reeframe-backend
-Description: Reeframe VMS — pipeline-driven video management system
+Description: Reeframe, a pipeline-driven video management system
  A Rust-native video management system built around a composable pipeline DAG.
  Records RTSP camera streams as chunked MP4 files, with automatic reconnection
  and per-credential AES-256-GCM encryption at rest.
