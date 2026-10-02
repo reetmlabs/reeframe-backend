@@ -13,7 +13,7 @@ case "$1" in
         ;;
 
     purge)
-        # Full removal requested — stop service, remove data, config, and user.
+        # Full removal requested: stop the service and remove data, config and the user.
         if [ -d /run/systemd/system ]; then
             systemctl stop    reeframe.service > /dev/null 2>&1 || true
             systemctl disable reeframe.service > /dev/null 2>&1 || true

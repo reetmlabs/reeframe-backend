@@ -26,7 +26,7 @@ WORKDIR /build
 
 # ── Stage 2: planner ──────────────────────────────────────────────────────────
 # Computes the dependency recipe for the workspace.
-# Runs fast — no compilation happens here.
+# Runs fast; nothing is compiled here.
 FROM chef AS planner
 
 COPY . .
@@ -37,7 +37,7 @@ FROM chef AS builder
 
 # Cook workspace dependencies first.
 # This layer is only re-run when recipe.json changes (i.e. Cargo.lock /
-# Cargo.toml changed) — source-only edits skip straight to the next RUN.
+# Cargo.toml changed). Source-only edits skip straight to the next RUN.
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --bin vms-daemon --recipe-path recipe.json
 
@@ -87,7 +87,7 @@ COPY --from=builder /build/target/release/vms-daemon /usr/local/bin/vms-daemon
 
 USER reeframe
 
-# Default runtime configuration — all values can be overridden via environment
+# Default runtime configuration. All values can be overridden through environment
 # variables or a mounted config file at /etc/reeframe/config.toml.
 ENV VMS_DATABASE__URL="sqlite:///var/lib/reeframe/reeframe.db?mode=rwc" \
     VMS_MEDIA__RECORDING_DIR="/var/lib/reeframe/recordings" \
