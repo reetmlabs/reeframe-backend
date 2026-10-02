@@ -12,11 +12,10 @@ use crate::dispatcher::ActionContext;
 /// Extract a clip from the ring buffer around the moment the pipeline fired.
 ///
 /// The extraction window is `[event_pts - pre_event_secs, event_pts + post_event_secs]`
-/// where `event_pts` is the latest buffered PTS at the time of execution — a
-/// reliable proxy for "now" in pipeline time. `post_event_secs` of footage
-/// doesn't exist yet at that instant, so this waits for it to elapse before
-/// reading the buffer — otherwise the post-event side of the window would
-/// always be empty, no matter how large `post_event_secs` is.
+/// where `event_pts` is the latest buffered PTS at the time of execution, used
+/// as "now" in pipeline time. The post-event footage doesn't exist yet at that
+/// instant, so the handler sleeps for `post_event_secs` before reading the
+/// buffer. Without the wait the post-event side of the window would be empty.
 ///
 /// # Limitations
 ///
@@ -53,8 +52,8 @@ pub async fn execute(
     // -- Anchor the extraction window to the latest buffered PTS --
     let event_pts = ring_buffer.latest_pts(camera_id).unwrap_or(Duration::ZERO);
 
-    // Wait for the post-event footage to actually be captured before reading
-    // the buffer — anchored to `event_pts` above, not re-read afterwards.
+    // Let the post-event footage be captured first. The window stays anchored
+    // to `event_pts` above; the latest PTS is not re-read after the sleep.
     if cfg.post_event_secs > 0 {
         sleep(Duration::from_secs(cfg.post_event_secs.into())).await;
     }
@@ -132,9 +131,8 @@ mod tests {
         };
 
         let started = tokio::time::Instant::now();
-        // No ring buffer was ever started for this camera, so extraction
-        // itself fails fast once it runs — this only proves the wait
-        // happens *before* that point, not that extraction succeeds.
+        // No ring buffer was started for this camera, so extraction fails
+        // right after the wait. This test only checks that the wait happens first.
         let out = execute(uuid::Uuid::new_v4(), &cfg, &input, &ctx).await;
 
         assert!(!out.success);

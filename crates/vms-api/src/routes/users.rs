@@ -1,12 +1,9 @@
 //! API key management, nested under `/users/{id}/api-keys`.
 //!
-//! There is no general `/users` CRUD yet — user creation is still only
-//! possible via `POST /auth/setup`, and multi-user management is future
-//! work. Every handler here is self-service only: a caller may only
-//! create, list, or revoke *their own* keys (`AuthClaims.user_id` must equal
-//! the `{id}` path segment). There is no admin-manages-others path yet
-//! either, since there's no second user or role-permission system to
-//! exercise it — that's future RBAC enforcement middleware, not this.
+//! There is no general `/users` CRUD; users are only created via
+//! `POST /auth/setup`. Every handler is self-service: a caller may only create,
+//! list or revoke their own keys (`AuthClaims.user_id` must equal the `{id}`
+//! path segment). No admin can manage another user's keys.
 
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -40,9 +37,8 @@ impl From<api_key::Model> for ApiKeyDto {
     }
 }
 
-/// Returned only from `create_api_key` — the one time the raw key is ever
-/// available. Deliberately not `ApiKeyDto` + a bolted-on field, so it's
-/// obvious at the type level that no other endpoint can produce this shape.
+/// Returned only from `create_api_key`, the one time the raw key is available.
+/// Kept separate from `ApiKeyDto` so no other endpoint can return the raw key.
 #[derive(Serialize)]
 pub struct CreatedApiKeyDto {
     pub id: Uuid,
@@ -122,12 +118,11 @@ pub async fn delete_api_key(
     Ok(())
 }
 
-/// Every handler above is self-service only — reject if the authenticated
-/// caller isn't managing their own keys.
+/// Rejects the request unless the authenticated caller is managing their own keys.
 fn require_self(depot: &Depot, user_id: Uuid) -> Result<(), ApiError> {
     let claims = depot
         .obtain::<AuthClaims>()
-        .expect("AuthClaims not in depot — auth middleware did not run");
+        .expect("AuthClaims not in depot, auth middleware did not run");
     if claims.user_id != user_id {
         return Err(ApiError::forbidden("cannot manage another user's API keys"));
     }

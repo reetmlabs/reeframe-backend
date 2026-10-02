@@ -21,7 +21,7 @@ pub fn normalize_cron(expr: &str) -> String {
 /// Returns `Tz::UTC` and logs a warning if the string is not recognised.
 pub fn parse_iana_tz(timezone: &str) -> Tz {
     timezone.parse().unwrap_or_else(|_| {
-        tracing::warn!(timezone, "Unknown IANA timezone — falling back to UTC");
+        tracing::warn!(timezone, "Unknown IANA timezone, falling back to UTC");
         Tz::UTC
     })
 }

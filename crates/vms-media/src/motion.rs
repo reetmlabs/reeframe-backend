@@ -1,28 +1,24 @@
 //! Frame-difference motion, scene-change, and tamper/signal-loss detection.
 //!
-//! No ML dependency — this is classical computer vision, cheap enough to run
-//! unconditionally on every active camera regardless of whether any pipeline
-//! actually needs it (see [`crate::motion_branch`] for how it's wired to a
-//! camera's low-resolution sub-stream).
+//! Classical computer vision with no ML dependency, cheap enough to run on
+//! every live camera that has it enabled. See [`crate::motion_branch`] for how
+//! it is attached to a camera's stream.
 //!
 //! [`MotionAnalyzer`] is pure Rust with no GStreamer types, so it can be
 //! tested directly against synthetic pixel buffers.
 
 /// Width of the downscaled grayscale frames analyzed for motion.
 ///
-/// Must be a multiple of 4 — GStreamer stride-aligns raw video rows to 4
-/// bytes, and for `GRAY8` (1 byte/pixel) that means stride == width only
-/// when width is itself a multiple of 4. Picking a non-multiple would
-/// silently introduce row padding that this module doesn't account for.
+/// Must be a multiple of 4. GStreamer aligns raw video rows to 4 bytes, so for
+/// `GRAY8` (1 byte per pixel) the stride equals the width only then. Any other
+/// width adds row padding this module does not handle.
 pub const MOTION_FRAME_WIDTH: u32 = 320;
 /// Height of the downscaled grayscale frames analyzed for motion.
 pub const MOTION_FRAME_HEIGHT: u32 = 180;
 
-/// Exponential-moving-average weight applied to each new frame when updating
-/// the rolling background estimate. Lower = background adapts more slowly
-/// (better rejects sustained motion from becoming "new background" too
-/// quickly); higher = adapts faster (better tolerates gradual lighting
-/// changes without false motion).
+/// Exponential-moving-average weight of each new frame in the background
+/// estimate. Lower values keep sustained motion from turning into background
+/// too quickly; higher values follow gradual lighting changes better.
 const BACKGROUND_ALPHA: f32 = 0.05;
 
 /// A pixel is considered "changed" once it differs from the background
@@ -33,23 +29,22 @@ const PIXEL_DIFF_THRESHOLD: f32 = 25.0;
 const MOTION_RATIO_THRESHOLD: f64 = 0.02;
 
 /// Fraction of changed pixels above which the frame counts as a "scene
-/// change" rather than ordinary motion — a much larger, frame-wide
-/// difference (camera moved, view obstructed) vs. motion's localized one.
+/// change" (camera moved, view obstructed) instead of localized motion.
 const SCENE_CHANGE_RATIO_THRESHOLD: f64 = 0.45;
 
 /// Population variance (in grayscale levels²) below which a frame is
-/// considered "covered" (near-uniform image — a hand or cloth over the lens).
+/// considered "covered": a near-uniform image, such as a hand or cloth over
+/// the lens.
 const TAMPER_VARIANCE_THRESHOLD: f64 = 4.0;
 
 /// Consecutive processed frames that must be byte-for-byte identical before
-/// the feed is considered frozen/stalled. Real camera sensor noise makes
-/// truly identical consecutive frames vanishingly unlikely otherwise.
+/// the feed is considered frozen. Sensor noise makes identical frames from a
+/// working camera very unlikely.
 const FROZEN_FRAME_COUNT: u32 = 10;
 
-/// Consecutive processed frames a condition must hold before the
-/// corresponding "started" event fires, and consecutive frames it must
-/// *not* hold before the matching "stopped" event fires. Debounces flicker
-/// around a threshold into a single, stable transition.
+/// Consecutive frames a condition must hold before its "started" event fires,
+/// and must not hold before its "stopped" event fires. Debounces flicker
+/// around a threshold.
 const SUSTAIN_FRAMES: u32 = 2;
 
 /// One detection produced by [`MotionAnalyzer::process_frame`].
@@ -60,15 +55,15 @@ pub enum MotionSignal {
     MotionStarted { changed_ratio: f64 },
     /// Motion that was previously reported has stopped.
     MotionStopped,
-    /// A large, sudden, frame-wide change was observed (camera moved,
-    /// obstructed, or reframed) — distinct from ordinary motion.
+    /// A large, sudden, frame-wide change (camera moved, obstructed, or
+    /// reframed). Reported instead of motion.
     SceneChange { changed_ratio: f64 },
-    /// The feed appears to be physically covered or blinded (near-uniform
-    /// frame — very low pixel variance).
+    /// The feed appears covered or blinded (near-uniform frame with very low
+    /// pixel variance).
     TamperDetected { variance: f64 },
     /// A previously reported tamper condition has cleared.
     TamperCleared,
-    /// The feed has stopped updating — consecutive frames are identical.
+    /// The feed has stopped updating: consecutive frames are identical.
     SignalLost,
     /// A previously reported frozen/stalled feed has resumed updating.
     SignalRestored,
@@ -123,10 +118,9 @@ impl MotionAnalyzer {
     /// Process one grayscale frame, updating internal state and returning
     /// any signals that fired as a result.
     ///
-    /// `frame` must be exactly `width * height` bytes (as passed to [`new`](Self::new)) —
-    /// mismatched sizes are treated as a no-op (returns no signals) rather
-    /// than panicking, since a single malformed frame shouldn't take down
-    /// an otherwise-healthy analyzer.
+    /// `frame` must be exactly `width * height` bytes (as passed to
+    /// [`new`](Self::new)). A frame of any other size is ignored and returns
+    /// no signals, so one malformed frame cannot panic the analyzer.
     pub fn process_frame(&mut self, frame: &[u8]) -> Vec<MotionSignal> {
         let expected_len = (self.width * self.height) as usize;
         if frame.len() != expected_len {
@@ -171,12 +165,10 @@ impl MotionAnalyzer {
 
         // -- Background diff (motion / scene change) --
         //
-        // The background estimate starts uninitialized rather than at zero:
-        // ramping a zeroed background up to a bright scene via the EMA alone
-        // would read as a frame-wide difference for the first several frames
-        // of *any* static scene. Snapping to the first real frame avoids that
-        // false burst; diffing (and therefore motion/scene-change) only
-        // starts from the second frame onward.
+        // Seed the background from the first frame instead of zero. Ramping
+        // a zeroed background up through the EMA would look like a frame-wide
+        // change for the first several frames of any static scene. Diffing
+        // starts with the second frame.
         if !self.background_initialized {
             for (bg, &px) in self.background.iter_mut().zip(frame.iter()) {
                 *bg = px as f32;
@@ -207,8 +199,8 @@ impl MotionAnalyzer {
             },
         );
 
-        // Motion only applies when it's not already classified as a scene change —
-        // a camera being covered or moved shouldn't also report as "motion".
+        // A scene change (camera covered or moved) is not also reported as
+        // motion.
         let motion_this_frame = !scene_change_this_frame && changed_ratio >= MOTION_RATIO_THRESHOLD;
         update_hysteresis(
             motion_this_frame,
@@ -228,9 +220,9 @@ impl MotionAnalyzer {
     }
 }
 
-/// Shared sustain-frames hysteresis: `active` only flips once `condition`
-/// has held (or not held) for `SUSTAIN_FRAMES` consecutive calls, and `on_flip`
-/// is invoked with the new state exactly when it flips.
+/// Hysteresis shared by all detectors: `active` flips only after `condition`
+/// has held (or not held) for `SUSTAIN_FRAMES` consecutive calls, and
+/// `on_flip` is called with the new state when it does.
 fn update_hysteresis(
     condition: bool,
     over_count: &mut u32,
@@ -316,7 +308,7 @@ mod tests {
             analyzer.process_frame(&background);
         }
 
-        // Change one quarter of the pixels a lot — motion range, not scene-change range.
+        // Change 2 of 16 pixels a lot: motion range, below the scene-change ratio.
         let mut moved = background.clone();
         moved[0] = 220;
         moved[1] = 220;
@@ -335,7 +327,7 @@ mod tests {
             "expected MotionStarted after sustained local change"
         );
 
-        // Back to background — motion should clear after the sustain window.
+        // Back to background; motion should clear after the sustain window.
         let mut stopped = false;
         for _ in 0..SUSTAIN_FRAMES {
             let signals = analyzer.process_frame(&background);
@@ -354,7 +346,7 @@ mod tests {
             analyzer.process_frame(&background);
         }
 
-        let inverted = flat_frame(220); // every pixel changes — well past scene-change ratio
+        let inverted = flat_frame(220); // every pixel changes, well past the scene-change ratio
         let mut saw_scene_change = false;
         let mut saw_motion_started = false;
         for _ in 0..SUSTAIN_FRAMES {

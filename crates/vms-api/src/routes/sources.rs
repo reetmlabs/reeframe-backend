@@ -81,7 +81,7 @@ pub struct CreateSourceBody {
     pub enabled: Option<bool>,
 }
 
-/// All fields optional — only supplied fields are updated.
+/// All fields are optional; only supplied fields are updated.
 #[derive(Deserialize)]
 pub struct UpdateSourceBody {
     pub name: Option<String>,
@@ -174,9 +174,9 @@ pub async fn update_source(
 
     let source = state.source_repo.update(id, input).await?;
 
-    // Only a real enabled/disabled transition marks or clears dependent
-    // triggers, and hard-gates the source's resource — every other field
-    // change leaves them alone.
+    // Only an actual enabled/disabled transition marks or clears dependent
+    // triggers and gates the source's resource. Other field changes leave
+    // them alone.
     let affected = match (was_enabled, source.enabled) {
         (true, false) => {
             state.resource_manager.disable_source(id).await;
@@ -206,8 +206,8 @@ pub async fn delete_source(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
 
-    // Triggers that pointed at this source aren't dropped or left blocking
-    // the delete — they're unlinked and marked unresolved instead.
+    // Triggers that pointed at this source are unlinked and marked
+    // unresolved, so they neither block the delete nor get dropped.
     let affected = state.pipeline_repo.unlink_deleted_source(id).await?;
     state.source_repo.delete(id).await?;
     state.refresh_pipelines().await?;

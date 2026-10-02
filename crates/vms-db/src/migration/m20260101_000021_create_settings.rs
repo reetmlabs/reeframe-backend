@@ -12,7 +12,7 @@ impl MigrationTrait for Migration {
                     .table(Setting::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Setting::Key).text().not_null().primary_key())
-                    // JSON-encoded value — settings span bool/string/number/etc.
+                    // JSON-encoded value, since settings span bool/string/number/etc.
                     .col(ColumnDef::new(Setting::Value).text().not_null())
                     // True from the moment an API-driven change to a
                     // restart-required setting is written, until the next

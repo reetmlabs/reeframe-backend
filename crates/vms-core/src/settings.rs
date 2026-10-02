@@ -1,26 +1,23 @@
 //! The registry of dynamically-configurable settings.
 //!
 //! Every setting here can be overridden at runtime via `PATCH
-//! /system/settings` or a config-file upload, instead of only through the
-//! startup config file / env vars. `database.url` and `encryption_key` are
-//! deliberately absent — both are needed before the DB connection they'd be
-//! stored in even exists, a hard chicken-and-egg constraint, not a policy
-//! choice.
+//! /system/settings` or a config-file upload, in addition to the startup
+//! config file and env vars. `database.url` and `encryption_key` are absent
+//! because both are needed before the DB connection that would store them
+//! exists.
 
 /// Metadata for one dynamically-configurable setting.
 pub struct SettingMeta {
     /// Dotted config-key path, matching the `AppConfig` field it maps to
     /// (e.g. `"recordings.retention_days"`).
     pub key: &'static str,
-    /// `true` if changing this setting takes effect immediately (no
-    /// restart needed) — currently only the two retention settings, which
-    /// `StatMonitor::set_retention` already re-reads on every poll tick.
-    /// Every other setting here is baked into some component at
-    /// construction time, so a change is stored but only takes effect on
-    /// the next startup.
+    /// `true` if a change takes effect without a restart. Only the two
+    /// retention settings qualify; they are pushed into the running
+    /// `StatMonitor` via `set_retention`. Other settings are read at
+    /// construction time, so changes apply on the next startup.
     pub hot: bool,
-    /// `true` if the value must never be returned by `GET
-    /// /system/settings` — write-only. Only `auth.jwt_secret` today.
+    /// `true` if the value is write-only and never returned by `GET
+    /// /system/settings`. Currently only `auth.jwt_secret`.
     pub sensitive: bool,
 }
 
@@ -92,10 +89,9 @@ pub const KNOWN_SETTINGS: &[SettingMeta] = &[
     },
 ];
 
-/// Look up a known setting's metadata by key. `None` means either an
-/// unrecognized key, or one of the two bootstrap-only exclusions
-/// (`database.url`, `encryption_key`) — callers use this to reject both
-/// cases identically.
+/// Look up a known setting's metadata by key. Returns `None` both for unknown
+/// keys and for the bootstrap-only `database.url` and `encryption_key`, so
+/// callers reject them the same way.
 pub fn setting_meta(key: &str) -> Option<&'static SettingMeta> {
     KNOWN_SETTINGS.iter().find(|s| s.key == key)
 }

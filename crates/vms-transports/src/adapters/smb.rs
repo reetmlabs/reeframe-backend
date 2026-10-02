@@ -14,7 +14,7 @@ use super::local;
 ///
 /// The share must be mounted on the host before the pipeline runs.
 /// This adapter writes to the mount point exactly like the local filesystem
-/// adapter — no SMB protocol code is needed here.
+/// adapter, so it contains no SMB protocol code.
 ///
 /// Destination config (stored in `dest.config`):
 /// ```json

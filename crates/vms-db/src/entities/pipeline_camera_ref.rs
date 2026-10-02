@@ -15,8 +15,8 @@ pub struct Model {
     /// `true` when the pipeline needs a ring-buffer branch on this camera
     /// (i.e. it has an `extract_clip` action node).
     pub needs_ring_buffer: bool,
-    /// `true` when the pipeline needs an analytics branch on this camera
-    /// (i.e. it has an analytics event trigger or action that reads detections).
+    /// `true` when the pipeline needs motion analytics on this camera (it has an
+    /// enabled `Event` trigger listening on the camera topic).
     pub needs_analytics: bool,
     /// Seconds the ring buffer must hold to satisfy every `extract_clip`
     /// node referencing this camera. `0` when `needs_ring_buffer` is `false`.

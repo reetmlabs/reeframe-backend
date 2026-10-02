@@ -4,10 +4,10 @@
 //! long-lived access token, subscribes to `state_changed` (or a configured
 //! event type), and publishes one [`Event`] per HA event received.
 //!
-//! Unlike MQTT, `tokio-tungstenite` has no built-in reconnect — a
-//! `WebSocketStream` represents exactly one connection. This adapter supplies
-//! its own outer reconnect loop: each dropped/failed connection is logged and
-//! retried after a fixed delay, until cancelled.
+//! Unlike `rumqttc`, `tokio-tungstenite` has no built-in reconnect: a
+//! `WebSocketStream` is exactly one connection. This adapter runs its own
+//! outer loop that logs each dropped or failed connection and retries after a
+//! fixed delay until cancelled.
 
 use std::time::Duration;
 
@@ -83,8 +83,8 @@ async fn run_connection(
         .await
         .map_err(|e| VmsError::Source(format!("ha_websocket: connect failed: {e}")))?;
 
-    // First frame is `auth_required` — its content isn't inspected, only that
-    // the server is actually speaking the HA protocol and didn't hang up.
+    // The first frame is `auth_required`. Its content isn't inspected; we only
+    // check that the server sent something instead of hanging up.
     match ws.next().await {
         Some(Ok(_)) => {}
         Some(Err(e)) => return Err(VmsError::Source(format!("ha_websocket: {e}"))),
@@ -142,7 +142,7 @@ async fn run_connection(
                         let payload = value.get("event").cloned().unwrap_or(serde_json::Value::Null);
                         let event = Event::new(&TopicKey::Source(source_id), "ha_event", payload);
                         if event_tx.send(event).is_err() {
-                            return Ok(()); // Event Bus forwarder is gone — nothing left to notify.
+                            return Ok(()); // The Event Bus forwarder is gone, so nobody is listening.
                         }
                     }
                     // "result" acks for the subscribe request and anything else are ignored.
@@ -165,9 +165,8 @@ mod tests {
 
     use super::*;
 
-    // Cancellation stops the task promptly even while the connection attempt
-    // to an unreachable host is failing and retrying — mirrors the same
-    // guarantee already proven for the file-watcher and MQTT adapters.
+    // Cancellation stops the task promptly even while connection attempts to
+    // an unreachable host keep failing and retrying.
     #[tokio::test]
     async fn cancel_stops_task_without_a_reachable_server() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

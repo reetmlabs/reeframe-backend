@@ -69,9 +69,9 @@ impl MigrationTrait for Migration {
     }
 }
 
-/// `grid_col`/`grid_row` rather than `col`/`row` — see
-/// `entities::tile_formation`'s doc comment for why the bare names can't be
-/// used with SeaORM's entity derive.
+/// Named `grid_col`/`grid_row` instead of `col`/`row`; see
+/// `entities::tile_formation` for why SeaORM's entity derive can't use the
+/// bare names.
 #[derive(Iden)]
 pub enum TileFormation {
     #[iden = "tile_formations"]

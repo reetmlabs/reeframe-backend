@@ -1,20 +1,20 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// A grid slot within a `tile_profile` — position and span only. Not
-/// site-scoped: the same formation is shared by every site the profile is
-/// assigned to. Which camera (if any) fills the slot for a given site lives
-/// in `tile_camera_bindings`, keyed separately per site.
+/// A grid slot within a `tile_profile`: position and span only. Not
+/// site-scoped, so the same formation is shared by every site the profile is
+/// assigned to. Which camera (if any) fills the slot for a given site lives in
+/// `tile_camera_bindings`, keyed separately per site.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "tile_formations")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub profile_id: Uuid,
-    /// `grid_col`/`grid_row` rather than `col`/`row` — SeaORM's
-    /// `DeriveEntityModel` internally names its query-result variable `row`
-    /// while building `Model`, and a field also named `row` shadows it
-    /// mid-macro, breaking codegen for every field after it.
+    /// Named `grid_col`/`grid_row` instead of `col`/`row` because SeaORM's
+    /// `DeriveEntityModel` names its query-result variable `row` while building
+    /// `Model`. A field also named `row` shadows it and breaks codegen for every
+    /// field after it.
     pub grid_col: i32,
     pub grid_row: i32,
     pub col_span: i32,

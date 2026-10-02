@@ -2,9 +2,9 @@ use sea_orm_migration::prelude::*;
 
 use super::m20260101_000007_create_pipelines::Pipeline;
 
-/// Persists the result of `PipelineRepo::validate_pipeline` so a read (e.g.
-/// listing every pipeline) never needs to re-run graph analysis — recomputed
-/// on every save and re-checked specifically when a pipeline is enabled.
+/// Persists the result of `PipelineRepo::validate_pipeline` so reads (e.g.
+/// listing every pipeline) never re-run graph analysis. Recomputed on every
+/// save and re-checked when a pipeline is enabled.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 

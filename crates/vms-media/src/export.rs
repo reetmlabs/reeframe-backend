@@ -1,19 +1,16 @@
-//! Concatenate (and, at the edges, trim) already-recorded chunk files into
-//! one exported file — the media-layer half of `POST /recordings/export`.
+//! Concatenate recorded chunk files into one exported file, trimming the
+//! first and last chunk where needed. This is the media side of
+//! `POST /recordings/export`.
 //!
-//! Every chunk in a camera's recording history shares one known codec
-//! (cached on the `cameras` row, carried on each `recordings` row) — unlike
-//! `merge_clips`'s generic upstream artifacts, there's no need to probe or
-//! transcode here. Every stage is a stream-copy (demux -> parse -> mux, no
-//! decode/re-encode), which is both cheaper and avoids any quality loss.
+//! All chunks of a camera share one known codec (cached on the `cameras` row
+//! and carried on each `recordings` row), so unlike `merge_clips` there is no
+//! probing or transcoding. Every stage is a stream copy (demux, parse, mux),
+//! which is cheaper and loses no quality.
 //!
-//! Trimming a chunk (only ever the first and/or last one in a range) is
-//! done as its own single-source seek-and-remux pass into a temp file
-//! *before* concatenation, rather than seeking one branch of the
-//! multi-source concat pipeline directly — deliberately the less clever
-//! option: two independently simple, well-understood stages (a single-file
-//! trim, and a multi-file concat where every input plays start-to-finish)
-//! instead of one pipeline mixing both concerns.
+//! A trimmed chunk gets its own single-source seek-and-remux pass into a temp
+//! file before concatenation. Seeking one branch of the multi-source concat
+//! pipeline would work too, but two simple stages (a single-file trim, then a
+//! concat where every input plays start to finish) are easier to reason about.
 
 use std::path::{Path, PathBuf};
 
@@ -24,17 +21,17 @@ use crate::camera_stream::codec_for;
 
 /// One recorded chunk contributing to an export.
 ///
-/// `trim_start_ns`/`trim_stop_ns` are nanosecond offsets into *this chunk's
-/// own* timeline (not the overall export range) — both `None` means "use
-/// the whole file as-is." Only ever set for the first and/or last chunk in
-/// a range that doesn't line up exactly with that chunk's own boundaries.
+/// `trim_start_ns`/`trim_stop_ns` are nanosecond offsets into this chunk's own
+/// timeline, not the export range. Both `None` means the whole file is used.
+/// They are only set on the first or last chunk of a range that does not line
+/// up with the chunk's boundaries.
 pub struct ExportChunk {
     pub file_path: String,
     pub trim_start_ns: Option<u64>,
     pub trim_stop_ns: Option<u64>,
 }
 
-/// Build `output_path` from `chunks`, in order. Blocking — call via
+/// Build `output_path` from `chunks`, in order. Blocking, so call it via
 /// `spawn_blocking`.
 pub fn export_range(
     chunks: &[ExportChunk],
@@ -80,10 +77,9 @@ pub fn export_range(
 
 // -- Single-chunk trim --
 
-/// Rewrite `input`'s `[start_ns, stop_ns)` window (`stop_ns = None` means
-/// "to the end") into `output`, via `filesrc -> qtdemux -> {codec}parse ->
-/// mp4mux -> filesink`. Seeking a single-source pipeline like this is
-/// unambiguous — there's only one timeline to seek.
+/// Rewrite `input`'s `[start_ns, stop_ns)` window into `output` via
+/// `filesrc -> qtdemux -> {codec}parse -> mp4mux -> filesink`. `stop_ns = None`
+/// means "to the end". With a single source there is only one timeline to seek.
 fn trim_single(
     input: &str,
     start_ns: u64,
@@ -170,10 +166,10 @@ fn trim_single(
 
 // -- Multi-chunk concat --
 
-/// Concatenate `pieces` (already the exact desired length each — trimming,
-/// if any, already happened) into `output`, via `concat -> {codec}parse ->
-/// mp4mux -> filesink`, one `filesrc -> qtdemux -> {codec}parse` branch per
-/// piece feeding `concat`. Every branch plays start-to-finish; no seeking.
+/// Concatenate already-trimmed `pieces` into `output` via
+/// `concat -> {codec}parse -> mp4mux -> filesink`, with one
+/// `filesrc -> qtdemux -> {codec}parse` branch per piece feeding `concat`.
+/// Every branch plays start to finish without seeking.
 fn concat_stream_copy(
     pieces: &[String],
     parse_factory: &str,

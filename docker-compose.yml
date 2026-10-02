@@ -3,11 +3,13 @@ services:
     build: .
     ports:
       - "${VMS_PORT:-8080}:8080"
+      - "${VMS_RTSP_PORT:-8554}:8554"
     environment:
-      # Required — generate with: openssl rand -base64 32
-      VMS_ENCRYPTION_KEY: ${VMS_ENCRYPTION_KEY:?VMS_ENCRYPTION_KEY is not set. Generate one with: openssl rand -base64 32}
+      # Required. Generate each with: openssl rand -base64 32
+      VMS_ENCRYPTION_KEY: "${VMS_ENCRYPTION_KEY:?VMS_ENCRYPTION_KEY is not set, generate one with openssl rand -base64 32}"
+      VMS_AUTH__JWT_SECRET: "${VMS_AUTH__JWT_SECRET:?VMS_AUTH__JWT_SECRET is not set, generate one with openssl rand -base64 32}"
       # Optional overrides (Dockerfile defaults are used if not set)
-      VMS_DATABASE__URL: sqlite:///var/lib/reeframe/reeframe.db
+      VMS_DATABASE__URL: sqlite:///var/lib/reeframe/reeframe.db?mode=rwc
       VMS_MEDIA__RECORDING_DIR: /var/lib/reeframe/recordings
       RUST_LOG: ${RUST_LOG:-info}
     volumes:

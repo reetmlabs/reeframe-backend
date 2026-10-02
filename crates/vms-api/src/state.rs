@@ -20,10 +20,9 @@ use crate::coordinator_auth::CoordinatorJwksAuthProvider;
 /// Parses raw uploaded config-file bytes (`POST /system/config-file`) into
 /// `(key, value)` pairs for every known dynamic setting, or an error message
 /// if the upload doesn't deserialize onto `AppConfig`. Implemented in
-/// `vms-daemon` (which owns `AppConfig`) and injected here as a plain
-/// function so `vms-api` never needs a dependency on `vms-daemon` — the
-/// dependency already runs the other way (`vms-daemon` depends on `vms-api`
-/// to build the router).
+/// `vms-daemon` (which owns `AppConfig`) and injected as a plain function
+/// because `vms-daemon` already depends on `vms-api`, so the reverse
+/// dependency is not possible.
 pub type ConfigFileParser =
     dyn Fn(&[u8]) -> Result<Vec<(&'static str, serde_json::Value)>, String> + Send + Sync;
 
@@ -51,22 +50,20 @@ pub struct AppState {
     pub settings_repo: SettingsRepo,
     pub tile_layout_repo: TileLayoutRepo,
     pub events_repo: EventsRepo,
-    /// Resolved `media.recording_dir` as of this boot — settings handlers
-    /// need it for the retention disk-threshold check when rebuilding a
-    /// `RetentionConfig` after a hot retention update; it's cold (a
-    /// restart is needed to actually move where new chunks land), so
-    /// caching it once here is always correct for the process lifetime.
+    /// Resolved `media.recording_dir` as of this boot. Settings handlers need
+    /// it for the disk-threshold check when rebuilding `RetentionConfig` after
+    /// a hot retention update. The setting is cold (changing it needs a
+    /// restart), so caching it once is correct for the process lifetime.
     pub media_recording_dir: PathBuf,
     /// On-disk path of the config file `POST /system/config-file` backs up
-    /// and replaces — must match `vms_daemon::config::CONFIG_FILE_PATH`.
+    /// and replaces. Must match `vms_daemon::config::CONFIG_FILE_PATH`.
     pub config_file_path: PathBuf,
     pub config_parser: Arc<ConfigFileParser>,
     pub user_repo: UserRepo,
     pub api_key_repo: ApiKeyRepo,
     pub auth_provider: LocalJwtAuthProvider,
-    /// `None` unless `[auth] mode = "oidc"` — set once at boot. Consumed by
-    /// `AuthMiddleware` as the second accepted credential path, alongside
-    /// (never instead of) `auth_provider`.
+    /// `None` unless `[auth] mode = "oidc"`; set once at boot. `AuthMiddleware`
+    /// accepts it as a second credential path in addition to `auth_provider`.
     pub coordinator_auth_provider: Option<Arc<CoordinatorJwksAuthProvider>>,
     pub media_manager: Arc<MediaManager>,
     pub ring_buffer_manager: Arc<RingBufferManager>,

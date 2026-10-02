@@ -10,9 +10,9 @@ use crate::dispatcher::ActionContext;
 
 /// Pulse an alarm output relay on a camera or NVR for a fixed duration.
 ///
-/// **Not yet implemented.** ONVIF device control will be implemented in a future release.
-/// Returns [`NodeOutput::failure`] with a clear diagnostic so pipelines that
-/// include alarm-output nodes degrade gracefully rather than panicking.
+/// Not implemented: ONVIF device control is not available.
+/// Returns [`NodeOutput::failure`] with a diagnostic, so pipelines that
+/// include alarm-output nodes fail the node instead of panicking.
 pub async fn execute(
     node_id: NodeId,
     cfg: &TriggerAlarmOutputConfig,

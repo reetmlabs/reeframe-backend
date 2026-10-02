@@ -92,12 +92,11 @@ pub(super) fn decrypt_config(
     Ok(config)
 }
 
-/// Keeps a credential field's existing stored value on update when the
-/// submitted value is missing, blank, or the `"***"` mask the API layer
-/// sends back on read — otherwise a client that resubmits a masked value
-/// would overwrite the real credential with the literal string `"***"`.
-/// Drops the key if there's no existing value to fall back to. Non-credential
-/// fields are left as submitted.
+/// Keeps a credential field's stored value on update when the submitted value
+/// is missing, blank, or the `"***"` mask the API layer sends on read.
+/// Otherwise a client that resubmits a masked value would overwrite the real
+/// credential with the literal string `"***"`. Drops the key if there is no
+/// existing value to fall back to. Non-credential fields are left as submitted.
 pub(super) fn preserve_masked_credentials(
     existing: &serde_json::Value,
     mut submitted: serde_json::Value,

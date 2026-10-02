@@ -58,7 +58,7 @@ pub async fn execute(
     let in_path = input_path.clone();
     let out_path = output_path.clone();
     let key_ref = cfg.key_ref.clone();
-    let default_key = ctx.encryption_key; // Option<[u8; 32]> — Copy, safe to move
+    let default_key = ctx.encryption_key; // Option<[u8; 32]> is Copy, so it can move into the task
 
     let result = tokio::task::spawn_blocking(move || {
         let key = resolve_key_blocking(&key_ref, default_key)?;
@@ -199,7 +199,6 @@ mod tests {
 
         encrypt_file_blocking(&input, &key, &output).unwrap();
 
-        // File must start with magic
         let raw = std::fs::read(&output).unwrap();
         assert_eq!(&raw[..4], MAGIC);
         assert_eq!(raw[4], FORMAT_VERSION);
@@ -239,7 +238,7 @@ mod tests {
 
         let bytes_a = std::fs::read(&out_a).unwrap();
         let bytes_b = std::fs::read(&out_b).unwrap();
-        // Nonces are random so ciphertexts differ; at minimum they cannot be equal
+        // Nonces are random per chunk, so two encryptions of the same input differ.
         assert_ne!(bytes_a, bytes_b);
 
         std::fs::remove_file(&input).ok();

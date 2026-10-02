@@ -1,23 +1,21 @@
-//! `vms-core` — shared domain types, error definitions, and pipeline DAG model.
+//! `vms-core`: shared domain types, error definitions, and the pipeline DAG model.
 //!
-//! This crate is the dependency-free heart of the VMS workspace.  Every other
-//! crate depends on it; it depends on nothing inside the workspace.  All
-//! public types that need to cross crate boundaries live here so they can be
-//! imported from a single location.
+//! Every other crate in the workspace depends on this one, and it depends on
+//! no other workspace crate. Public types that cross crate boundaries live here.
 //!
 //! # Module overview
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`error`] | [`VmsError`] — the single error type used across all crates |
-//! | [`event`] | [`Event`] and [`TopicKey`] — the Event Bus message format |
+//! | [`error`] | [`VmsError`], the error type shared by all crates |
+//! | [`event`] | [`Event`] and [`TopicKey`], the Event Bus message format |
 //! | [`resource`] | Lifecycle tracking types for the Resource Manager |
 //! | [`trigger`] | Trigger configuration and the [`TriggerContext`] injected at run-time |
 //! | [`action`] | Action and transport node configuration enums |
-//! | [`pipeline`] | [`PipelineDag`] — compile, validate, and walk the pipeline graph |
-//! | [`node`] | [`NodeInput`] / [`NodeOutput`] — data passed between nodes at execution time |
+//! | [`pipeline`] | [`PipelineDag`]: compile, validate, and walk the pipeline graph |
+//! | [`node`] | [`NodeInput`] / [`NodeOutput`]: data passed between nodes at execution time |
 //! | [`plugin`] | Async plugin traits (`AuthProvider`, `AnalyticsProvider`, `AuditSink`, `ClusterCoordinator`) |
-//! | [`source`] | [`SourceType`] — discriminator for external source adapters |
+//! | [`source`] | [`SourceType`]: discriminator for external source adapters |
 
 pub mod action;
 pub mod error;

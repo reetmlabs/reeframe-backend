@@ -1,13 +1,10 @@
 //! Per-camera sub-stream GStreamer pipeline.
 //!
-//! Mirrors `camera_stream.rs`'s main pipeline — same dynamic codec-detection
-//! dance, same reconnect-monitor shape — minus the recording branch: nothing
-//! here is written to disk. Exists only when a camera has a `sub_rtsp_url`
-//! configured. Its `tee` is the fan-out point for the sub-quality relay and,
-//! by default, motion detection — one persistent low-resolution camera
-//! connection shared by however many in-process consumers need it, the same
-//! way the main pipeline's tee is shared by recording, the ring buffer, and
-//! the main-quality relay.
+//! Uses the same codec detection and reconnect monitor as the main pipeline in
+//! `camera_stream.rs`, without a recording branch, so nothing here is written
+//! to disk. It exists only when a camera has a `sub_rtsp_url`. Its `tee` feeds
+//! the sub-quality relay and, by default, motion detection, so all those
+//! consumers share one low-resolution camera connection.
 
 use gstreamer::prelude::*;
 use uuid::Uuid;
@@ -17,9 +14,9 @@ use crate::camera_stream::{codec_for, ReconnectPolicy, WaitPlan};
 
 /// Build a per-camera sub-stream pipeline: `rtspsrc -> [depay|parse] -> tee`.
 ///
-/// Same dynamic codec-detection as `camera_stream::build_camera_stream` — the
-/// depayloader/parser are created once the SDP reveals the encoding, and
-/// re-linked (not re-created) on reconnect.
+/// As in `camera_stream::build_camera_stream`, the depayloader and parser are
+/// created once the SDP reveals the encoding and are re-linked on reconnect
+/// instead of being re-created.
 pub(crate) fn build_sub_stream(
     camera_id: Uuid,
     sub_rtsp_url: &str,
@@ -92,7 +89,7 @@ pub(crate) fn build_sub_stream(
 
         // -- First connection: create depay + parse for the negotiated codec --
         let Some(codec) = codec_for(&encoding) else {
-            tracing::warn!(camera_id = %cam_id, encoding, "sub-stream: unsupported RTP encoding — camera feed ignored");
+            tracing::warn!(camera_id = %cam_id, encoding, "sub-stream: unsupported RTP encoding, camera feed ignored");
             return;
         };
 
@@ -124,9 +121,8 @@ pub(crate) fn build_sub_stream(
 
         if let Err(e) = gstreamer::Element::link_many([&depay, &parse, &tee]) {
             tracing::error!(camera_id = %cam_id, "sub-stream link depay->parse->tee: {e}");
-            // Same cleanup as camera_stream.rs's main pipeline: remove the
-            // half-wired elements so the next reconnect retries the link
-            // instead of assuming they're already fully wired.
+            // Remove the half-wired elements so the next reconnect retries
+            // the link instead of assuming they are already wired.
             for el in [&depay, &parse] {
                 el.set_state(gstreamer::State::Null).ok();
                 gst_pipeline.remove(el).ok();
@@ -152,11 +148,11 @@ pub(crate) fn build_sub_stream(
     Ok(gst_pipeline)
 }
 
-/// Reconnect monitor for the sub-stream pipeline. Same backoff + circuit
-/// breaker as `camera_stream::spawn_monitor` (see `ReconnectPolicy`), minus
-/// the splitmuxsink rebuild — nothing here writes to disk via splitmuxsink,
-/// so there's no GOP-state-survives-reconnect concern, just a plain
-/// `Null`->`Playing` cycle.
+/// Reconnect monitor for the sub-stream pipeline.
+///
+/// Uses the same backoff and circuit breaker as `camera_stream::spawn_monitor`
+/// (see `ReconnectPolicy`). There is no splitmuxsink here, so a reconnect is a
+/// plain `Null` to `Playing` cycle.
 pub(crate) fn spawn_sub_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,
@@ -181,12 +177,12 @@ pub(crate) fn spawn_sub_monitor(
                                     camera_id = %camera_id,
                                     error = %err.error(),
                                     debug = ?err.debug(),
-                                    "Sub-stream GStreamer error — will reconnect",
+                                    "Sub-stream GStreamer error, will reconnect",
                                 );
                                 break 'watch true;
                             }
                             MessageView::Eos(_) => {
-                                tracing::warn!(camera_id = %camera_id, "Sub-stream RTSP EOS — will reconnect");
+                                tracing::warn!(camera_id = %camera_id, "Sub-stream RTSP EOS, will reconnect");
                                 break 'watch true;
                             }
                             MessageView::Warning(w) => {
@@ -229,7 +225,7 @@ pub(crate) fn spawn_sub_monitor(
                             camera_id = %camera_id,
                             consecutive_failures = policy.consecutive_failures(),
                             cooldown_secs = cooldown.as_secs(),
-                            "Sub-stream circuit breaker open — too many reconnect failures \
+                            "Sub-stream circuit breaker open, too many reconnect failures \
                              in a row, cooling down before the next attempt",
                         );
                         tokio::select! {

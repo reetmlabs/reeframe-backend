@@ -7,22 +7,19 @@
 //!
 //! # `From` conversions
 //!
-//! Blanket `From` implementations are provided for the two most common
-//! standard-library / ecosystem error types:
+//! `From` implementations are provided for two common error types:
 //! - [`std::io::Error`] -> [`VmsError::Io`]
 //! - [`serde_json::Error`] -> [`VmsError::Serialization`]
 //!
 //! Other conversions (SeaORM, GStreamer, etc.) live in the crates that introduce
-//! those dependencies, keeping `vms-core` dependency-free.
+//! those dependencies, which keeps them out of `vms-core`.
 
 use uuid::Uuid;
 
 /// The canonical error type for the VMS platform.
 ///
-/// Every public function in the workspace that can fail returns
-/// `Result<_, VmsError>`.  Downstream callers can match on specific variants
-/// for structured error handling or call `.to_string()` to get a human-readable
-/// message courtesy of [`thiserror`].
+/// Callers can match on specific variants or use the [`thiserror`]-derived
+/// `Display` impl for a human-readable message.
 #[derive(Debug, thiserror::Error)]
 pub enum VmsError {
     /// A pipeline with the given ID does not exist in the registry.
@@ -154,9 +151,8 @@ pub enum VmsError {
     #[error("{0}")]
     NotFound(String),
 
-    /// The requested change would violate a domain invariant (e.g. deleting
-    /// or disabling the last remaining local admin) — the request is
-    /// well-formed but rejected because of the system's current state.
+    /// The request is well-formed but would violate a domain invariant given
+    /// the current state (e.g. deleting or disabling the last local admin).
     #[error("conflict: {0}")]
     Conflict(String),
 

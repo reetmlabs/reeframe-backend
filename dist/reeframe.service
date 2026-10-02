@@ -1,6 +1,6 @@
 [Unit]
 Description=Reeframe VMS Daemon
-Documentation=https://github.com/yourorg/reeframe-backend
+Documentation=https://github.com/reetmlabs/reeframe-backend
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60
@@ -15,6 +15,7 @@ Group=reeframe
 # embedding them in the unit file.  Lines are KEY=VALUE, one per line.
 # Minimum required:
 #   VMS_ENCRYPTION_KEY=<base64-encoded 32 bytes>
+#   VMS_AUTH__JWT_SECRET=<base64-encoded 32 bytes>
 #
 # Generate with: openssl rand -base64 32 | sudo tee -a /etc/reeframe/env
 EnvironmentFile=-/etc/reeframe/env
@@ -38,6 +39,9 @@ PrivateTmp=true
 # The filesystem is read-only except for the recording/DB directory.
 ProtectSystem=strict
 ReadWritePaths=/var/lib/reeframe
+# The default database (./reeframe.db) is created here; the rest of the
+# filesystem is read-only under ProtectSystem=strict.
+WorkingDirectory=/var/lib/reeframe
 
 # No access to other users' home directories.
 ProtectHome=true

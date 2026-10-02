@@ -1,6 +1,6 @@
 name: Release
 
-# Triggered by pushing a version tag — e.g. `git tag v0.1.0 && git push --tags`
+# Runs when a version tag is pushed, for example `git tag v0.2.0 && git push --tags`
 on:
   push:
     tags:
@@ -12,11 +12,9 @@ env:
 
 jobs:
   # ── Job 1: compile the release binary ────────────────────────────────────────
-  # Matrixed over arch, each on a *native* runner (amd64 or arm64 hardware) —
-  # no cross-compiler/sysroot juggling for the GStreamer dev libs, and no QEMU
-  # emulation slowing the build down. `ubuntu-22.04-arm` is GitHub's standard
-  # arm64-hosted runner (GA for private repos since 2026-01-29), billed against
-  # the same per-account Actions minutes as the amd64 runners.
+  # One job per architecture, each on a native amd64 or arm64 runner, so the
+  # GStreamer dev libraries need no cross-compilation sysroot and nothing runs
+  # under QEMU.
   build:
     name: Build binary (linux/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -38,13 +36,15 @@ jobs:
             pkg-config \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libgstrtspserver-1.0-dev \
             libssl-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       # Cache the Cargo registry and compiled dependencies between runs.
-      # Keyed by arch too — amd64 and arm64 artifacts are never compatible.
+      # Keyed by arch too, since amd64 and arm64 artifacts are never compatible.
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -66,7 +66,7 @@ jobs:
           retention-days: 1
 
   # ── Job 2: assemble .tar.gz and .deb ─────────────────────────────────────────
-  # Pure packaging of an already-built binary — runs on a plain amd64 runner
+  # Packages the already-built binary, so it runs on a plain amd64 runner
   # for both arches, no native/arm hardware needed here.
   package:
     name: Package (.tar.gz + .deb) [linux/${{ matrix.arch }}]
@@ -150,11 +150,10 @@ jobs:
           retention-days: 1
 
   # ── Job 3: build and push a per-arch Docker image, by digest only ───────────
-  # Each leg builds natively on its own arch's runner (again, no QEMU) and
-  # pushes an untagged image identified only by digest; the digests are then
-  # merged into the real multi-arch tags by the `docker-manifest` job below —
-  # this is Docker's documented pattern for spreading a multi-platform build
-  # across multiple native runners instead of emulating the non-native one.
+  # Each leg builds natively on its own architecture and pushes an untagged
+  # image identified by digest. The `docker-manifest` job below merges the
+  # digests into the multi-arch tags, which is Docker's documented way to split
+  # a multi-platform build across native runners.
   docker-build:
     name: Docker build (linux/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -285,7 +284,7 @@ jobs:
       # generated commit changelog into a single release body.
       #
       # Before tagging vX.Y.Z: create release-notes/vX.Y.Z.md with a short
-      # summary of the release.  The file is optional — if absent the body
+      # summary of the release. The file is optional; without it the body
       # starts directly with the install options.
       - name: Assemble release notes
         env:
@@ -313,6 +312,7 @@ jobs:
             echo '```bash'
             echo "sudo dpkg -i reeframe-backend_*_\$(dpkg --print-architecture).deb"
             echo "sudo sh -c 'echo VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32) >> /etc/reeframe/env'"
+            echo "sudo sh -c 'echo VMS_AUTH__JWT_SECRET=\$(openssl rand -base64 32) >> /etc/reeframe/env'"
             echo "sudo systemctl start reeframe.service"
             echo '```'
             echo ""

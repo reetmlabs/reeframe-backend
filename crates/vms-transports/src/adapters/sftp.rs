@@ -45,10 +45,9 @@ fn resolve_remote_path(cfg: &serde_json::Value) -> Option<String> {
 /// ```
 ///
 /// Either `password` or `private_key` must be present. Files are uploaded in
-/// 256 KB chunks inside `tokio::task::spawn_blocking` — the artifact is never
-/// fully loaded into memory.  Progress is reported via `progress_tx` after each
-/// chunk using `tokio::sync::mpsc::UnboundedSender::send`, which is safe to
-/// call from a blocking thread.
+/// 256 KB chunks inside `tokio::task::spawn_blocking`, so the artifact is never
+/// fully loaded into memory. Progress is reported via `progress_tx` after each
+/// chunk; `UnboundedSender::send` is safe to call from a blocking thread.
 pub async fn deliver(
     node_id: NodeId,
     dest: &destination::Model,
@@ -177,7 +176,7 @@ pub async fn deliver(
     //
     // For artifact files we pass the source path and let the blocking thread
     // open and read it in chunks (no pre-loading into memory).
-    // For text we pass the bytes directly — text payloads are small.
+    // For text we pass the bytes directly, since text payloads are small.
     let payload = if let Some(src) = artifact {
         // Get file size for progress reporting without reading the file.
         let total_bytes = tokio::fs::metadata(src).await.map(|m| m.len()).ok();
@@ -206,7 +205,7 @@ pub async fn deliver(
         );
     };
 
-    // -- tokio::sync::mpsc::UnboundedSender is Send — clone it into the blocking thread --
+    // -- UnboundedSender is Send, so clone it into the blocking thread --
     let progress_tx_owned = progress_tx.cloned();
     let addr = format!("{host}:{port}");
     let run_id = ctx.run_id;

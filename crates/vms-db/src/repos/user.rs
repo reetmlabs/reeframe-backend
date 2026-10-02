@@ -15,14 +15,14 @@ const BCRYPT_COST: u32 = 12;
 
 pub struct CreateUser {
     pub username: String,
-    /// Plaintext — hashed with bcrypt before storage.
+    /// Plaintext; hashed with bcrypt before storage.
     pub password: String,
     pub role: UserRole,
 }
 
 pub struct UpdateUser {
     pub username: Option<String>,
-    /// Plaintext — hashed with bcrypt before storage, if supplied.
+    /// Plaintext; hashed with bcrypt before storage, if supplied.
     pub password: Option<String>,
     pub role: Option<UserRole>,
     pub enabled: Option<bool>,
@@ -128,12 +128,11 @@ impl UserRepo {
         Ok(())
     }
 
-    /// The "local break-glass account" guarantee: at least one enabled local
-    /// admin must always exist, so direct local/offline access keeps working
-    /// unconditionally. Called by [`Self::update`] and [`Self::delete`]
-    /// before applying any change that would take the last enabled admin
-    /// below that floor — enforced here rather than only in a route handler
-    /// so no future caller can accidentally bypass it.
+    /// Enforces the local break-glass guarantee: at least one enabled local admin
+    /// must always exist, so direct local/offline access keeps working.
+    /// [`Self::update`] and [`Self::delete`] call this before any change that
+    /// would take the last enabled admin away. It lives here instead of in a
+    /// route handler so no caller can bypass it.
     async fn ensure_not_last_enabled_admin(&self) -> Result<(), VmsError> {
         let enabled_admins = user::Entity::find()
             .filter(user::Column::Role.eq(UserRole::Admin))
@@ -158,10 +157,9 @@ fn hash_password(password: &str) -> Result<String, VmsError> {
 
 /// Verify a plaintext password against a bcrypt hash.
 ///
-/// Returns `false` rather than an error on a malformed hash or a mismatch —
-/// callers (login handlers) should treat both the same way: reject the
-/// attempt, without distinguishing "bad password" from "corrupt hash" in the
-/// response.
+/// Returns `false` instead of an error for a malformed hash as well as a
+/// mismatch. Callers (login handlers) should reject the attempt either way,
+/// without telling "bad password" apart from "corrupt hash" in the response.
 pub fn verify_password(password: &str, hash: &str) -> bool {
     bcrypt::verify(password, hash).unwrap_or(false)
 }

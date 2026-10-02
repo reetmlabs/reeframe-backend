@@ -7,7 +7,6 @@ debug/
 Makefile
 Makefile.local.example
 recordings/
-docs/
 
 # Remove Cargo.lock from here if this becomes a library instead of a binary
 # Cargo.lock
@@ -127,5 +126,5 @@ CLAUDE.local.md
 # test_camera_server.py pid/log tracking (see Makefile)
 /.camera-pids/
 
-# Per-developer camera credentials — copy from Makefile.local.example
+# Per-developer camera credentials, copied from Makefile.local.example
 /Makefile.local

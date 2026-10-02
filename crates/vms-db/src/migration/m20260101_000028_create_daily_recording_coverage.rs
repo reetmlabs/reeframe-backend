@@ -44,9 +44,8 @@ impl MigrationTrait for Migration {
                             .integer()
                             .not_null(),
                     )
-                    // `NULL` means "unknown" — poisoned by at least one
-                    // contributing chunk with no known size yet, same
-                    // convention `recordings.size_bytes` already uses.
+                    // `NULL` means unknown: at least one contributing chunk has no
+                    // known size yet, the same convention `recordings.size_bytes` uses.
                     .col(ColumnDef::new(DailyRecordingCoverage::TotalSizeBytes).big_integer())
                     .col(
                         ColumnDef::new(DailyRecordingCoverage::IsFinalized)

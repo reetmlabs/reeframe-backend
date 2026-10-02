@@ -1,24 +1,19 @@
-//! Bridges a running pipeline's tee into an RTSP relay mount — no second
+//! Bridges a running pipeline's tee into an RTSP relay mount without a second
 //! connection to the camera.
 //!
-//! `RelayServer` previously gave each relay mount its own self-contained
-//! `rtspsrc location=...` launch string, opening an independent camera
-//! connection per quality. That doesn't scale to serving main *and*
-//! sub-quality simultaneously within a camera's typical 2-session budget
-//! (already spoken for by recording and the sub-stream pipeline). Instead,
-//! this module taps the appropriate pipeline's tee (same attach pattern as
-//! [`crate::ring_buffer_branch`]/[`crate::motion_branch`]) and forwards the
-//! tapped buffers into an `appsrc` living inside the RTSP media's own
-//! pipeline, via `gstreamer_rtsp_server`'s `media-configure` signal.
+//! Cameras typically allow two RTSP sessions, already used by the main and
+//! sub-stream pipelines, so a relay cannot open its own `rtspsrc`. This module
+//! taps the pipeline's tee (same attach pattern as
+//! [`crate::ring_buffer_branch`] and [`crate::motion_branch`]) and forwards the
+//! buffers into an `appsrc` inside the RTSP media's pipeline, obtained through
+//! `gstreamer_rtsp_server`'s `media-configure` signal.
 //!
-//! Shape: `tee -> queue -> appsink` (this crate's side) feeding
-//! `appsrc name=src is-live=true format=time -> [parse] -> [pay] -> pay0`
-//! (the relay media's side, built from a launch string). `set_shared(true)`
-//! means one such media pipeline instance is reused across every viewer of
-//! that mount — `media-configure` only fires again after all viewers
-//! disconnect and a new one connects (confirmed via `RTSPMedia`'s
-//! `unprepared` signal, which this module uses to know its cached `appsrc`
-//! handle is stale).
+//! Shape: `tee -> queue -> appsink` on our side feeds
+//! `appsrc name=src is-live=true format=time -> [parse] -> [pay] -> pay0` on the
+//! relay media's side, built from a launch string. With `set_shared(true)` one
+//! media pipeline serves every viewer of a mount, so `media-configure` only
+//! fires again after all viewers have left and a new one connects. The
+//! `unprepared` signal tells us when the cached `appsrc` handle is stale.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,27 +24,21 @@ use gstreamer_rtsp_server::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-/// Handle to a running relay bridge — the tee-tap on the source pipeline
-/// plus the RTSP mount factory it feeds.
+/// Handle to a running relay bridge: the tee tap on the source pipeline and
+/// the RTSP mount factory it feeds.
 pub struct RelayBridgeHandle {
     mount_path: String,
     queue_name: String,
     sink_name: String,
 }
 
-/// Build the codec -> launch-string table for the relay media's own
-/// pipeline. Same per-codec pay elements as the old `rtspsrc`-based launch
-/// strings, but sourced from `appsrc name=src` instead of a second camera
-/// connection.
+/// Launch string for the relay media's pipeline for `codec`, sourced from
+/// `appsrc name=src`. Returns `None` for unsupported codecs.
 fn appsrc_launch_str(codec: &str) -> Option<String> {
-    // Timestamps are set explicitly in Rust before each `push_buffer` call
-    // (see `attach`'s appsink callback) rather than via appsrc's own
-    // `do-timestamp` — buffers arriving from the tee-tap carry PTS/DTS
-    // stamped against the *source* pipeline's clock, which has no
-    // relationship to this media's own independent pipeline clock, and
-    // `do-timestamp=true` was tried first and produced a stuck,
-    // non-monotonic DTS in practice. An explicit per-connection wall-clock
-    // timestamp sidesteps that entirely.
+    // No `do-timestamp` here: `attach`'s appsink callback stamps each buffer
+    // itself. Tapped buffers carry timestamps from the source pipeline's
+    // clock, which is unrelated to this media's clock, and `do-timestamp=true`
+    // produced a stuck, non-monotonic DTS.
     let s = match codec.to_uppercase().as_str() {
         "H264" => {
             "( appsrc name=src is-live=true format=time \
@@ -78,17 +67,13 @@ fn appsrc_launch_str(codec: &str) -> Option<String> {
     Some(s.to_owned())
 }
 
-/// Build and immediately tear down a throwaway `appsrc ! h264parse !
-/// capsfilter ! rtph264pay` pipeline so GStreamer's element/plugin lookup
-/// and caps-negotiation machinery is already warm before any real viewer
+/// Build and immediately tear down a throwaway H264 relay pipeline so
+/// GStreamer's plugin lookup and caps negotiation are warm before any viewer
 /// connects.
 ///
-/// Confirmed live: the very first H264 relay pipeline built in this
-/// process produces a handful of "corrupt decoded frame" errors on the
-/// client for well under a second before self-healing — every pipeline
-/// built afterwards (same process) is clean from frame one. Paying that
-/// one-time cost here, at server startup with no viewer attached, means no
-/// real client ever sees it.
+/// The first H264 relay pipeline built in a process makes the client report a
+/// few "corrupt decoded frame" errors for under a second; later pipelines are
+/// clean. Doing it at startup means no real client sees that.
 pub(crate) fn warmup() {
     let Some(launch) = appsrc_launch_str("H264") else {
         return;
@@ -164,28 +149,19 @@ pub fn attach(
     factory.set_launch(&launch);
     factory.set_shared(true);
 
-    // Populated by `media-configure` on first client connect, cleared by
-    // `unprepared` once the last client disconnects and the shared media is
-    // torn down. The appsink callback below only forwards buffers while
-    // this is `Some` — with nobody watching, samples are just dropped.
+    // Set by `media-configure` when the first client connects and cleared by
+    // `unprepared` when the shared media is torn down. While it is `None`,
+    // the appsink callback drops samples.
     //
-    // `started_at` is captured fresh each time a new appsrc is installed —
-    // every pushed buffer gets PTS/DTS set to elapsed-time-since-that-moment
-    // (computed here in Rust, not left to the appsrc's own `do-timestamp`).
-    // `do-timestamp` was tried first and produced a stuck, non-monotonic
-    // DTS in practice (confirmed live: ffmpeg reported "non monotonically
-    // increasing dts... 295 >= 295" repeating) — plausibly an interaction
-    // between the appsrc's internal clock/base-time tracking and buffers
-    // arriving from a source with its own, unrelated clock domain. Explicit
-    // per-connection wall-clock timestamps sidestep that entirely and are
-    // trivially guaranteed monotonic.
+    // `started_at` is reset for each new appsrc, and every pushed buffer gets
+    // PTS/DTS = time elapsed since then. Using appsrc's `do-timestamp` instead
+    // gave a stuck DTS (ffmpeg: "non monotonically increasing dts"), likely
+    // because the tapped buffers come from an unrelated clock domain. Elapsed
+    // wall-clock time is always monotonic.
     //
-    // `seen_keyframe` starts `false` on every fresh connection and buffers
-    // are dropped (not forwarded) until the tap delivers one — a decoder
-    // starting mid-GOP has no reference frame for the P-slices it'd
-    // otherwise receive first, and produces exactly the "corrupt decoded
-    // frame" behavior confirmed live before this was added. Same
-    // `!DELTA_UNIT` keyframe check `ring_buffer_branch.rs` already uses.
+    // `seen_keyframe` starts `false` per connection, and buffers are dropped
+    // until a keyframe (`!DELTA_UNIT`) arrives. A decoder starting mid-GOP has
+    // no reference frame and shows corrupt frames.
     struct AppsrcState {
         appsrc: AppSrc,
         started_at: std::time::Instant,
@@ -232,13 +208,10 @@ pub fn attach(
                     .map_err(|_| gstreamer::FlowError::Error)?;
 
                 if let Some(state) = slot_for_sink.lock().unwrap().as_mut() {
-                    // Set once per connection, not per buffer — `AppSrc::set_caps`
-                    // pushes a fresh caps/stream-start event downstream on every
-                    // call, and doing that on every single buffer was observed
-                    // live to corrupt the first several decoded frames of every
-                    // new connection (the media's internal `h264parse` resyncing
-                    // repeatedly right as a decoder is trying to lock on). The
-                    // tap's caps don't change mid-session, so once is enough.
+                    // Set caps once per connection. Each `AppSrc::set_caps` call
+                    // sends a new caps event downstream, and doing it per buffer
+                    // made the media's `h264parse` resync repeatedly and corrupt
+                    // the first frames. The tap's caps do not change mid-session.
                     if !state.caps_set {
                         if let Some(caps) = sample.caps() {
                             state.appsrc.set_caps(Some(&caps.to_owned()));
@@ -299,16 +272,14 @@ pub fn attach(
     })
 }
 
-/// Detach a relay bridge: removes the mount factory (existing viewers keep
-/// their current session; new ones get "not found") and tears down the
-/// tee-tap via the same blocking-pad-probe pattern as
-/// [`crate::ring_buffer_branch::detach`], falling back to forcing the same
-/// removal directly if the probe never fires (e.g. the tee has stopped
-/// flowing data because the pipeline's upstream already died) — otherwise
-/// the branch's elements are orphaned in the pipeline forever under their
-/// fixed names, and every later `attach()` for this camera+quality fails.
-/// Returns immediately — element cleanup is asynchronous either way. Safe
-/// to call while `Playing`.
+/// Detach a relay bridge.
+///
+/// Removes the mount factory (existing viewers keep their session, new ones
+/// get "not found") and tears down the tee tap with the same blocking pad
+/// probe as [`crate::ring_buffer_branch::detach`]. If the probe never fires,
+/// for example because upstream died, the removal is forced so a later
+/// `attach()` does not hit a name collision. Returns immediately; element
+/// cleanup is asynchronous. Safe to call while `Playing`.
 pub fn detach(
     pipeline: &gstreamer::Pipeline,
     mounts: &gstreamer_rtsp_server::RTSPMountPoints,
@@ -361,21 +332,16 @@ pub fn detach(
         if fired {
             tracing::info!(camera_id = %camera_id, "Relay bridge detached");
         } else {
-            // A BLOCK_DOWNSTREAM probe only fires when a buffer/event
-            // actually tries to cross this pad — if the pipeline's upstream
-            // (the camera connection) has already died, nothing ever will,
-            // and the probe never fires. Giving up here without also
-            // forcing removal left `queue`/`appsink` permanently stuck in
-            // the pipeline under their fixed names — every later `attach()`
-            // for this camera+quality then failed at `add_many` with a name
-            // collision, forever, recoverable only by rebuilding the whole
-            // pipeline (daemon restart; see the incident this fixes). Five
-            // seconds without a single frame crossing a live tee tap is a
-            // reliable enough signal that nothing is flowing through this
-            // exact link for it to be safe to force the same teardown here.
+            // A BLOCK_DOWNSTREAM probe only fires when a buffer or event
+            // crosses the pad, so it never fires if the camera connection is
+            // dead. Without forced removal, `queue`/`appsink` would stay in
+            // the pipeline under their fixed names and every later `attach()`
+            // for this camera and quality would fail at `add_many` until the
+            // pipeline is rebuilt. Five seconds with no frame means nothing
+            // is flowing, so forcing the teardown is safe.
             tracing::warn!(
                 camera_id = %camera_id,
-                "relay bridge detach probe timed out — forcing removal directly",
+                "relay bridge detach probe timed out, forcing removal directly",
             );
             if let Some(id) = probe_id {
                 tee_src_clone.remove_probe(id);

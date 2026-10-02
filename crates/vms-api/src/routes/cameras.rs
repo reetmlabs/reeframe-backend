@@ -14,7 +14,7 @@ use crate::{
 
 // -- Response DTO --
 
-/// Camera as returned by the API — `password_enc` is never exposed.
+/// Camera as returned by the API. `password_enc` is never exposed.
 #[derive(Serialize)]
 pub struct CameraDto {
     pub id: Uuid,
@@ -31,16 +31,15 @@ pub struct CameraDto {
     pub ring_buffer_storage: RingBufferStorage,
     pub enabled: bool,
     /// `true` if the camera's live GStreamer pipeline is currently running
-    /// (viewing live does not imply recording — see `recording`).
+    /// (live does not imply recording; see `recording`).
     pub live: bool,
     /// `true` if a recording branch is currently attached and writing to
     /// disk. Implies `live`.
     pub recording: bool,
-    /// Persisted operator intent — set by `recording/start`/`stop`, not by
-    /// anything else. Can be `true` while `recording` is `false` (camera
-    /// unreachable, mid-reconnect) — that combination means "trying to
-    /// record but not currently succeeding," distinct from an operator
-    /// having stopped it on purpose.
+    /// Persisted operator intent, set only by `recording/start`/`stop`. It can
+    /// be `true` while `recording` is `false` (camera unreachable or
+    /// reconnecting), which means the daemon is trying to record but not
+    /// currently succeeding, as opposed to an operator having stopped it.
     pub desired_recording: bool,
     /// Whether motion detection runs while the camera is live. A pipeline
     /// with an `Event` trigger on this camera keeps it running anyway.
@@ -117,8 +116,8 @@ pub struct CreateCameraBody {
     pub live_view_stream: Option<LiveViewStream>,
 }
 
-/// All fields optional — only supplied fields are updated.
-/// Clearing a nullable field to `null` is not supported in v0.1 (omit to leave unchanged).
+/// All fields are optional; only supplied fields are updated.
+/// Clearing a nullable field to `null` is not supported; omit a field to leave it unchanged.
 #[derive(Deserialize)]
 pub struct UpdateCameraBody {
     pub name: Option<String>,
@@ -150,9 +149,9 @@ fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>
     base_url.to_string()
 }
 
-/// Resolve a decrypted camera row's main + optional sub-stream RTSP URLs
-/// with credentials injected — shared by every handler that may need to
-/// start the camera's live pipeline (`recording/start`, `relay/start`).
+/// Resolve a decrypted camera row's main and optional sub-stream RTSP URLs
+/// with credentials injected. Used by every handler that may start or update
+/// the camera's live pipeline.
 fn resolve_camera_urls(camera: &camera::Model, password: Option<&str>) -> (String, Option<String>) {
     let rtsp_url = build_rtsp_url(&camera.rtsp_url, camera.username.as_deref(), password);
     let sub_rtsp_url = camera
@@ -341,9 +340,8 @@ pub async fn delete_camera(
 
 /// POST /cameras/{id}/recording/start
 ///
-/// Starts recording — brings the camera's live pipeline up first if it
-/// isn't already running (recording never requires a separate "go live"
-/// call first).
+/// Starts recording, bringing the camera's live pipeline up first if it isn't
+/// running. No separate "go live" call is needed.
 #[handler]
 pub async fn start_recording(
     req: &mut Request,
@@ -364,10 +362,9 @@ pub async fn start_recording(
 
     let (rtsp_url, sub_rtsp_url) = resolve_camera_urls(&camera, password.as_deref());
 
-    // Persisted before the actual attach attempt, and independent of
-    // whether it succeeds — this is what lets boot recovery and reconnect
-    // handling resume recording later even if it fails to start right now
-    // (camera unreachable, etc.) instead of the intent being lost with it.
+    // Persist the intent before attempting to attach, whether or not that
+    // succeeds, so boot recovery and reconnect handling can resume recording
+    // later if the camera is unreachable right now.
     state.camera_repo.set_desired_recording(id, true).await?;
 
     state
@@ -379,9 +376,9 @@ pub async fn start_recording(
 
 /// POST /cameras/{id}/recording/stop
 ///
-/// Detaches the recording branch only — the live pipeline (and any active
-/// relay/motion detection) keeps running. Use `DELETE /cameras/{id}` or stop
-/// the relay separately to tear down live view entirely.
+/// Detaches only the recording branch. The live pipeline and any active relay
+/// or motion detection keep running. Use `DELETE /cameras/{id}` or stop the
+/// relay separately to tear down live view.
 #[handler]
 pub async fn stop_recording(
     req: &mut Request,
@@ -391,8 +388,8 @@ pub async fn stop_recording(
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
 
-    // This is the only way intent is ever cleared — until this runs, boot
-    // recovery and reconnect handling keep trying to resume recording.
+    // This is the only place intent is cleared. Until it runs, boot recovery
+    // and reconnect handling keep trying to resume recording.
     state.camera_repo.set_desired_recording(id, false).await?;
 
     state.media_manager.stop_recording(id).await?;
@@ -407,7 +404,7 @@ fn parse_relay_quality(req: &mut Request) -> Result<Option<RelayQuality>, ApiErr
         Some("main") => Ok(Some(RelayQuality::Main)),
         Some("sub") => Ok(Some(RelayQuality::Sub)),
         Some(other) => Err(ApiError::bad_request(format!(
-            "invalid quality '{other}' — expected 'main' or 'sub'"
+            "invalid quality '{other}', expected 'main' or 'sub'"
         ))),
     }
 }
@@ -427,15 +424,13 @@ pub fn live_view_quality(camera: &camera::Model, requested: Option<RelayQuality>
 
 /// POST /cameras/{id}/relay/start?quality=main|sub
 ///
-/// Starts an RTSP relay mount for live view — bridged from the camera's main
-/// or sub-stream pipeline, starting whichever one is needed on demand if
-/// it isn't already running. Defaults to the sub stream, falling back to
-/// main without one; a camera whose `live_view_stream` is `main` always
-/// gets main (see [`live_view_quality`]). Never requires recording.
-/// Recording is a separate, explicit concern — see `POST
-/// /cameras/{id}/recording/start`. Probes the codec on first use (any
-/// quality — main and sub are assumed to share one encoding), then
-/// registers the mount.
+/// Starts an RTSP relay mount for live view, bridged from the camera's main or
+/// sub-stream pipeline, which is started on demand if needed. Defaults to the
+/// sub stream and falls back to main if there is none; a camera whose
+/// `live_view_stream` is `main` always gets main (see [`live_view_quality`]).
+/// Does not start recording (see `POST /cameras/{id}/recording/start`).
+/// Probes the codec on first use, assuming main and sub share one encoding,
+/// then registers the mount.
 #[handler]
 pub async fn start_relay(
     req: &mut Request,

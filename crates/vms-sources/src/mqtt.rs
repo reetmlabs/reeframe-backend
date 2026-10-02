@@ -1,10 +1,9 @@
 //! MQTT subscriber source adapter.
 //!
 //! Subscribes to a topic (or topic filter) on a broker and publishes an
-//! [`Event`] for every message received. Connection loss recovers on its
-//! own — `rumqttc`'s event loop reconnects automatically as long as
-//! `poll()` keeps being called, so the loop below never gives up and
-//! returns on a transient network error; it only stops on cancellation.
+//! [`Event`] for every message received. `rumqttc`'s event loop reconnects
+//! by itself as long as `poll()` keeps being called, so the loop below keeps
+//! going through network errors and only stops on cancellation.
 
 use std::time::Duration;
 
@@ -51,13 +50,11 @@ fn qos_from_u8(qos: u8) -> Result<QoS, VmsError> {
 
 /// Connect to the broker in `config` and subscribe to its topic.
 ///
-/// Unlike the file-watcher adapter, a bad broker address cannot be detected
-/// synchronously — `AsyncClient::new` only builds local state and never
-/// touches the network until the event loop is polled. Connection errors
-/// instead surface as `Err` values inside the loop below and are logged
-/// rather than returned, matching `rumqttc`'s own reconnect-by-continuing
-/// design. Only genuinely synchronous problems (bad config, invalid QoS) are
-/// returned here.
+/// A bad broker address can't be detected here, because `AsyncClient::new`
+/// only builds local state and doesn't touch the network until the event loop
+/// is polled. Connection errors show up inside the loop and are logged, since
+/// `rumqttc` reconnects by being polled again. Only config errors such as an
+/// invalid QoS are returned.
 pub fn spawn(
     source_id: Uuid,
     config: serde_json::Value,
@@ -98,7 +95,7 @@ pub fn spawn(
                         let event =
                             Event::new(&TopicKey::Source(source_id), "mqtt_message", payload);
                         if event_tx.send(event).is_err() {
-                            return; // Event Bus forwarder is gone — nothing left to notify.
+                            return; // The Event Bus forwarder is gone, so nobody is listening.
                         }
                     }
                     Ok(_) => {}
@@ -134,8 +131,8 @@ mod tests {
     }
 
     // Cancellation stops the task promptly even while the connection attempt
-    // to an unreachable broker is still pending — `select!` races the two
-    // futures, so shutdown never waits on network I/O.
+    // to an unreachable broker is pending, because `select!` races it against
+    // the cancel token.
     #[tokio::test]
     async fn cancel_stops_task_without_a_reachable_broker() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

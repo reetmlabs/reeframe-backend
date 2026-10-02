@@ -1,18 +1,16 @@
-//! `GET /metrics` — Prometheus text-exposition scrape endpoint.
+//! `GET /metrics`: Prometheus text-exposition scrape endpoint.
 //!
-//! `http_requests_total`, `pipeline_runs_total`, and
-//! `event_bus_published_total` are counters accumulated as requests/runs/
-//! events happen (see `MetricsMiddleware`, `PipelineExecutor`, `EventBus`).
-//! `resource_state` is different: it's a point-in-time snapshot, so it's
-//! recomputed here from `ResourceManager::all()` on every scrape rather than
-//! incremented anywhere.
+//! `http_requests_total`, `pipeline_runs_total` and `event_bus_published_total`
+//! are counters incremented as requests, runs and events happen (see
+//! `MetricsMiddleware`, `PipelineExecutor`, `EventBus`). `resource_state` is a
+//! point-in-time snapshot, so it is recomputed from `ResourceManager::all()` on
+//! every scrape.
 //!
-//! Mounted under `public_routes()` alongside `GET /health` — for the same
-//! reason a liveness/readiness probe has no credentials to present, neither
-//! does a Prometheus scraper in a typical self-hosted deployment of this
-//! daemon. The metric labels are all small fixed vocabularies (route
-//! patterns, resource *types*, topic *kinds*) with no camera/pipeline UUIDs
-//! or credential material, so there's nothing sensitive to gate.
+//! Mounted under `public_routes()` next to `GET /health` because a Prometheus
+//! scraper in a typical self-hosted deployment has no credentials to present.
+//! The labels are small fixed vocabularies (route patterns, resource types,
+//! topic kinds) with no camera or pipeline UUIDs or credentials, so nothing
+//! sensitive is exposed.
 
 use std::collections::HashMap;
 

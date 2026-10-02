@@ -24,6 +24,9 @@ use crate::metrics::Metrics;
 
 // -- Executor --
 
+/// Key type for the progress map: `(run_id, node_id)`.
+pub type ProgressKey = (Uuid, NodeId);
+
 /// Executes a compiled pipeline DAG for a given trigger context.
 ///
 /// On each invocation [`execute`] inserts a `pipeline_runs` row, pre-creates
@@ -31,13 +34,10 @@ use crate::metrics::Metrics;
 /// the DAG concurrently using a [`JoinSet`], and finalises every record as
 /// execution proceeds.
 ///
-/// Action and device-control nodes are dispatched through [`ActionDispatcher`].
-/// Transport nodes are not yet implemented and return a no-op success.
+/// Action and device-control nodes are dispatched through [`ActionDispatcher`],
+/// Transport nodes through [`TransportDispatcher`].
 ///
 /// [`execute`]: PipelineExecutor::execute
-/// Key type for the progress map: `(run_id, node_id)`.
-pub type ProgressKey = (Uuid, NodeId);
-
 #[derive(Clone)]
 pub struct PipelineExecutor {
     repo: PipelineRunRepo,
@@ -48,9 +48,8 @@ pub struct PipelineExecutor {
     encryption_key: Option<[u8; 32]>,
     /// Live transfer progress for all active Transport nodes.
     ///
-    /// Keyed by `(run_id, node_id)`.  Entries are inserted when a Transport
-    /// node starts and updated after every chunk.  The API layer can expose
-    /// this via SSE or WebSocket for UI progress bars.
+    /// Keyed by `(run_id, node_id)`. An entry is updated on every progress
+    /// report from the transport and removed when the transfer ends.
     progress_map: Arc<DashMap<ProgressKey, TransferProgress>>,
     metrics: Arc<Metrics>,
 }
@@ -109,7 +108,7 @@ impl PipelineExecutor {
             "Pipeline run started",
         );
 
-        // -- 2. Pre-create node-result rows (Pending) — single batched INSERT --
+        // -- 2. Pre-create node-result rows (Pending) in one batched INSERT --
         let result_ids = self
             .repo
             .create_node_results_batch(run_id, &pipeline.dag.topological_order)
@@ -137,8 +136,8 @@ impl PipelineExecutor {
             .await;
 
         // -- 4. Finalise run --
-        // Every step here logs at info, failures included — this is the
-        // execution timeline operators tail, not an error-alerting channel.
+        // Every step logs at info, failures included, because this is the
+        // execution timeline operators follow.
         match &outcome {
             Ok(()) => {
                 self.repo
@@ -170,14 +169,13 @@ impl PipelineExecutor {
     ///
     /// Each node tracks two counters:
     ///
-    /// * `remaining[n]` — parents not yet finalised (completed *or* skipped).
-    ///   Starts at `parents[n].len()`.  Decremented by every parent regardless
-    ///   of outcome.  When it reaches 0 the node enters the ready queue.
+    /// * `remaining[n]`: parents not yet finalised (completed *or* skipped).
+    ///   Starts at `parents[n].len()` and is decremented by every parent
+    ///   regardless of outcome. When it reaches 0 the node enters the ready queue.
     ///
-    /// * `active_parents[n]` — parents that *completed* (not skipped).
-    ///   Incremented only when a parent finishes successfully.  When a node
-    ///   becomes ready and `active_parents[n] == 0` (but it has parents) all
-    ///   its ancestor paths were skipped — it is skipped too.
+    /// * `active_parents[n]`: parents that completed and activated this node.
+    ///   When a node with parents becomes ready and `active_parents[n] == 0`,
+    ///   every path into it was skipped, so it is skipped too.
     ///
     /// For `Condition` nodes only the taken-branch child gets an
     /// `active_parents` increment; the other branch's child only gets the
@@ -238,7 +236,6 @@ impl PipelineExecutor {
                         if *r == 0 {
                             ready.push_back(child);
                         }
-                        // active_parents[child] is NOT incremented.
                     }
                     continue;
                 }
@@ -320,14 +317,12 @@ impl PipelineExecutor {
 
             outputs.insert(node_id, node_output);
 
-            // Save output -> DB row -> completed
             self.repo
                 .finish_node_result(result_id, NodeResultStatus::Completed, output_json, None)
                 .await?;
             tracing::info!(%run_id, %node_id, node_type = ?node.node_type, "Node completed");
 
             for &child in &dag.adjacency[&node_id] {
-                // Check if child is active based on result of condition node
                 if child_is_active(
                     &node.node_type,
                     branch_taken,
@@ -452,8 +447,8 @@ pub(crate) async fn execute_node(
             let expr = node.condition_expr.as_deref().unwrap_or("false");
             let eval_ctx = build_condition_context(parent_outputs);
             match evalexpr::eval_boolean_with_context(expr, &eval_ctx) {
-                // Forwards the parent's artifact_path/text (mirroring Fork)
-                // so an artifact can legitimately pass through a Condition.
+                // Forwards the parent's artifact_path/text (like Fork) so an
+                // artifact can pass through a Condition.
                 Ok(result) => {
                     let base = parent_outputs
                         .first()
@@ -933,7 +928,7 @@ mod tests {
         assert!(!out.success);
     }
 
-    // -- DAG structural sanity (no DB — compile only) --
+    // -- DAG structural sanity (no DB, compile only) --
 
     #[test]
     fn dag_compile_root_to_transport() {

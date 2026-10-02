@@ -10,17 +10,14 @@ use crate::dispatcher::ActionContext;
 
 /// Ensure a camera is recording.
 ///
-/// If the camera is already recording this is a no-op — the handler returns
-/// success immediately so the pipeline can continue. Otherwise the RTSP URL
-/// is looked up from `ctx.camera_rtsp_urls` (populated by the executor
-/// before the run) and `MediaManager::start_recording` is called — it brings
-/// the live pipeline up first if it isn't already (recording never implies
-/// the reverse: a camera can be live without this action ever having run).
+/// If the camera is already recording, the handler returns success without
+/// doing anything. Otherwise it looks up the RTSP URL in `ctx.camera_rtsp_urls`
+/// and calls `MediaManager::start_recording`. That map only holds running
+/// cameras, so a camera whose live pipeline is down fails with "not found".
 ///
-/// `duration_secs` and `quality` from [`StartRecordingConfig`] are recorded in
-/// `NodeOutput::metadata` for downstream nodes but are not enforced here —
-/// timed stop is the responsibility of a downstream `stop_recording` node or a
-/// separate scheduled pipeline.
+/// `duration_secs` and `quality` from [`StartRecordingConfig`] are copied into
+/// `NodeOutput::metadata` for downstream nodes but not enforced here. A timed
+/// stop needs a downstream `stop_recording` node or a separate scheduled pipeline.
 pub async fn execute(
     node_id: NodeId,
     cfg: &StartRecordingConfig,
@@ -40,7 +37,7 @@ pub async fn execute(
         return NodeOutput::failure(node_id, "start_recording: media manager not configured");
     };
 
-    // -- Already recording — no-op --
+    // -- Already recording: no-op --
     if media.is_recording(camera_id) {
         tracing::debug!(
             node_id = %node_id,

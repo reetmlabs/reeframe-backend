@@ -103,11 +103,9 @@ impl Default for RtspConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// `"local"` — the BE issues and validates its own JWTs with `jwt_secret`.
-    /// `"oidc"` — additionally trust JWTs issued by the Coordinator instance
-    /// at `jwks_url`, verified locally against its cached public keys.
-    /// Community-tier — Coordinator is core infrastructure, not an
-    /// enterprise add-on.
+    /// `"local"`: the BE issues and validates its own JWTs with `jwt_secret`.
+    /// `"oidc"`: also trusts JWTs issued by the Coordinator at `jwks_url`,
+    /// verified locally against its cached public keys.
     pub mode: String,
     /// HMAC-SHA256 signing secret for locally issued JWTs. Required when
     /// `mode = "local"`. Set via config file or VMS_AUTH__JWT_SECRET env var.
@@ -140,17 +138,15 @@ impl Default for AuthConfig {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GatewayConfig {
-    /// `host:port` of a Relay/gateway server for WAPP pairing. Unset by
-    /// default — this BE keeps working standalone with zero dependency on
-    /// any Relay/WAPP being reachable. Set via config file or
-    /// VMS_GATEWAY__URL env var.
+    /// `host:port` of a gateway server for mobile app pairing. Unset by
+    /// default, in which case the BE runs standalone and never connects to a
+    /// gateway. Set via config file or VMS_GATEWAY__URL env var.
     pub url: Option<String>,
-    /// The identifier Coordinator's `sites` table registered this BE
-    /// under. Presented to the Relay on every connection so it knows which
-    /// site the connection belongs to (required when `url` is set; ignored
-    /// otherwise), and separately used as the expected `aud` when verifying
-    /// Coordinator-issued tokens (required whenever `[auth] mode = "oidc"`
-    /// — see `CoordinatorJwksAuthProvider`, unrelated to `url`/Relay).
+    /// The ID this BE is registered under in the Coordinator's `sites` table.
+    /// Sent to the gateway on every connection so it knows which site the
+    /// connection belongs to (required when `url` is set). Also used as the
+    /// expected `aud` of Coordinator-issued tokens, so it is required when
+    /// `[auth] mode = "oidc"` even without a gateway `url`.
     /// Set via config file or VMS_GATEWAY__BE_ID env var.
     pub be_id: Option<uuid::Uuid>,
 }
@@ -170,8 +166,9 @@ pub struct AppConfig {
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
     pub encryption_key: String,
-    /// Minimum log level (trace | debug | info | warn | error).
-    /// Overridden at runtime by the RUST_LOG env var.
+    /// Log level setting (trace | debug | info | warn | error). The daemon's
+    /// active log filter comes from the RUST_LOG env var, because tracing is
+    /// set up before this config is loaded.
     pub log_level: String,
 }
 
@@ -193,17 +190,16 @@ impl Default for AppConfig {
 
 // -- Loader --
 
-/// Relative path of the local config-file override — the same literal
-/// `load()` merges below, and what `POST /system/config-file` backs up and
-/// replaces on disk (see `AppState::config_file_path`).
+/// Relative path of the local config-file override. `load()` merges it, and
+/// `POST /system/config-file` backs it up and replaces it on disk.
 pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 
 /// Load `AppConfig` from a layered set of sources (lowest -> highest priority):
 ///
 /// 1. Built-in defaults (`AppConfig::default()`)
-/// 2. `/etc/reeframe/config.toml`  — system-wide config (silently skipped if absent)
-/// 3. `./reeframe.toml`            — local override for development (silently skipped if absent)
-/// 4. `VMS_*` environment variables — twelve-factor style overrides
+/// 2. `/etc/reeframe/config.toml`: system-wide config (skipped if absent)
+/// 3. `./reeframe.toml`: local override for development (skipped if absent)
+/// 4. `VMS_*` environment variables
 ///
 /// Environment variable mapping uses a `VMS_` prefix and `__` as the nested
 /// key separator:
@@ -233,21 +229,16 @@ pub fn load() -> Result<AppConfig, figment::Error> {
 
 // -- Dynamic settings mapping --
 //
-// Explicit, hand-written mapping between `vms_core::KNOWN_SETTINGS` keys and
-// `AppConfig` fields — deliberately not a generic/reflective mechanism,
-// since the set of dynamic settings is small and fixed. Kept here (not in
-// `vms-core`) because only this crate's `AppConfig` type is involved;
-// `vms-api`'s settings routes only ever talk to the `settings` DB table,
-// never to this function directly.
+// Hand-written mapping between `vms_core::KNOWN_SETTINGS` keys and
+// `AppConfig` fields. The set of dynamic settings is small and fixed, so
+// reflection isn't worth it. It lives here because `AppConfig` is defined in
+// this crate; `vms-api`'s settings routes only use the `settings` table.
 
-/// Read the current value of a known setting off `cfg`, as JSON — used to
-/// seed the `settings` table the first time a key is seen (i.e. it's never
-/// been explicitly overridden via the API), so `GET /system/settings` has
-/// an authoritative answer without ever re-reading the config file again
-/// after boot.
+/// Read the current value of a known setting from `cfg` as JSON. Used to
+/// seed the `settings` table for keys with no override yet, so
+/// `GET /system/settings` can answer without re-reading the config file.
 ///
-/// Returns `None` for a key `vms_core::setting_meta` doesn't recognize —
-/// callers should already have checked that.
+/// Returns `None` for an unknown key.
 pub fn get_setting_value(cfg: &AppConfig, key: &str) -> Option<serde_json::Value> {
     use serde_json::json;
     Some(match key {
@@ -269,9 +260,8 @@ pub fn get_setting_value(cfg: &AppConfig, key: &str) -> Option<serde_json::Value
     })
 }
 
-/// Patch `cfg` in place from a DB-stored override value — the DB-wins step
-/// of the `defaults < file < env < DB` precedence chain, applied once at
-/// startup for every key that has an override row.
+/// Patch `cfg` in place from a DB-stored override value. This is the last
+/// step of the `defaults < file < env < DB` precedence chain.
 pub fn apply_setting_value(
     cfg: &mut AppConfig,
     key: &str,
@@ -320,13 +310,10 @@ pub fn apply_setting_value(
     Ok(())
 }
 
-/// Resolve dynamic settings against the `settings` table: for each known
-/// key, a DB override (if present) wins over whatever `cfg` was just loaded
-/// with from the config file/env, and its `pending_restart` flag is cleared
-/// (it's applied now); a key with no override yet is seeded from `cfg`'s
-/// current value so future `GET /system/settings` calls have something
-/// authoritative to report. Called once at startup, after migrations run
-/// and before anything downstream is constructed from `cfg`.
+/// Resolve dynamic settings against the `settings` table at startup. A
+/// stored override wins over the file/env value and has its
+/// `pending_restart` flag cleared; a key with no stored row is seeded from
+/// `cfg`. Must run after migrations and before anything is built from `cfg`.
 pub async fn resolve_dynamic_settings(
     cfg: &mut AppConfig,
     settings_repo: &vms_db::SettingsRepo,
@@ -336,7 +323,7 @@ pub async fn resolve_dynamic_settings(
             Some(row) => {
                 let value: serde_json::Value = serde_json::from_str(&row.value)?;
                 if let Err(e) = apply_setting_value(cfg, meta.key, &value) {
-                    tracing::warn!(key = meta.key, error = %e, "Stored setting value is invalid — keeping the config-file/env value instead");
+                    tracing::warn!(key = meta.key, error = %e, "Stored setting value is invalid, keeping the config-file/env value instead");
                     continue;
                 }
                 if row.pending_restart {
@@ -354,19 +341,16 @@ pub async fn resolve_dynamic_settings(
     Ok(())
 }
 
-/// Validate an uploaded `POST /system/config-file` body by parsing it onto
-/// `AppConfig` — the same shape `reeframe.toml` itself must satisfy, so a
-/// partial/malformed upload is rejected here before anything on disk or in
-/// the DB is touched. On success, returns the resolved value of every known
-/// dynamic setting so the caller can sync it into the `settings` table
-/// through the same upsert-and-hot-apply-or-flag path `PATCH
-/// /system/settings` uses. Every key is present in the result because a file
-/// missing a section would already have failed to deserialize above.
+/// Validate an uploaded `POST /system/config-file` body by parsing it as an
+/// `AppConfig`, so a partial or malformed file is rejected before anything
+/// on disk or in the DB changes. Returns the value of every known dynamic
+/// setting, which the caller syncs into the `settings` table the same way
+/// `PATCH /system/settings` does. Every key is present in the result, since
+/// a file missing a section fails to deserialize.
 ///
-/// Exposed to `vms-api` as a plain function value (`AppState::config_parser`)
-/// rather than a type it imports directly — `vms-daemon` depends on
-/// `vms-api`, not the other way around, so `AppConfig` can't cross that
-/// boundary as a type without creating a cycle.
+/// Passed to `vms-api` as a function value (`AppState::config_parser`)
+/// because `vms-daemon` depends on `vms-api`, so `vms-api` can't name
+/// `AppConfig` without a dependency cycle.
 pub fn parse_uploaded_config(
     bytes: &[u8],
 ) -> Result<Vec<(&'static str, serde_json::Value)>, String> {
@@ -385,11 +369,8 @@ pub fn parse_uploaded_config(
 mod tests {
     use super::*;
 
-    /// The default `[auth]` config is "local" mode with
-    /// no `jwks_url` at all — a fresh install needs zero Coordinator setup
-    /// to boot and authenticate. `main.rs` only constructs a
-    /// `CoordinatorJwksAuthProvider` when `mode == "oidc"`, so this default
-    /// guarantees the local-only path is what a fresh install actually gets.
+    /// A fresh install defaults to "local" auth with no `jwks_url`, so it can
+    /// boot and authenticate without any Coordinator setup.
     #[test]
     fn default_auth_config_requires_no_coordinator_setup() {
         let auth = AuthConfig::default();

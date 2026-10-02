@@ -1,11 +1,10 @@
-//! Contact list CRUD + membership — `/contact-lists[/{id}][/members[/{contact_id}]]`.
+//! Contact list CRUD and membership: `/contact-lists[/{id}][/members[/{contact_id}]]`.
 //!
-//! CRUD mirrors `destinations.rs`'s pattern exactly. Membership is a plain
-//! join-table toggle (`add_member`/`remove_member` in
-//! `vms_db::repos::contact_list`) — `POST` is idempotent (adding an existing
-//! member is a no-op), `DELETE` never 404s on a membership that's already
-//! gone, matching how every other idempotent-toggle endpoint in this API
-//! behaves.
+//! CRUD follows the `destinations.rs` pattern. Membership is a join-table
+//! toggle (`add_member`/`remove_member` in `vms_db::repos::contact_list`).
+//! `POST` is idempotent (adding an existing member is a no-op) and `DELETE`
+//! does not 404 on a membership that is already gone, like the other toggle
+//! endpoints in this API.
 
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -50,7 +49,7 @@ pub struct CreateContactListBody {
     pub description: Option<String>,
 }
 
-/// All fields optional — only supplied fields are updated.
+/// All fields are optional; only supplied fields are updated.
 #[derive(Deserialize)]
 pub struct UpdateContactListBody {
     pub name: Option<String>,

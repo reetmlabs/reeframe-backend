@@ -4,9 +4,9 @@
 //! pipeline is in `Playing` state. The attach/detach functions here follow the
 //! standard pattern:
 //!
-//! - **Attach**: request a new `src_%u` pad from the tee, create and link the
+//! - Attach: request a new `src_%u` pad from the tee, create and link the
 //!   branch elements, sync their state with the running pipeline.
-//! - **Detach**: block the tee src pad via a downstream probe; inside the probe
+//! - Detach: block the tee src pad via a downstream probe; inside the probe
 //!   callback (GStreamer streaming thread) unlink and remove the elements; after
 //!   the probe fires, release the tee request pad from a short-lived std thread.
 
@@ -143,7 +143,7 @@ pub fn attach(
 /// pipeline on the GStreamer streaming thread. A short-lived `std::thread` then
 /// releases the tee request pad once the probe has completed.
 ///
-/// Returns immediately — cleanup is asynchronous. Safe to call while `Playing`.
+/// Returns immediately; cleanup is asynchronous. Safe to call while `Playing`.
 /// If no branch is attached for this camera, this is a no-op.
 pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsError> {
     let Some(queue) = pipeline.by_name(&queue_name(camera_id)) else {
@@ -188,9 +188,8 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
     });
 
     // Release the tee request pad from a std thread after the probe fires.
-    // We must not call release_request_pad from inside the probe callback —
-    // it can deadlock because release_request_pad acquires the element lock
-    // that the streaming thread already holds.
+    // Calling release_request_pad inside the probe can deadlock, because it
+    // takes the element lock the streaming thread already holds.
     let pipeline_clone2 = pipeline.clone();
     let tee_src_clone = tee_src.clone();
     std::thread::spawn(move || {
@@ -198,19 +197,15 @@ pub fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), Vms
         if fired {
             tracing::info!(camera_id = %camera_id, "Ring buffer branch detached");
         } else {
-            // A BLOCK_DOWNSTREAM probe only fires when a buffer/event
-            // actually tries to cross this pad — if the pipeline's upstream
-            // has already died, nothing ever will, and the probe never
-            // fires. Giving up here without also forcing removal leaves
-            // `queue`/`appsink` permanently stuck in the pipeline under
-            // their fixed names, so every later `attach()` for this camera
-            // fails at `add_many` with a name collision forever. Five
-            // seconds without a single frame crossing a live tee tap is a
-            // reliable enough signal that nothing is flowing through this
-            // exact link for it to be safe to force the same teardown here.
+            // A BLOCK_DOWNSTREAM probe only fires when a buffer or event
+            // crosses the pad, so it never fires if upstream is dead. Without
+            // forced removal, `queue`/`appsink` would stay in the pipeline
+            // under their fixed names and every later `attach()` for this
+            // camera would fail with a name collision. Five seconds with no
+            // frame means nothing is flowing, so forcing the teardown is safe.
             tracing::warn!(
                 camera_id = %camera_id,
-                "detach probe timed out — forcing removal directly",
+                "detach probe timed out, forcing removal directly",
             );
             if let Some(id) = probe_id {
                 tee_src_clone.remove_probe(id);

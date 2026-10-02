@@ -1,10 +1,9 @@
-//! Tile/matrix camera-layout profile CRUD —
-//! `/tile-profiles[/{id}[/tiles[/{tile_id}[/bindings/{site_id}]]], /site-assignments]]`.
+//! Tile/matrix camera-layout profile CRUD: `/tile-profiles[/{id}]` with nested
+//! `tiles`, `bindings` and `site-assignments` routes.
 //!
-//! Moved here from the FE's local sqlite (`AppDatabase.cpp`'s
-//! `tile_profiles`/`tile_formations`/`tile_camera_bindings`/
-//! `profile_site_assignments`) so any client can read/write the same
-//! layout data, not just the desktop FE with a local db file.
+//! The data mirrors the desktop frontend's `tile_profiles`/`tile_formations`/
+//! `tile_camera_bindings`/`profile_site_assignments` tables (`AppDatabase.cpp`)
+//! and is stored server-side so every client shares the same layouts.
 
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -42,8 +41,8 @@ impl From<tile_profile::Model> for TileProfileDto {
     }
 }
 
-/// `col`/`row` on the wire — the `grid_col`/`grid_row` rename only exists to
-/// dodge a SeaORM macro collision internally; see `entities::tile_formation`.
+/// `col`/`row` on the wire. The internal `grid_col`/`grid_row` names avoid a
+/// SeaORM macro collision; see `entities::tile_formation`.
 #[derive(Serialize)]
 pub struct TileFormationDto {
     pub id: Uuid,
@@ -94,8 +93,8 @@ pub struct CreateTileProfileBody {
     pub site_id: Uuid,
 }
 
-/// Rename only — matches the FE's own `renameTileProfile`, the only mutation
-/// a tile profile supports beyond its formations/bindings/assignments.
+/// Rename only, matching the frontend's `renameTileProfile`. A profile has no
+/// other mutable fields apart from its formations, bindings and assignments.
 #[derive(Deserialize)]
 pub struct UpdateTileProfileBody {
     pub name: String,
@@ -114,7 +113,7 @@ pub struct CreateTileFormationBody {
     pub row_span: Option<i32>,
 }
 
-/// All fields optional — only supplied fields are updated.
+/// All fields are optional; only supplied fields are updated.
 #[derive(Deserialize)]
 pub struct UpdateTileFormationBody {
     pub col: Option<i32>,
@@ -217,8 +216,8 @@ pub async fn delete_profile(
 
 /// POST /tile-profiles/{id}/site-assignments
 ///
-/// Idempotent — matches the FE's own `assignProfileToSite`; no corresponding
-/// "unassign" exists on either side.
+/// Idempotent, matching the frontend's `assignProfileToSite`. Neither side has
+/// an "unassign" operation.
 #[handler]
 pub async fn assign_to_site(
     req: &mut Request,
@@ -300,10 +299,8 @@ pub async fn update_tile(
 ) -> Result<Json<TileFormationDto>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let (profile_id, tile_id) = parse_profile_and_tile_id(req)?;
-    // Confirm the tile belongs to this profile before touching it — without
-    // this, a valid tile_id under the wrong profile_id in the URL would
-    // silently update someone else's tile (same reasoning as
-    // `pipeline_nodes::update_node`).
+    // Confirm the tile belongs to this profile, otherwise a valid tile_id
+    // under the wrong profile_id would update another profile's tile.
     require_tile_in_profile(state, profile_id, tile_id).await?;
     let body: UpdateTileFormationBody = parse_body(req).await?;
 
@@ -365,7 +362,7 @@ pub async fn list_bindings(
 
 /// PUT /tile-profiles/{id}/tiles/{tile_id}/bindings/{site_id}
 ///
-/// Upsert — matches the FE's own `upsertTileCameraBinding`.
+/// Upsert, matching the frontend's `upsertTileCameraBinding`.
 #[handler]
 pub async fn set_binding(
     req: &mut Request,
@@ -385,8 +382,7 @@ pub async fn set_binding(
 
 /// DELETE /tile-profiles/{id}/tiles/{tile_id}/bindings/{site_id}
 ///
-/// Clears the binding — absence of a row means "unassigned," matching
-/// `clear_binding`'s doc comment.
+/// Clears the binding. A missing row means "unassigned".
 #[handler]
 pub async fn clear_binding(
     req: &mut Request,

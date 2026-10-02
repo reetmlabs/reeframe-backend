@@ -20,43 +20,36 @@ fn resolve_camera_timezone(camera_timezone: Option<&str>, default_timezone: &str
     parse_iana_tz(camera_timezone.unwrap_or(default_timezone))
 }
 
-/// Seconds between samples during normal operation (first sleep and default).
+/// Seconds before the first sample; later samples use the fast or slow interval.
 const POLL_INTERVAL_SECS: u64 = 5;
 /// Seconds between samples when any metric is close to a threshold.
 const FAST_INTERVAL_SECS: u64 = 2;
 /// Seconds between samples when all metrics are well clear of every threshold.
 const SLOW_INTERVAL_SECS: u64 = 15;
 /// A metric is "near" a threshold when the relative distance is below this fraction.
-/// E.g. 0.20 means within ±20 % of the threshold value.
+/// E.g. 0.20 means within 20% of the threshold value, in either direction.
 const NEAR_MARGIN: f64 = 0.20;
-/// Cap on how many oldest-chunk batches the disk-threshold sweep will delete
-/// in a single tick — deleting recordings is the correct response to a full
-/// recording disk, but this stops it from looping forever if the disk is
-/// full for some unrelated reason and deleting every recording still
-/// wouldn't clear it.
+/// Cap on how many oldest-chunk batches the disk-threshold sweep deletes in
+/// one tick, so it can't loop forever when the disk is full for reasons that
+/// deleting recordings won't fix.
 const MAX_RETENTION_BATCHES_PER_TICK: usize = 20;
 const RETENTION_BATCH_SIZE: u64 = 10;
 /// Minimum seconds between daily-coverage recomputes. Retention runs on
-/// every tick above (5/2/15s) because its query is a cheap age filter, but
-/// recomputing every camera's whole "today" this often would itself become
-/// the DB-pressure problem precomputed coverage exists to solve — so this
-/// is throttled independently, on the same tick, rather than on every one.
+/// every tick because its query is a cheap age filter, but recomputing every
+/// camera's whole "today" that often would put the DB load back that
+/// precomputed coverage exists to avoid.
 const COVERAGE_RECOMPUTE_INTERVAL_SECS: u64 = 120;
-/// Cap on how many (camera, day) backfill pairs get computed in one
-/// coverage-recompute pass — same reasoning as
-/// [`MAX_RETENTION_BATCHES_PER_TICK`]: a fresh deploy with a long retention
-/// window shouldn't spike the DB computing months of history in one go: the
-/// rest backfills over subsequent passes.
+/// Cap on how many (camera, day) backfill pairs one coverage pass computes,
+/// so a fresh deploy with a long retention window doesn't compute months of
+/// history at once. The rest backfills over later passes.
 const MAX_COVERAGE_BACKFILL_PER_TICK: usize = 20;
-/// Minimum seconds between recording-intent sweeps — the safety net for
-/// whatever `MediaManager::pipeline_live_tx`'s event-driven reconciliation
-/// misses (a missed event, a race, a bug). Not the primary mechanism, so a
-/// worst-case delay this long before self-healing is fine.
+/// Minimum seconds between recording-intent sweeps. The sweep only catches
+/// what the event-driven reconciliation on `MediaManager::pipeline_live_tx`
+/// misses, so this much delay is acceptable.
 const RECORDING_INTENT_SWEEP_INTERVAL_SECS: u64 = 30;
 
 /// Recording retention configuration, set once via [`StatMonitor::set_retention`]
-/// after construction (kept out of `new()`'s signature so existing tests and
-/// call sites that don't care about retention are unaffected).
+/// after construction.
 pub struct RetentionConfig {
     pub recording_repo: RecordingRepo,
     pub camera_repo: CameraRepo,
@@ -66,10 +59,8 @@ pub struct RetentionConfig {
 }
 
 /// Daily-coverage aggregation configuration, set once via
-/// [`StatMonitor::set_coverage`] — same "optional, no-op until configured"
-/// shape as [`RetentionConfig`]. `retention_days` mirrors
-/// `RetentionConfig::retention_days`: the global default backfill window,
-/// overridden per-camera the same way retention already is.
+/// [`StatMonitor::set_coverage`]. `retention_days` is the global default
+/// backfill window, overridden per camera the same way retention is.
 pub struct CoverageConfig {
     pub recording_repo: RecordingRepo,
     pub camera_repo: CameraRepo,
@@ -81,11 +72,8 @@ pub struct CoverageConfig {
 }
 
 /// Recording-intent reconciliation configuration, set once via
-/// [`StatMonitor::set_recording_intent`] — same "optional, no-op until
-/// configured" shape as [`RetentionConfig`]/[`CoverageConfig`]. The first of
-/// these three to need a live [`MediaManager`] handle rather than just DB
-/// repos, since reconciling intent means actually attaching a recording
-/// branch, not just reading/writing rows.
+/// [`StatMonitor::set_recording_intent`]. Needs a live [`MediaManager`]
+/// because reconciling intent attaches a recording branch.
 pub struct RecordingIntentConfig {
     pub camera_repo: CameraRepo,
     pub media_manager: Arc<MediaManager>,
@@ -94,13 +82,11 @@ pub struct RecordingIntentConfig {
 /// Polls system metrics and feeds readings to the [`TriggerEvaluator`].
 ///
 /// Wraps `sysinfo` behind a `Mutex` so the same `System` instance is reused
-/// across polls — sysinfo works best when it can diff successive readings
-/// (especially for CPU usage, which is meaningless on the very first sample).
+/// across polls. sysinfo computes CPU usage from the difference between
+/// successive readings, so the first sample is meaningless.
 ///
-/// Also sweeps recording retention on the same tick (once [`Self::set_retention`]
-/// has been called) — age-based and disk-threshold-based cleanup reuse this
-/// poller instead of running a second one, since it already computes disk
-/// usage on every cycle.
+/// The same tick also runs the retention, daily-coverage and recording-intent
+/// sweeps once each one is configured.
 pub struct StatMonitor {
     evaluator: Arc<TriggerEvaluator>,
     registry: Arc<PipelineRegistry>,
@@ -129,22 +115,19 @@ impl StatMonitor {
     }
 
     /// Set the recording-retention configuration this monitor sweeps on
-    /// every poll tick. Separate from `new()` so tests and any other call
-    /// site that doesn't care about retention are unaffected.
+    /// every poll tick. Until this is called, the retention sweep is a no-op.
     pub fn set_retention(&self, config: RetentionConfig) {
         *self.retention.lock().unwrap() = Some(config);
     }
 
     /// Set the daily-coverage configuration this monitor recomputes
-    /// periodically (see [`COVERAGE_RECOMPUTE_INTERVAL_SECS`]). Same
-    /// optional, separate-from-`new()` shape as [`Self::set_retention`].
+    /// periodically (see [`COVERAGE_RECOMPUTE_INTERVAL_SECS`]).
     pub fn set_coverage(&self, config: CoverageConfig) {
         *self.coverage.lock().unwrap() = Some(config);
     }
 
     /// Set the recording-intent configuration this monitor sweeps
-    /// periodically (see [`RECORDING_INTENT_SWEEP_INTERVAL_SECS`]). Same
-    /// optional, separate-from-`new()` shape as [`Self::set_retention`].
+    /// periodically (see [`RECORDING_INTENT_SWEEP_INTERVAL_SECS`]).
     pub fn set_recording_intent(&self, config: RecordingIntentConfig) {
         *self.recording_intent.lock().unwrap() = Some(config);
     }
@@ -154,10 +137,10 @@ impl StatMonitor {
     /// Spawn the background polling loop.
     ///
     /// Calls [`cpu_percent`] once before entering the loop so sysinfo can
-    /// establish a CPU baseline — the first real reading is taken after
-    /// `POLL_INTERVAL_SECS`, by which point the delta is meaningful.
+    /// establish a CPU baseline; the first real reading comes after
+    /// `POLL_INTERVAL_SECS`.
     ///
-    /// Safe to call from a non-async context; only spawns, does not await.
+    /// Only spawns and does not await, but must be called inside a Tokio runtime.
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
             // Establish CPU baseline before the first real sample.
@@ -190,7 +173,7 @@ impl StatMonitor {
     /// Take one sample of every active metric and feed results to the evaluator.
     ///
     /// Returns `true` if any sampled value is within [`NEAR_MARGIN`] of a
-    /// configured threshold — the caller uses this to tighten the poll interval.
+    /// configured threshold. The caller uses this to tighten the poll interval.
     fn poll(&self) -> bool {
         let snapshot = self.registry.snapshot(); // Arc<RegistrySnapshot>
         let mut near = false;
@@ -221,7 +204,7 @@ impl StatMonitor {
         near |=
             self.is_near_threshold(&snapshot.pipelines, &StatMetric::RamUsagePercent, None, ram);
 
-        // -- Disk — only paths referenced by active triggers --
+        // -- Disk: only paths referenced by active triggers --
         for path in self.active_disk_paths(&snapshot.pipelines) {
             match self.disk_percent(&path) {
                 Some(pct) => {
@@ -264,8 +247,7 @@ impl StatMonitor {
     ///
     /// Every `(camera_id, day)` touched by a deletion is recomputed via
     /// [`Self::recompute_purged_days`] once both passes finish, so a
-    /// precomputed coverage row never reports data retention just deleted —
-    /// a no-op itself until [`Self::set_coverage`] has also been called.
+    /// precomputed coverage row never reports data retention just deleted.
     async fn sweep_retention(&self) {
         let (recording_repo, camera_repo, recording_dir, retention_days, disk_threshold_percent) = {
             let guard = self.retention.lock().unwrap();
@@ -360,8 +342,8 @@ impl StatMonitor {
 
     /// Recompute each `(camera_id, day)` pair against whatever chunks
     /// retention left behind, flagging `purged_by_retention` when nothing's
-    /// left. No-op if [`Self::set_coverage`] hasn't been called — coverage
-    /// precomputation is an optional feature, retention must work without it.
+    /// left. No-op if [`Self::set_coverage`] hasn't been called, since
+    /// retention must work without coverage precomputation.
     async fn recompute_purged_days(
         &self,
         recording_repo: &RecordingRepo,
@@ -394,11 +376,10 @@ impl StatMonitor {
 
     // -- Daily recording coverage --
 
-    /// Recompute every camera's "today" (UTC), then backfill any past day in
-    /// the retention window that has no row yet. No-op until
-    /// [`Self::set_coverage`] has been called, and throttled to
-    /// [`COVERAGE_RECOMPUTE_INTERVAL_SECS`] regardless — called every tick,
-    /// but only does real work once that interval has elapsed.
+    /// Recompute every camera's "today" (in its own timezone), then backfill
+    /// past days in the retention window that have no row yet. No-op until
+    /// [`Self::set_coverage`] has been called. Called every tick but only does
+    /// work once per [`COVERAGE_RECOMPUTE_INTERVAL_SECS`].
     async fn sweep_daily_coverage(&self) {
         {
             let mut last_run = self.last_coverage_run.lock().unwrap();
@@ -492,9 +473,8 @@ impl StatMonitor {
     /// Compute one camera's coverage for `day` in `tz` (that camera's own
     /// resolved timezone) from its current chunks, and upsert the row.
     /// `day < today` (also in `tz`) is finalized; `day == today` isn't.
-    /// `mark_purged_if_empty` is only `true` from the retention-purge hook —
-    /// a backfilled day with zero chunks means "never recorded," not
-    /// "recorded, then purged," so backfill/today recomputes never set it.
+    /// `mark_purged_if_empty` is only `true` from the retention-purge hook,
+    /// because an empty backfilled day was never recorded at all.
     async fn recompute_and_store_day(
         &self,
         recording_repo: &RecordingRepo,
@@ -558,11 +538,9 @@ impl StatMonitor {
 
     // -- Recording intent --
 
-    /// Safety net for [`MediaManager`]'s event-driven reconciliation
-    /// (`pipeline_live_tx`, consumed at the daemon layer) — catches a
-    /// missed event, a race, or a bug by periodically confirming every
-    /// camera that wants to be recording actually is. No-op until
-    /// [`Self::set_recording_intent`] has been called.
+    /// Periodically checks that every camera that wants to be recording is,
+    /// as a fallback for the event-driven reconciliation on [`MediaManager`]'s
+    /// `pipeline_live_tx`. No-op until [`Self::set_recording_intent`] has been called.
     async fn sweep_recording_intent(&self) {
         {
             let mut last = self.last_recording_intent_sweep.lock().unwrap();
@@ -591,10 +569,8 @@ impl StatMonitor {
             }
         };
 
-        // Pre-filtered on fields `list()` already returned, before falling
-        // into `reconcile_recording_intent`'s own (re-)checks — avoids a
-        // decrypt-and-check round trip for every camera that isn't even
-        // trying to record, on a tick that runs every 30 s regardless.
+        // Filter on fields `list()` already returned so cameras that don't
+        // need recording skip the decrypting reload in `reconcile_recording_intent`.
         for camera in cameras {
             if !camera.enabled || !camera.desired_recording {
                 continue;
@@ -616,7 +592,7 @@ impl StatMonitor {
                 recording_id = %row.id,
                 file_path = %row.file_path,
                 error = %e,
-                "Retention sweep: failed to delete file on disk — DB row will still be removed",
+                "Retention sweep: failed to delete file on disk, DB row will still be removed",
             );
         }
         match repo.delete(row.id).await {
@@ -635,11 +611,10 @@ impl StatMonitor {
     /// any enabled `Stat` trigger that matches `metric` and `path`.
     ///
     /// Nearness is defined as:
-    /// `|actual − threshold| / max(|threshold|, 1.0) < NEAR_MARGIN`
+    /// `|actual - threshold| / max(|threshold|, 1.0) < NEAR_MARGIN`
     ///
-    /// This is operator-agnostic — it fires for both rising and falling edges,
-    /// covering `GreaterThan` (disk filling up) and `LessThan` (disk running out
-    /// of free space) equally.
+    /// The check ignores the trigger's operator, so it applies equally to
+    /// `GreaterThan` and `LessThan` triggers.
     fn is_near_threshold(
         &self,
         snapshot: &HashMap<Uuid, Arc<CompiledPipeline>>,
@@ -724,17 +699,17 @@ impl StatMonitor {
 
     // -- Metric samplers --
 
-    /// Aggregate CPU utilisation across all cores (0–100 %).
+    /// Aggregate CPU utilisation across all cores (0 to 100%).
     ///
-    /// Requires two consecutive calls to sysinfo to compute a delta — the very
-    /// first call always returns ~0. Subsequent calls return accurate values.
+    /// sysinfo needs two consecutive calls to compute a delta, so the first
+    /// call returns roughly 0.
     pub(crate) fn cpu_percent(&self) -> f64 {
         let mut sys = self.sys.lock().expect("sys mutex poisoned");
         sys.refresh_cpu_usage();
         sys.global_cpu_usage() as f64
     }
 
-    /// Percentage of physical RAM currently in use (0–100 %).
+    /// Percentage of physical RAM currently in use (0 to 100%).
     pub(crate) fn ram_percent(&self) -> f64 {
         let mut sys = self.sys.lock().expect("sys mutex poisoned");
         sys.refresh_memory();
@@ -746,7 +721,7 @@ impl StatMonitor {
     }
 
     /// Percentage of disk space used on the filesystem that contains `path`
-    /// (0–100 %).
+    /// (0 to 100%).
     ///
     /// Returns `None` if no mounted filesystem matches `path`.
     pub(crate) fn disk_percent(&self, path: &str) -> Option<f64> {
@@ -976,17 +951,16 @@ mod tests {
     fn is_near_threshold_false_for_different_metric() {
         let mon = make_cpu_monitor(80.0);
         let snap = mon.registry_snapshot();
-        // RAM trigger doesn't exist — no match possible.
+        // No RAM trigger exists, so nothing can match.
         assert!(!mon.is_near_threshold(&snap.pipelines, &StatMetric::RamUsagePercent, None, 75.0));
     }
 
-    // poll() returns true when a real metric happens to be near a threshold.
+    // poll() with a threshold near every real reading runs without panicking.
     #[test]
     fn poll_returns_true_when_near_any_threshold() {
         // Set threshold to 0.01 so any real CPU/RAM reading (always > 0) is "near".
         let mon = make_cpu_monitor(0.01);
-        // RAM will likely be > 0 on a live system; CPU baseline is ~0 on first
-        // call but any value within 20% of 0.01 counts.  Just verify no panic.
+        // The real readings vary by machine, so only check that poll() doesn't panic.
         let _ = mon.poll();
     }
 

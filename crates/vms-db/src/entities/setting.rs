@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub key: String,
-    /// JSON-encoded value — settings span bool/string/number/etc.
+    /// JSON-encoded value, since settings span bool/string/number/etc.
     pub value: String,
     /// True from the moment an API-driven change to a restart-required
     /// setting is written, until the next successful startup applies it.

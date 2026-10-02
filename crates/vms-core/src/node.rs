@@ -143,7 +143,7 @@ impl NodeOutput {
 
     /// Construct the seed output for the trigger-root node from the firing context.
     ///
-    /// The metadata JSON captures the key context fields so downstream
+    /// The metadata JSON captures the main context fields so downstream
     /// `evalexpr` condition nodes can inspect them without holding a direct
     /// reference to the [`TriggerContext`].
     pub fn from_trigger_context(ctx: &TriggerContext) -> Self {

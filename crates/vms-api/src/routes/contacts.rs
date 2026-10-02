@@ -1,8 +1,8 @@
-//! Contact CRUD — `/contacts[/{id}]`.
+//! Contact CRUD: `/contacts[/{id}]`.
 //!
-//! Mirrors `destinations.rs`'s pattern exactly, minus credential
-//! encryption/masking: a contact's `extra` field is free-form delivery
-//! metadata (e.g. a Slack user ID), not a secret, so it round-trips as-is.
+//! Follows the `destinations.rs` pattern without credential encryption or
+//! masking. A contact's `extra` field is free-form delivery metadata (e.g. a
+//! Slack user ID) with no secrets, so it round-trips as-is.
 
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,7 @@ pub struct CreateContactBody {
     pub extra: Option<serde_json::Value>,
 }
 
-/// All fields optional — only supplied fields are updated.
+/// All fields are optional; only supplied fields are updated.
 #[derive(Deserialize)]
 pub struct UpdateContactBody {
     pub name: Option<String>,

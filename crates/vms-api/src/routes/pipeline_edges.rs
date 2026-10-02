@@ -1,15 +1,11 @@
-//! Pipeline edge CRUD — `/pipelines/{id}/edges[/{edge_id}]`.
+//! Pipeline edge CRUD: `/pipelines/{id}/edges[/{edge_id}]`.
 //!
-//! The second piece of the pipeline-graph-editing gap (nodes have their own
-//! route module, edges here, triggers have theirs). This is also where the
-//! edge-dependent structural rules from `PipelineDag`'s doc comment — no
-//! cycles, `Transport`/`DeviceControl` must be leaves, `Condition` branch
-//! shape — finally become checkable; node creation alone could only
-//! enforce the node-level rules.
+//! Edge writes are where the edge-dependent rules from `PipelineDag` are
+//! checked: no cycles, `Transport`/`DeviceControl` must be leaves, and the
+//! `Condition` branch shape.
 //!
-//! Responses return [`PipelineEdge`] directly, same rationale as
-//! `pipeline_nodes.rs`: it already derives `Serialize`, has no sensitive
-//! fields, and a hand-built DTO would just be the same shape twice.
+//! Responses return [`PipelineEdge`] directly, as in `pipeline_nodes.rs`: it
+//! already derives `Serialize` and has no sensitive fields.
 
 use salvo::prelude::*;
 use serde::Deserialize;
@@ -28,8 +24,8 @@ use crate::{
 pub struct CreateEdgeBody {
     pub from_node_id: Uuid,
     pub to_node_id: Uuid,
-    /// Omit for a plain data-flow edge. Only meaningful (and only valid) as
-    /// `true_branch`/`false_branch` when `from_node_id` is a `condition` node.
+    /// Omit for a plain data-flow edge. `true_branch`/`false_branch` are only
+    /// valid when `from_node_id` is a `condition` node.
     pub edge_type: Option<EdgeType>,
 }
 

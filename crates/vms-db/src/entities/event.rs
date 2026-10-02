@@ -1,9 +1,9 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// A recorded motion/tamper/trigger occurrence for one camera — persisted
+/// A recorded motion/tamper/trigger occurrence for one camera: the persisted
 /// history of what otherwise only flows transiently over the `EventBus`.
-/// `event_type` is free-text, mirroring `Event::event_type` in `vms-core`.
+/// `event_type` is free text, mirroring `Event::event_type` in `vms-core`.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "events")]
 pub struct Model {

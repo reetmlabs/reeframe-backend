@@ -21,9 +21,9 @@ use crate::dispatcher::ActionContext;
 ///
 /// # Gap modes
 ///
-/// - `Skip`: clips are joined seamlessly (no gap between them).
-/// - `BlackFrame` / `Freeze`: fall back to `Skip` with a warning. Full gap
-///   support requires resolution probing and is planned for a later step.
+/// - `Skip`: clips are joined back to back with no gap.
+/// - `BlackFrame` / `Freeze`: not implemented (they need resolution probing),
+///   so they fall back to `Skip` with a warning.
 pub async fn execute(
     node_id: NodeId,
     cfg: &MergeClipsConfig,
@@ -36,7 +36,7 @@ pub async fn execute(
         return NodeOutput::failure(node_id, "merge_clips: no upstream artifacts");
     }
 
-    // Single clip — nothing to merge, pass through.
+    // Single clip: nothing to merge, pass it through.
     if artifacts.len() == 1 {
         return NodeOutput::success(node_id).with_artifact(artifacts[0].clone());
     }
@@ -60,7 +60,7 @@ pub async fn execute(
             node_id = %node_id,
             gap_fill = ?cfg.gap_fill,
             "merge_clips: BlackFrame and Freeze gap modes require resolution probing \
-             (not yet implemented) — falling back to Skip mode"
+             (not yet implemented), falling back to Skip mode"
         );
     }
 
@@ -164,7 +164,6 @@ fn merge_blocking(clips: &[PathBuf], output_format: &str, output: &Path) -> Resu
             .add_many([&src, &decode, &convert])
             .map_err(|e| VmsError::Media(format!("add clip elements: {e}")))?;
 
-        // Request a new sink pad from concat and link convert → concat.
         let concat_sink = concat
             .request_pad_simple("sink_%u")
             .ok_or_else(|| VmsError::Media("concat: could not request sink pad".into()))?;

@@ -33,16 +33,15 @@ use vms_sources::SourceManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // A subcommand (currently only `token ...`) runs a lightweight one-shot
-    // path — connect to the DB, do one thing, exit — instead of starting the
-    // full daemon below. No subcommand preserves the exact pre-existing
-    // behavior (systemd/docker invoke the binary with no arguments).
+    // A subcommand (only `token ...` so far) connects to the DB, does one
+    // thing and exits. With no subcommand the full daemon starts, which is
+    // how systemd and docker invoke the binary.
     if let Some(command) = cli::Cli::parse().command {
         return cli::run(command).await;
     }
 
     eprintln!(
-        "Reeframe VMS daemon v{} — starting",
+        "Reeframe VMS daemon v{}, starting",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -50,9 +49,9 @@ async fn main() -> anyhow::Result<()> {
     let _otel_guard = init_tracing();
 
     // -- Config --
-    // `mut`: dynamic settings resolution (below, once the DB is up) patches
-    // this in place with any DB-stored override before anything downstream
-    // — including the auth provider — is built from it.
+    // `mut` because dynamic settings resolution patches in DB-stored
+    // overrides once the DB is up, before the auth provider and everything
+    // else is built from it.
     let mut cfg = config::load().map_err(|e| {
         tracing::error!(error = %e, "Failed to load configuration");
         anyhow::anyhow!(e)
@@ -101,11 +100,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -- Dynamic settings --
-    // Must run before anything below is constructed from `cfg` — this is
-    // the `defaults < file < env < DB` precedence step: a DB-stored
-    // override (from a prior `PATCH /system/settings` or config-file
-    // upload) wins over whatever was just loaded from the file/env, and a
-    // key with no override yet gets seeded from that resolved value.
+    // Must run before anything below is built from `cfg`. A DB-stored
+    // override (from `PATCH /system/settings` or a config-file upload) wins
+    // over the file/env value; a key with no override is seeded from it.
     let settings_repo = SettingsRepo::new(db.clone());
     config::resolve_dynamic_settings(&mut cfg, &settings_repo)
         .await
@@ -123,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     if cfg.auth.mode != "local" && cfg.auth.mode != "oidc" {
         tracing::error!(
             mode = %cfg.auth.mode,
-            "Unsupported [auth] mode — must be 'local' or 'oidc'"
+            "Unsupported [auth] mode, must be 'local' or 'oidc'"
         );
         return Err(anyhow::anyhow!("unsupported auth mode: {}", cfg.auth.mode));
     }
@@ -141,9 +138,8 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Auth provider ready (local JWT)");
 
-    // Local auth above is always active regardless of `mode` — Coordinator
-    // trust is additive, never a replacement; the BE stays fully autonomous
-    // with no `jwks_url` configured at all.
+    // Local auth stays active in every `mode`. Trusting Coordinator tokens
+    // is added on top, and the BE works without any `jwks_url`.
     let coordinator_auth_provider = if cfg.auth.mode == "oidc" {
         let jwks_url = cfg.auth.jwks_url.clone().ok_or_else(|| {
             tracing::error!("[auth] mode = \"oidc\" requires [auth] jwks_url to be set");
@@ -151,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         })?;
         let be_id = cfg.gateway.be_id.ok_or_else(|| {
             tracing::error!(
-                "[auth] mode = \"oidc\" requires [gateway] be_id to be set — it's the expected \
+                "[auth] mode = \"oidc\" requires [gateway] be_id to be set, it's the expected \
                  `aud` for every Coordinator-issued token this BE accepts"
             );
             anyhow::anyhow!("missing gateway.be_id for oidc auth mode")
@@ -171,9 +167,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // -- Gateway (Relay/tunnel client for WAPP pairing) --
-    // Unset by default — matches Coordinator's own "stays autonomous"
-    // guarantee; with no `[gateway] url`, zero connection attempt is made.
+    // -- Gateway (tunnel client for mobile app pairing) --
+    // With no `[gateway] url` (the default), no connection is attempted.
     let gateway_task = gateway::resolve(&cfg.gateway)
         .map_err(|e| {
             tracing::error!(error = %e, "Invalid gateway configuration");
@@ -212,14 +207,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Repository layer ready");
 
     // -- Media Manager --
-    // `media_event_tx` is created up front because both `vms-media` (motion/
-    // scene-change/tamper detection) and `vms-sources` adapters publish onto
-    // the same channel; the bridge task below forwards each onto the Event
-    // Bus by whichever ID it carries, keeping both crates free of a
-    // vms-engine dependency. `chunk_event_tx` is the equivalent channel for
-    // recording-chunk lifecycle bookkeeping — `vms-media` has no DB access,
-    // so the consumer task below turns each event into a `RecordingRepo`
-    // call instead.
+    // `media_event_tx` is created up front because `vms-media` (motion,
+    // scene-change and tamper detection) and `vms-sources` adapters both
+    // publish onto it. The bridge task below forwards each event onto the
+    // Event Bus by the ID it carries, so neither crate depends on
+    // vms-engine. `chunk_event_tx` carries recording-chunk lifecycle events;
+    // `vms-media` has no DB access, so a consumer task turns them into
+    // `RecordingRepo` calls.
     tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
     let (media_event_tx, mut media_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (chunk_event_tx, mut chunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -244,8 +238,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Media manager and RTSP relay server ready");
 
     // -- Recording-chunk indexing bridge --
-    // Turns each `RecordingChunkEvent` into a `recordings` row — insert on
-    // open, backfill end_time/size_bytes on close.
+    // Turns each `RecordingChunkEvent` into a `recordings` row: insert on
+    // open, fill in end_time and size_bytes on close.
     {
         let recording_repo = recording_repo.clone();
         tokio::spawn(async move {
@@ -308,10 +302,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -- Recording-intent reconciliation bridge --
-    // Fires every time a camera's pipeline comes up or reconnects
-    // (`MediaManager::pipeline_live_tx`) — resumes recording if
-    // `desired_recording` is set and it isn't already, without waiting for
-    // the periodic sweep.
+    // Fires each time a camera's pipeline comes up or reconnects
+    // (`MediaManager::pipeline_live_tx`) and resumes recording if
+    // `desired_recording` is set, without waiting for the periodic sweep.
     {
         let camera_repo = camera_repo.clone();
         let media_manager = media_manager.clone();
@@ -335,9 +328,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(capacity = vms_engine::DEFAULT_CAPACITY, "Event bus ready");
 
     // -- Source Manager --
-    // Camera-scoped events are also persisted into the `events` table
-    // here, at the same tap point as the topic bridge — `TopicKey::Camera`
-    // has no wildcard, so a separate subscriber can't see every camera.
+    // Camera-scoped events are persisted into the `events` table here, at
+    // the same tap point as the topic bridge, because `TopicKey::Camera`
+    // has no wildcard and a separate subscriber couldn't see every camera.
     let source_manager = SourceManager::new(media_event_tx);
     let bridge_event_bus = event_bus.clone();
     let bridge_events_repo = events_repo.clone();
@@ -402,15 +395,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Resource manager ready");
 
     // -- Auto-start relays for cameras that have a cached codec --
-    // These start instantly (no probe needed). Relays bridge from a
-    // pipeline's tee rather than opening a connection of their own (see
-    // `vms-media`'s relay rework) and can now bring that pipeline up
-    // on-demand — but at boot we still only pre-warm relays for cameras
-    // whose live pipeline `resource_manager.recover()` (above) already
-    // started; cameras not referenced by any enabled pipeline are left
-    // alone rather than pre-warmed into a live pipeline nobody asked for
-    // yet. They'll still start on-demand the first time a client actually
-    // requests their relay at runtime.
+    // These start instantly (no probe needed). A relay feeds from its
+    // camera pipeline's tee and could bring that pipeline up itself, but at
+    // boot we only pre-warm relays for cameras whose pipeline
+    // `resource_manager.recover()` already started. Other cameras start
+    // their relay on demand when a client first requests it.
     {
         let all_cameras = camera_repo.list().await.unwrap_or_default();
         let cached: Vec<_> = all_cameras
@@ -430,15 +419,14 @@ async fn main() -> anyhow::Result<()> {
                 if !media_manager.is_running(id) {
                     tracing::debug!(
                         camera_id = %id,
-                        "Skipping relay auto-start — camera pipeline is not running"
+                        "Skipping relay auto-start, camera pipeline is not running"
                     );
                     continue;
                 }
 
-                // Already running (guarded above), so `start_relay`'s
-                // rtsp_url/sub_rtsp_url arguments are never exercised here —
-                // still resolved properly rather than passed as placeholders,
-                // in case that guard's assumption ever stops holding.
+                // The pipeline is already running, so `start_relay` won't
+                // use these URLs. They are still built properly in case
+                // that guard ever changes.
                 let Some((decrypted, password)) =
                     camera_repo.get_decrypted(id).await.unwrap_or(None)
                 else {
@@ -453,7 +441,7 @@ async fn main() -> anyhow::Result<()> {
                     build_rtsp_url(sub, decrypted.username.as_deref(), password.as_deref())
                 });
 
-                // Only the stream live view will ask for, so a camera
+                // Start only the stream live view will request, so a camera
                 // viewed through its sub stream doesn't hold its main relay.
                 let quality = vms_api::routes::live_view_quality(&decrypted, None);
                 match media_manager
@@ -481,17 +469,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -- Reconcile orphaned recording chunks from a previous process lifetime --
-    // Must run before the resume loop below opens any fresh chunks of its
-    // own, since every `end_time IS NULL` row found here is unconditionally
-    // a leftover, never a chunk this process is currently writing.
+    // Must run before the resume loop below opens new chunks, so every
+    // `end_time IS NULL` row found here is a leftover from a previous run.
     vms_engine::reconcile_orphaned_chunks(&recording_repo).await;
 
     // -- Resume recordings the operator started manually --
-    // Parallel to the relay auto-start loop above, not folded into
-    // `resource_manager.recover()` — that stays scoped to cameras
-    // referenced by an enabled automation pipeline. A camera
-    // recording only because an operator clicked "start" has no such
-    // reference, so it needs its own pass over `desired_recording` here.
+    // Kept out of `resource_manager.recover()`, which only covers cameras
+    // referenced by an enabled automation pipeline. A camera recording
+    // because an operator clicked "start" has no such reference, so it
+    // needs its own pass over `desired_recording`.
     {
         let wanted: Vec<_> = camera_repo
             .list()
@@ -611,16 +597,16 @@ async fn main() -> anyhow::Result<()> {
     let server_handle = server.handle();
     let server_task = tokio::spawn(server.serve(router));
 
-    tracing::info!("VMS Daemon started — press Ctrl+C or send SIGTERM to stop");
+    tracing::info!("VMS Daemon started, press Ctrl+C or send SIGTERM to stop");
     eprintln!(
-        "Reeframe VMS daemon v{} — listening on {}",
+        "Reeframe VMS daemon v{}, listening on {}",
         env!("CARGO_PKG_VERSION"),
         cfg.api.bind
     );
 
     // -- Wait for shutdown signal --
     shutdown_signal().await;
-    tracing::info!("Shutdown signal received — draining HTTP connections (10 s timeout)");
+    tracing::info!("Shutdown signal received, draining HTTP connections (10 s timeout)");
 
     server_handle.stop_graceful(std::time::Duration::from_secs(10));
     server_task.await.ok();
@@ -650,17 +636,13 @@ async fn main() -> anyhow::Result<()> {
 
 // -- Helpers --
 
-/// Installs the global `tracing` subscriber: an always-on JSON layer to
-/// stderr, plus — only if
-/// `OTEL_EXPORTER_OTLP_ENDPOINT` or one of the OTel SDK's more specific
-/// `OTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT` env vars is set — export of
-/// spans and log events to that collector over OTLP. With none of those set,
-/// behavior is identical to before this function existed: purely additive,
-/// not a breaking change to the default (no env vars set) case.
+/// Installs the global `tracing` subscriber: a JSON layer to stderr, plus
+/// OTLP export of spans and log events when `OTEL_EXPORTER_OTLP_ENDPOINT`
+/// or `OTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT` is set.
 ///
-/// Returns a guard that must be held for the lifetime of `main` — dropping
-/// it flushes any pending OTLP batches and shuts the exporters down cleanly.
-/// Held even on early-return via `?`, since Rust drops locals on unwind.
+/// Returns a guard that must live as long as `main`. Dropping it, including
+/// on an early `?` return, flushes pending OTLP batches and shuts the
+/// exporters down.
 fn init_tracing() -> OtelGuard {
     let otlp_enabled = [
         "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -684,11 +666,9 @@ fn init_tracing() -> OtelGuard {
         return OtelGuard::Disabled;
     }
 
-    // Suppresses tracing/logs generated by the OTLP HTTP export client
-    // itself from being re-captured and re-exported — without this, the
-    // exporter's own request-handling spans/logs would recurse into more
-    // export calls. Only applied to the OTel-facing layers; stderr JSON
-    // output is unaffected and still governed solely by RUST_LOG.
+    // Keeps the OTLP HTTP client's own spans and logs out of the export,
+    // otherwise each export call would generate more data to export. Only
+    // the OTel layers use this filter; stderr output follows RUST_LOG.
     let otel_noise_filter = || {
         EnvFilter::new("info")
             .add_directive("hyper=off".parse().expect("valid directive"))
@@ -751,8 +731,8 @@ impl Drop for OtelGuard {
             logger_provider,
         } = self
         {
-            // eprintln, not tracing:: — this *is* the tracing infrastructure
-            // shutting down, so routing through it here would be circular.
+            // eprintln because the tracing infrastructure itself is what is
+            // shutting down here.
             if let Err(e) = tracer_provider.shutdown() {
                 eprintln!("Error shutting down OTLP tracer provider: {e}");
             }
@@ -791,7 +771,7 @@ async fn shutdown_signal() {
 }
 
 /// Extract the database scheme from a connection URL for safe logging.
-/// Strips credentials — logs `"postgres"` not `"postgres://user:pass@host/db"`.
+/// Strips credentials: logs `"postgres"` instead of `"postgres://user:pass@host/db"`.
 fn db_kind(url: &str) -> &str {
     url.split("://").next().unwrap_or("unknown")
 }

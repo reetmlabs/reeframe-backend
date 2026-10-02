@@ -17,7 +17,7 @@ struct RunningSource {
 
 /// Lazy-start / eager-stop lifecycle coordinator for external source adapters.
 ///
-/// Mirrors the Resource Manager's Minimum Activation Principle: `start` spins
+/// Follows the same lazy-start rule as the Resource Manager: `start` spins
 /// up an adapter's background task, `stop` cancels and joins it. Adapters
 /// publish [`Event`]s onto the shared `event_tx` channel; the caller is
 /// responsible for forwarding those events onto the Event Bus keyed by
@@ -59,12 +59,11 @@ impl SourceManager {
                 ha_websocket::spawn(source_id, config, self.event_tx.clone(), cancel.clone())?
             }
             SourceType::Webhook => {
-                // A webhook has no persistent connection to hold open — the
-                // inbound `POST /webhooks/{id}` route (vms-api) publishes
-                // events directly onto the Event Bus and never touches this
-                // manager. This task exists only so `ResourceState::Running`
-                // becomes true for this source, which is what that route
-                // checks to decide whether it's currently accepting requests.
+                // A webhook has no connection to hold open. The inbound
+                // `POST /webhooks/{id}` route in vms-api publishes straight onto
+                // the Event Bus. This idle task only exists so the source reports
+                // `ResourceState::Running`, which that route checks before
+                // accepting requests.
                 let cancel_child = cancel.clone();
                 tokio::spawn(async move { cancel_child.cancelled().await })
             }
@@ -104,8 +103,8 @@ mod tests {
     }
 
     // Starting and then stopping a file-watcher source succeeds and leaves no
-    // entry behind — proves the Minimum Activation Principle lifecycle works
-    // end-to-end through the manager, not just the adapter in isolation.
+    // entry behind, exercising the lifecycle through the manager rather than
+    // the adapter alone.
     #[tokio::test]
     async fn file_watcher_start_and_stop_round_trip() {
         let dir = temp_watch_dir();
@@ -129,8 +128,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // Stopping a source that was never started is a no-op, not an error —
-    // callers (the Resource Manager) rely on this for idempotent release().
+    // Stopping a source that was never started is a no-op. The Resource
+    // Manager relies on this to make release() idempotent.
     #[tokio::test]
     async fn stop_unknown_source_is_a_noop() {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -150,9 +149,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // Same lifecycle round trip as the other adapters, through the API
-    // poller — no server needs to be reachable for start/stop bookkeeping
-    // to work correctly.
+    // Same lifecycle round trip through the API poller. Start/stop
+    // bookkeeping works without a reachable server.
     #[tokio::test]
     async fn api_poll_start_and_stop_round_trip() {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -173,9 +171,8 @@ mod tests {
         assert!(!manager.running.contains_key(&source_id));
     }
 
-    // Webhook has no connection of its own, but start/stop still round-trips
-    // cleanly — this is what makes `ResourceState::Running` become true for
-    // the inbound webhook route's "is this source currently acquired" check.
+    // A webhook has no connection of its own, but start/stop still round-trips.
+    // The inbound webhook route relies on this to see the source as acquired.
     #[tokio::test]
     async fn webhook_start_and_stop_round_trip() {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -192,9 +189,8 @@ mod tests {
         assert!(!manager.running.contains_key(&source_id));
     }
 
-    // Same lifecycle round trip as the file watcher, through the MQTT
-    // adapter — no broker needs to be reachable for start/stop bookkeeping
-    // to work correctly.
+    // Same lifecycle round trip through the MQTT adapter. Start/stop
+    // bookkeeping works without a reachable broker.
     #[tokio::test]
     async fn mqtt_start_and_stop_round_trip() {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -215,8 +211,8 @@ mod tests {
         assert!(!manager.running.contains_key(&source_id));
     }
 
-    // Same lifecycle round trip through the HA WebSocket adapter — no server
-    // needs to be reachable for start/stop bookkeeping to work correctly.
+    // Same lifecycle round trip through the HA WebSocket adapter. Start/stop
+    // bookkeeping works without a reachable server.
     #[tokio::test]
     async fn ha_websocket_start_and_stop_round_trip() {
         let (tx, _rx) = mpsc::unbounded_channel();

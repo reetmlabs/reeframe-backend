@@ -3,8 +3,8 @@ use sea_orm_migration::prelude::*;
 use super::m20260101_000001_create_cameras::Camera;
 
 /// Per-camera override of the global `[recordings] retention_days` /
-/// `retention_disk_threshold_percent` config — `NULL` means "no override,
-/// inherit the global default," not "disabled" (that's an explicit `0`).
+/// `retention_disk_threshold_percent` config. `NULL` means "no override, inherit
+/// the global default"; disabling cleanup is an explicit `0`.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 

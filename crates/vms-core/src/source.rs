@@ -2,8 +2,8 @@
 //!
 //! Mirrors `vms_db::entities::source::SourceType` at the domain level, the
 //! same way [`crate::trigger::TriggerType`] mirrors the DB-level trigger
-//! enum — the persistence layer keeps its own `DeriveActiveEnum` type and the
-//! repo maps between the two, keeping `vms-core` free of a SeaORM dependency.
+//! enum. The persistence layer keeps its own `DeriveActiveEnum` type and the
+//! repo maps between the two, so `vms-core` needs no SeaORM dependency.
 
 use serde::{Deserialize, Serialize};
 

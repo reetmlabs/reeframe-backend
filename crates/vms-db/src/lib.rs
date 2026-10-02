@@ -1,11 +1,14 @@
-//! `vms-db` — SeaORM entities and AES-256-GCM credential encryption.
+//! `vms-db`: SeaORM entities, migrations, repositories, and AES-256-GCM
+//! credential encryption.
 //!
 //! # Module overview
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`entities`] | SeaORM `Model`, `Entity`, `ActiveModel`, and `Relation` types for all 14 database tables |
-//! | [`crypto`] | [`Crypto`] — AES-256-GCM encrypt/decrypt for credential fields stored in JSONB columns |
+//! | [`entities`] | SeaORM `Model`, `Entity`, `ActiveModel`, and `Relation` types for every database table |
+//! | [`migration`] | Schema migrations, run through [`Migrator`] |
+//! | [`repos`] | Per-table repositories; credential fields are encrypted on write |
+//! | [`crypto`] | [`Crypto`]: AES-256-GCM encrypt/decrypt for credential fields stored in JSON columns |
 //!
 //! # Entity map
 //!
@@ -27,6 +30,15 @@
 //! | [`entities::pipeline_camera_ref`] | `pipeline_camera_refs` | Resource Manager: pipeline -> camera refs |
 //! | [`entities::user`] | `users` | Local accounts; bcrypt-hashed passwords |
 //! | [`entities::api_key`] | `api_keys` | Long-lived tokens; SHA-256-hashed, shown once on creation |
+//! | [`entities::recording`] | `recordings` | One row per recorded chunk file |
+//! | [`entities::daily_recording_coverage`] | `daily_recording_coverage` | Per-camera, per-day recording summary |
+//! | [`entities::export_job`] | `export_jobs` | Background clip export jobs |
+//! | [`entities::event`] | `events` | Persisted camera event history |
+//! | [`entities::setting`] | `settings` | Runtime-editable settings |
+//! | [`entities::tile_profile`] | `tile_profiles` | Named tile/grid layouts |
+//! | [`entities::tile_formation`] | `tile_formations` | Grid slots within a tile profile |
+//! | [`entities::tile_camera_binding`] | `tile_camera_bindings` | Which camera fills a slot, per site |
+//! | [`entities::profile_site_assignment`] | `profile_site_assignments` | Tile profiles shared to other sites |
 
 pub mod crypto;
 pub mod entities;

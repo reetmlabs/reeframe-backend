@@ -32,7 +32,7 @@ pub struct Model {
     pub status: NodeResultStatus,
     pub started_at: Option<DateTimeWithTimeZone>,
     pub completed_at: Option<DateTimeWithTimeZone>,
-    /// `NodeOutput` serialised as JSONB — artifact paths, delivery URLs, message IDs, etc.
+    /// `NodeOutput` serialised as JSONB: artifact paths, delivery URLs, message IDs, etc.
     pub output: Json,
     pub error: Option<String>,
 }

@@ -1,21 +1,13 @@
 //! Dynamic motion/tamper analysis branch attached to a live camera tee.
 //!
-//! Mirrors [`crate::ring_buffer_branch`]'s attach/detach pattern exactly —
-//! this is *not* a standalone connection to the camera. A camera typically
-//! supports only two concurrent RTSP sessions (the main live pipeline uses
-//! one — recording is just another tap on it when attached — the sub-stream
-//! pipeline uses the other when configured), so a third independent
-//! connection just for motion detection would exceed that budget on many
-//! real cameras. Tapping the tee costs nothing extra connection-wise — it's
-//! exactly the "analytics later" branch the tee's own doc comment in
-//! `camera_stream.rs` already anticipated.
+//! Uses the same attach/detach pattern as [`crate::ring_buffer_branch`] and
+//! opens no connection of its own. Cameras typically allow two RTSP sessions,
+//! used by the main pipeline and the sub-stream pipeline, so a third
+//! connection for motion detection would fail on many cameras.
 //!
-//! Trade-off: when there's no sub-stream to prefer, this decodes off the
-//! main-resolution live pipeline's tee rather than a low-res sub-stream,
-//! then downscales. More decode CPU than sourcing from an
-//! already-small sub-stream, but still just decode+downscale — cheap
-//! relative to real inference — and it costs zero additional camera-side
-//! connections, which is the constraint that actually matters here.
+//! Without a sub-stream, this decodes the main-resolution stream and
+//! downscales it. That costs more CPU than decoding a sub-stream, but it is
+//! still cheap compared to inference and needs no extra camera connection.
 //!
 //! Branch: `tee -> queue -> <software decoder> -> videorate(max 2 fps) ->
 //! videoconvert -> videoscale -> capsfilter(GRAY8, MOTION_FRAME_WIDTH x
@@ -75,10 +67,9 @@ fn sink_name(id: Uuid) -> String {
     format!("cam_{}_motionsink", id.as_simple())
 }
 
-/// Handle to a running per-camera motion-analysis branch. Holds the
-/// pipeline it's attached to and its camera ID so [`stop`](Self::stop) can
-/// detach the GStreamer elements itself — the caller doesn't need to
-/// remember which pipeline (main or sub) motion detection ended up on.
+/// Handle to a running per-camera motion-analysis branch. It keeps the
+/// pipeline and camera ID so [`stop`](Self::stop) can detach the elements
+/// without the caller tracking which pipeline (main or sub) it is on.
 pub struct MotionHandle {
     pipeline: gstreamer::Pipeline,
     camera_id: Uuid,
@@ -105,13 +96,11 @@ impl MotionHandle {
 
 /// Attach a motion-analysis branch to `tee_name`'s tee on `pipeline`.
 ///
-/// `tee_name` is the caller's choice of which tee to attach to — the
-/// sub-stream's tee by default, or the main pipeline's tee when the camera
-/// has no sub-stream configured (see `MediaManager::start_live`). Every
-/// analyzed frame produces zero or more [`MotionSignal`]s, converted to
-/// [`Event`]s (`TopicKey::Camera`) and sent on `event_tx` — the same
-/// bridge-to-`EventBus` channel used by `vms-sources` adapters, keeping this
-/// crate free of a `vms-engine` dependency.
+/// `tee_name` is normally the sub-stream's tee, or the main pipeline's tee
+/// when the camera has no usable sub-stream. Each analyzed frame produces zero
+/// or more [`MotionSignal`]s, which are sent on `event_tx` as [`Event`]s
+/// (`TopicKey::Camera`). That is the same `EventBus` bridge channel the
+/// `vms-sources` adapters use, so this crate needs no `vms-engine` dependency.
 ///
 /// Safe to call while the pipeline is `Playing`.
 pub fn attach(
@@ -214,10 +203,10 @@ pub fn attach(
     });
 
     // -- Appsink callback: forward raw frames --
-    // `drop = true` + a small `max_buffers` means GStreamer itself sheds
-    // frames under load; `try_send` on a small bounded channel sheds them
-    // again on the Rust side if the analyzer task is ever behind — either
-    // way, a slow consumer never stalls the streaming thread.
+    // `drop = true` with a small `max_buffers` sheds frames in GStreamer
+    // under load, and `try_send` on a small bounded channel sheds them again
+    // if the analyzer task falls behind. A slow consumer never stalls the
+    // streaming thread.
     let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(2);
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
@@ -289,12 +278,11 @@ pub fn attach(
 
 /// Detach the motion-analysis branch from camera `camera_id`'s tee.
 ///
-/// Same blocking-pad-probe pattern as [`crate::ring_buffer_branch::detach`],
-/// extended to the larger element chain this branch has. The tee itself is
-/// found via the queue's connected peer pad rather than by name, so this
-/// works regardless of which tee (main or sub) `attach` used. Returns
-/// immediately — cleanup is asynchronous. Safe to call while `Playing`. If
-/// no branch is attached for this camera, this is a no-op.
+/// Uses the same blocking pad probe as [`crate::ring_buffer_branch::detach`].
+/// The tee is found through the queue's peer pad, so this works for whichever
+/// tee (main or sub) `attach` used. Returns immediately; cleanup is
+/// asynchronous. Safe to call while `Playing`, and a no-op if no branch is
+/// attached.
 fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsError> {
     let Some(queue) = pipeline.by_name(&queue_name(camera_id)) else {
         return Ok(());
@@ -348,20 +336,15 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
         if fired {
             tracing::info!(camera_id = %camera_id, "Motion detection branch detached");
         } else {
-            // A BLOCK_DOWNSTREAM probe only fires when a buffer/event
-            // actually tries to cross this pad — if the pipeline's upstream
-            // has already died, nothing ever will, and the probe never
-            // fires. Giving up here without also forcing removal leaves
-            // this branch's elements permanently stuck in the pipeline
-            // under their fixed names, so every later `attach()` for this
-            // camera fails at `add_many` with a name collision forever.
-            // Five seconds without a single frame crossing a live tee tap
-            // is a reliable enough signal that nothing is flowing through
-            // this exact link for it to be safe to force the same teardown
-            // here.
+            // A BLOCK_DOWNSTREAM probe only fires when a buffer or event
+            // crosses the pad, so it never fires if upstream is dead. Without
+            // forced removal, the elements would stay in the pipeline under
+            // their fixed names and every later `attach()` for this camera
+            // would fail at `add_many`. Five seconds with no frame means
+            // nothing is flowing, so forcing the teardown is safe.
             tracing::warn!(
                 camera_id = %camera_id,
-                "motion detach probe timed out — forcing removal directly",
+                "motion detach probe timed out, forcing removal directly",
             );
             if let Some(id) = probe_id {
                 tee_src_clone.remove_probe(id);
@@ -404,8 +387,8 @@ fn link_decoder(
         .name(decode_name(camera_id))
         .build()
         .map_err(|e| VmsError::Media(format!("motion {factory}: {e}")))?;
-    // One thread is plenty for a sub stream; the default spawns one per core,
-    // each holding its own frame buffers.
+    // One thread is enough for a sub stream. The default spawns one per core,
+    // each with its own frame buffers.
     if decoder.find_property("max-threads").is_some() {
         decoder.set_property("max-threads", 1i32);
     }

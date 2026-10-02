@@ -12,7 +12,7 @@ pub enum UserRole {
 }
 
 impl UserRole {
-    /// Canonical lowercase string form — used in JWT claims and permission checks.
+    /// Canonical lowercase string form, used in JWT claims and permission checks.
     pub fn as_str(&self) -> &'static str {
         match self {
             UserRole::Admin => "admin",
@@ -28,8 +28,8 @@ pub struct Model {
     pub id: Uuid,
     #[sea_orm(unique)]
     pub username: String,
-    /// bcrypt hash. Never serialized into an API response — DTOs must not
-    /// include this field.
+    /// bcrypt hash. Never serialized into an API response; DTOs must not include
+    /// this field.
     pub password_hash: String,
     pub role: UserRole,
     pub enabled: bool,

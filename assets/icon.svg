@@ -91,7 +91,7 @@
   <!-- Specular highlight -->
   <circle cx="45.5" cy="45.5" r="2" fill="white" opacity="0.42"/>
 
-  <!-- ─── TIER 1 — TRIGGER NODES (top, blue) ─────────────────── -->
+  <!-- ─── TIER 1 TRIGGER NODES (top, blue) ─────────────────── -->
 
   <circle cx="25" cy="13" r="6"
           fill="#0c1221" stroke="#38bdf8" stroke-width="2" filter="url(#ng)"/>
@@ -101,7 +101,7 @@
           fill="#0c1221" stroke="#38bdf8" stroke-width="2" filter="url(#ng)"/>
   <circle cx="73" cy="11" r="2.2" fill="#38bdf8"/>
 
-  <!-- ─── TIER 2 — ACTION NODES (middle, violet) ──────────────── -->
+  <!-- ─── TIER 2 ACTION NODES (middle, violet) ──────────────── -->
 
   <circle cx="20" cy="46" r="5.5"
           fill="#0c1221" stroke="#a78bfa" stroke-width="2"/>
@@ -111,7 +111,7 @@
           fill="#0c1221" stroke="#a78bfa" stroke-width="2"/>
   <circle cx="76" cy="46" r="2" fill="#a78bfa" opacity="0.9"/>
 
-  <!-- ─── TIER 3 — OUTPUT NODES (lower, emerald) ──────────────── -->
+  <!-- ─── TIER 3 OUTPUT NODES (lower, emerald) ──────────────── -->
 
   <circle cx="22" cy="78" r="5.5"
           fill="#0c1221" stroke="#34d399" stroke-width="2"/>
@@ -121,7 +121,7 @@
           fill="#0c1221" stroke="#34d399" stroke-width="2"/>
   <circle cx="76" cy="78" r="2" fill="#34d399" opacity="0.9"/>
 
-  <!-- ─── TIER 4 — DESTINATION DOTS (bottom, cyan) ────────────── -->
+  <!-- ─── TIER 4 DESTINATION DOTS (bottom, cyan) ────────────── -->
 
   <circle cx="33" cy="91" r="3.5" fill="#0ea5e9" opacity="0.75"/>
   <circle cx="66" cy="91" r="3.5" fill="#0ea5e9" opacity="0.75"/>

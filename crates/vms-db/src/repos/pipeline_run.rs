@@ -30,8 +30,8 @@ impl PipelineRunRepo {
 
     /// Insert a new `pipeline_runs` row in `Running` state.
     ///
-    /// `trigger_context` is the serialised [`TriggerContext`] snapshot — callers
-    /// use `serde_json::to_value(&ctx)` before calling this method.
+    /// `trigger_context` is the serialised [`TriggerContext`] snapshot, as produced
+    /// by `serde_json::to_value(&ctx)`.
     pub async fn create_run(
         &self,
         pipeline_id: Uuid,
@@ -54,7 +54,7 @@ impl PipelineRunRepo {
     }
 
     /// Transition a run to a terminal state (`Completed`, `Failed`, or
-    /// `Cancelled`).  Sets `completed_at` to the current timestamp.
+    /// `Cancelled`). Sets `completed_at` to the current timestamp.
     pub async fn finish_run(
         &self,
         run_id: Uuid,
@@ -102,9 +102,9 @@ impl PipelineRunRepo {
 
     /// Insert one `run_node_results` row per node in a single multi-row INSERT.
     ///
-    /// All rows start in `Pending` state. Row IDs are generated client-side so
-    /// the caller receives the mapping without a `RETURNING` clause — compatible
-    /// with SQLite, MySQL, and PostgreSQL.
+    /// All rows start in `Pending` state. Row IDs are generated client-side so the
+    /// caller gets the mapping without a `RETURNING` clause, which keeps this
+    /// portable across SQLite, MySQL, and PostgreSQL.
     ///
     /// Returns an empty map when `node_ids` is empty (no INSERT is issued).
     pub async fn create_node_results_batch(
@@ -156,8 +156,8 @@ impl PipelineRunRepo {
     }
 
     /// Transition a node result to a terminal state (`Completed`, `Failed`, or
-    /// `Skipped`).  Sets `completed_at`, stores the output JSON, and records
-    /// any error message.
+    /// `Skipped`). Sets `completed_at`, stores the output JSON, and records any
+    /// error message.
     pub async fn finish_node_result(
         &self,
         id: Uuid,

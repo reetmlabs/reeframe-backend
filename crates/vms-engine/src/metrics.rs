@@ -4,15 +4,13 @@
 //! with everything that needs to record a metric: the HTTP layer (requests
 //! by route/method/status), [`crate::EventBus`] (events published, by topic
 //! kind), and [`crate::PipelineExecutor`] (pipeline runs, by outcome).
-//! Resource state gauges are different — they're a point-in-time snapshot,
-//! not a running count, so they're synced from [`crate::ResourceManager::all`]
-//! at scrape time instead of incremented as events happen.
+//! Resource state gauges are a point-in-time snapshot, so they are synced
+//! from [`crate::ResourceManager::all`] at scrape time instead of being
+//! incremented as events happen.
 //!
-//! Label values are deliberately restricted to small, fixed vocabularies
-//! (route patterns, not raw URIs; topic *kind*, not per-camera UUIDs;
-//! resource *type*, not per-resource UUIDs) — every label here has a small
-//! constant number of possible values, so the metric can never grow
-//! unbounded the way it would if a UUID leaked into a label.
+//! Label values are restricted to small, fixed vocabularies (route patterns
+//! instead of raw URIs, topic *kind* and resource *type* instead of UUIDs) so
+//! label cardinality stays bounded.
 
 use std::sync::Arc;
 
@@ -112,7 +110,7 @@ impl Metrics {
             .inc();
     }
 
-    /// Replace the resource-state gauge's contents with `counts` — pairs of
+    /// Replace the resource-state gauge's contents with `counts`, pairs of
     /// `((resource_type, state), count)` tallied by the caller from a fresh
     /// [`crate::ResourceManager::all`] snapshot. Resets first so a
     /// (type, state) combination that no longer has any resources doesn't

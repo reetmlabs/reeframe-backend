@@ -1,23 +1,26 @@
 Package: reeframe-backend
-Version: 0.1.0
+Version: 0.2.0
 Architecture: amd64
-Maintainer: Reeframe VMS Contributors <mo.armoun@gmail.com>
+Maintainer: Reeframe contributors <https://github.com/reetmlabs/reeframe-backend>
 Section: video
 Priority: optional
-Homepage: https://github.com/yourorg/reeframe-backend
-Description: Reeframe VMS — pipeline-driven video management system
+Homepage: https://github.com/reetmlabs/reeframe-backend
+Description: Reeframe, a pipeline-driven video management system
  A Rust-native video management system built around a composable pipeline DAG.
  Records RTSP camera streams as chunked MP4 files, with automatic reconnection
  and per-credential AES-256-GCM encryption at rest.
  .
- This package installs the community edition daemon (vms-daemon) and a systemd
- unit file. An encryption key must be set in /etc/reeframe/env before the service
- can start.
+ This package installs the daemon (vms-daemon) and a systemd unit file.
+ VMS_ENCRYPTION_KEY and VMS_AUTH__JWT_SECRET must be set in /etc/reeframe/env
+ before the service can start.
 Depends: libgstreamer1.0-0 (>= 1.20),
+         libgstreamer-plugins-bad1.0-0 (>= 1.20),
+         libgstrtspserver-1.0-0 (>= 1.20),
          gstreamer1.0-plugins-base (>= 1.20),
          gstreamer1.0-plugins-good (>= 1.20),
          gstreamer1.0-plugins-bad (>= 1.20),
          gstreamer1.0-libav (>= 1.20),
+         gstreamer1.0-plugins-ugly (>= 1.20),
          libssl3,
          ca-certificates,
          libsqlite3-0,

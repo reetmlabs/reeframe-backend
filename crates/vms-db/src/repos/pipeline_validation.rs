@@ -1,9 +1,9 @@
-//! Computes what's wrong with a pipeline's current definition — incomplete or
-//! malformed node config, disconnected nodes, structural DAG violations, and
-//! dangling camera references — independent of whether the pipeline can
-//! currently be compiled and run. One reusable computation, called from
-//! wherever a pipeline's validity needs checking, rather than reimplemented
-//! per call site.
+//! Computes what's wrong with a pipeline's current definition: incomplete or
+//! malformed node config, disconnected nodes, structural DAG violations,
+//! dangling camera references, unresolved source/destination references, and
+//! nodes missing an upstream artifact. This is independent of whether the
+//! pipeline can currently be compiled and run, and is the one place pipeline
+//! validity is computed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -45,13 +45,13 @@ pub enum ValidationCategory {
     /// A trigger's source was deleted or disabled.
     UnresolvedReference,
     /// A pass-through action node (Transcode/Compress/Encrypt/Watermark/
-    /// MergeClips) has no Extract Clip or Snapshot node anywhere in its
-    /// ancestor chain, on at least one path the executor could take — it
-    /// will fail at runtime with "no upstream artifact".
+    /// MergeClips) has no Extract Clip or Snapshot ancestor on at least one path
+    /// the executor could take, so it will fail at runtime with "no upstream
+    /// artifact".
     MissingArtifactAncestor,
-    /// A `merge_clips` node can end up with only one upstream artifact on
-    /// at least one path the executor could take — it passes that single
-    /// clip through unchanged instead of merging anything.
+    /// A `merge_clips` node can end up with only one upstream artifact on at
+    /// least one path the executor could take. It then passes that single clip
+    /// through unchanged instead of merging anything.
     MergeSingleSource,
 }
 
@@ -90,11 +90,10 @@ impl ValidationIssue {
     }
 }
 
-/// A node whose config is the right shape for its type but still missing a
-/// value it'll eventually need. Not a shape violation (see
-/// `check_config_shape`) — this is the legitimate work-in-progress state
-/// that `validate_create_shape`/`validate_update_shape` deliberately stopped
-/// rejecting.
+/// A node whose config has the right shape for its type but is still missing
+/// a value it will need. This is the normal work-in-progress state that
+/// `validate_create_shape`/`validate_update_shape` deliberately accept, not a
+/// shape violation (see `check_config_shape`).
 pub fn check_config_completeness(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     for node in nodes {
@@ -136,12 +135,11 @@ pub fn check_config_completeness(nodes: &[PipelineNode]) -> Vec<ValidationIssue>
     issues
 }
 
-/// A node carrying a config that's the wrong shape for its type entirely
-/// (e.g. a Condition node with `action_config` set). Mirrors
-/// `validate_create_shape`'s wrong-shape checks, but collects every
-/// violation instead of failing on the first one, and runs against nodes
-/// already persisted — so it also catches a bad record that predates that
-/// check existing at all.
+/// A node whose config is the wrong shape for its type (e.g. a Condition node
+/// with `action_config` set). Mirrors `validate_create_shape`'s wrong-shape
+/// checks, but collects every violation instead of stopping at the first, and
+/// runs against persisted nodes, so it also catches bad records written before
+/// that check existed.
 pub fn check_config_shape(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     for node in nodes {
@@ -180,10 +178,10 @@ pub fn check_config_shape(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
     issues
 }
 
-/// IDs reachable from the pipeline's trigger root by walking outgoing
-/// edges, including the root itself. `None` if there isn't exactly one
-/// `trigger_root` node — reachability isn't well-defined in that case, and
-/// that's `check_structural_violations`' problem to report instead.
+/// IDs reachable from the pipeline's trigger root by walking outgoing edges,
+/// including the root itself. `None` unless there is exactly one
+/// `trigger_root` node, since reachability isn't well-defined otherwise;
+/// `check_structural_violations` reports that case.
 fn reachable_from_root(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Option<HashSet<Uuid>> {
     let roots: Vec<&PipelineNode> = nodes
         .iter()
@@ -236,7 +234,7 @@ pub fn check_structural_violations(
                 .cloned()
                 .collect(),
         ),
-        // Zero or multiple trigger_root nodes — there's no well-defined
+        // Zero or multiple trigger_root nodes: there's no well-defined
         // reachable subgraph, so let compile() report that directly.
         None => (nodes.to_vec(), edges.to_vec()),
     };
@@ -251,13 +249,12 @@ pub fn check_structural_violations(
     }
 }
 
-/// A node that exists in the pipeline but can't be reached by walking
-/// outgoing edges from the trigger root. Deliberately a dedicated check
-/// rather than a side effect of `PipelineDag::compile`: today, compiling a
-/// pipeline with a disconnected node only fails by accident, mislabeled as
-/// either "wrong number of root nodes" (if the disconnected piece is
-/// acyclic — it contributes its own parentless node) or "pipeline contains
-/// a cycle" (if it isn't) — neither message names the actual problem.
+/// A node that exists in the pipeline but can't be reached by walking outgoing
+/// edges from the trigger root. This is a dedicated check because
+/// `PipelineDag::compile` only fails on a disconnected node by accident, with
+/// a message that doesn't name the problem: "wrong number of root nodes" if
+/// the disconnected piece is acyclic (it contributes its own parentless node),
+/// or "pipeline contains a cycle" if it isn't.
 pub fn check_disconnected(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Vec<ValidationIssue> {
     let Some(reached) = reachable_from_root(nodes, edges) else {
         return Vec::new();
@@ -281,14 +278,14 @@ pub fn check_disconnected(nodes: &[PipelineNode], edges: &[PipelineEdge]) -> Vec
 
 /// An action node's `camera_id` (extract-clip, snapshot, PTZ move,
 /// start/stop recording, set-stream-quality) pointing at a camera that no
-/// longer exists. The only reference type that can go dangling with no
-/// protection at any other layer — it's a plain UUID inside a JSON config
-/// blob, unlike `destination_id`/trigger-level `camera_id` (FK-guarded) or
-/// `contact_list_id` (cleared automatically on delete).
+/// longer exists. No other layer protects this reference: it's a plain UUID
+/// inside a JSON config blob, whereas `destination_id` and the trigger-level
+/// `camera_id` are FK-guarded and `contact_list_id` is cleared automatically
+/// on delete.
 ///
-/// Takes the set of currently-existing camera IDs rather than a DB handle,
-/// so it stays a plain, synchronously-testable function — fetching that set
-/// is the caller's job.
+/// Takes the set of existing camera IDs instead of a DB handle so it stays a
+/// plain synchronous function that's easy to test; the caller fetches that
+/// set.
 pub fn check_dangling_camera_references(
     nodes: &[PipelineNode],
     existing_camera_ids: &HashSet<Uuid>,
@@ -309,10 +306,10 @@ pub fn check_dangling_camera_references(
         .collect()
 }
 
-/// A trigger whose source was deleted or disabled, per its own persisted
-/// `unresolved_reference` flag — set and cleared by source lifecycle events
+/// A trigger whose source was deleted or disabled, per its persisted
+/// `unresolved_reference` flag. Source lifecycle events
 /// (`PipelineRepo::unlink_deleted_source`/`mark_source_disabled`/
-/// `clear_source_unresolved`), not re-derived here.
+/// `clear_source_unresolved`) set and clear it; it isn't re-derived here.
 pub fn check_unresolved_trigger_references(triggers: &[PipelineTrigger]) -> Vec<ValidationIssue> {
     triggers
         .iter()
@@ -330,11 +327,10 @@ pub fn check_unresolved_trigger_references(triggers: &[PipelineTrigger]) -> Vec<
         .collect()
 }
 
-/// A node whose destination was deleted or disabled, per its own persisted
-/// `unresolved_reference` flag — set and cleared by destination lifecycle
-/// events (`PipelineRepo::unlink_deleted_destination`/
-/// `mark_destination_disabled`/`clear_destination_unresolved`), not
-/// re-derived here.
+/// A node whose destination was deleted or disabled, per its persisted
+/// `unresolved_reference` flag. Destination lifecycle events
+/// (`PipelineRepo::unlink_deleted_destination`/`mark_destination_disabled`/
+/// `clear_destination_unresolved`) set and clear it; it isn't re-derived here.
 pub fn check_unresolved_node_references(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
     nodes
         .iter()
@@ -389,12 +385,11 @@ fn ancestors_of(target: Uuid, parents: &HashMap<Uuid, Vec<Uuid>>) -> HashSet<Uui
     seen
 }
 
-/// Topological order of `relevant`, via Kahn's algorithm restricted to
-/// edges between members of `relevant`. If `relevant` contains a cycle
-/// (already reported separately by `check_structural_violations`), the
-/// cyclic nodes are simply left out of the order rather than looping
-/// forever — callers that only process nodes appearing in the order treat
-/// them the same as unreached.
+/// Topological order of `relevant`, via Kahn's algorithm restricted to edges
+/// between members of `relevant`. If `relevant` contains a cycle (reported
+/// separately by `check_structural_violations`), the cyclic nodes are left
+/// out of the order instead of looping forever; callers that only process
+/// nodes in the order treat them as unreached.
 fn topo_sort(
     relevant: &HashSet<Uuid>,
     children: &HashMap<Uuid, Vec<(Uuid, CoreEdgeType)>>,
@@ -435,8 +430,8 @@ fn topo_sort(
     order
 }
 
-/// Whether `target` was reached at all, and — if so — whether it received
-/// an artifact and from how many distinct direct parents, for one fixed
+/// Whether `target` was reached at all and, if so, whether it received an
+/// artifact and from how many distinct direct parents, for one fixed
 /// combination of upstream `Condition` outcomes.
 struct AssignmentOutcome {
     reached: bool,
@@ -444,22 +439,20 @@ struct AssignmentOutcome {
     artifact_parent_count: usize,
 }
 
-/// For every combination of true/false outcomes of the `Condition` nodes
-/// that are `target`'s ancestors, walks forward from the root exactly as
-/// the executor would — a `Condition` only activates the branch matching
-/// that combination, every other node type activates all of its reached
-/// children — and reports, per combination, whether `target` was reached
-/// and whether it ended up with an artifact.
+/// For every combination of true/false outcomes of the `Condition` nodes that
+/// are `target`'s ancestors, walks forward from the root the way the executor
+/// does (a `Condition` activates only the branch matching that combination;
+/// every other node type activates all of its reached children) and reports,
+/// per combination, whether `target` was reached and whether it got an
+/// artifact.
 ///
 /// A pipeline can branch and reconverge through `Condition` nodes, so a
-/// node's parents aren't always safe to combine with a simple OR: two
-/// parents that are mutually-exclusive alternatives of the same upstream
-/// `Condition` only ever have one of them active on any given run. Real
-/// pipelines only realistically have a handful of `Condition` ancestors for
-/// any one node, so enumerating every combination directly stays cheap
-/// while still being exact — checking only *some* combination would still
-/// let a real "no upstream artifact" runtime failure through on whichever
-/// combination it missed.
+/// node's parents can't always be combined with a simple OR: two parents that
+/// are mutually exclusive alternatives of the same upstream `Condition` are
+/// never both active on one run. Real pipelines have only a handful of
+/// `Condition` ancestors for any one node, so enumerating every combination
+/// stays cheap and is exact. Checking only some combinations would let a real
+/// "no upstream artifact" runtime failure through on the ones it missed.
 fn simulate_artifact_reachability(
     target: Uuid,
     nodes_by_id: &HashMap<Uuid, &PipelineNode>,
@@ -540,12 +533,11 @@ fn simulate_artifact_reachability(
 }
 
 /// A `Transcode`/`Compress`/`Encrypt`/`Watermark`/`MergeClips` node with no
-/// Extract Clip or Snapshot node anywhere in its ancestor chain, on at
-/// least one path the executor could take (`MissingArtifactAncestor`,
-/// error) — and, specifically for `MergeClips`, a node that can end up with
-/// only one upstream artifact on at least one such path
-/// (`MergeSingleSource`, warning): it merges nothing, just passes that
-/// clip through.
+/// Extract Clip or Snapshot ancestor on at least one path the executor could
+/// take (`MissingArtifactAncestor`, error). For `MergeClips`, also flags a node
+/// that can end up with only one upstream artifact on such a path
+/// (`MergeSingleSource`, warning), since it then merges nothing and just
+/// passes that clip through.
 pub fn check_artifact_lineage(
     nodes: &[PipelineNode],
     edges: &[PipelineEdge],
@@ -555,7 +547,7 @@ pub fn check_artifact_lineage(
         .filter(|n| n.node_type == CoreNodeType::TriggerRoot)
         .collect();
     let [root] = roots[..] else {
-        // Zero or multiple trigger_root nodes — no well-defined lineage;
+        // Zero or multiple trigger_root nodes: no well-defined lineage, and
         // check_structural_violations reports that instead.
         return Vec::new();
     };
@@ -587,7 +579,7 @@ pub fn check_artifact_lineage(
             simulate_artifact_reachability(node.id, &nodes_by_id, &children, &parents, root.id);
         let reached: Vec<&AssignmentOutcome> = outcomes.iter().filter(|o| o.reached).collect();
         if reached.is_empty() {
-            // Never actually reachable — check_disconnected's problem, not ours.
+            // Never actually reachable: check_disconnected's problem, not ours.
             continue;
         }
 
@@ -597,7 +589,7 @@ pub fn check_artifact_lineage(
                 Some(node.id),
                 format!(
                     "{} node has no Extract Clip or Snapshot node in its ancestor chain on at \
-                     least one reachable path — it will fail at runtime with \"no upstream \
+                     least one reachable path, it will fail at runtime with \"no upstream \
                      artifact\"",
                     node.node_type.as_str()
                 ),
@@ -609,7 +601,7 @@ pub fn check_artifact_lineage(
                 ValidationCategory::MergeSingleSource,
                 Some(node.id),
                 "merge_clips node can end up with only one upstream artifact on at least one \
-                 reachable path — it will silently pass that clip through unchanged instead of \
+                 reachable path, it will silently pass that clip through unchanged instead of \
                  merging anything",
             ));
         }
@@ -778,10 +770,9 @@ mod tests {
 
     #[test]
     fn an_orphan_cycle_is_flagged_as_disconnected_not_just_a_cycle() {
-        // Two nodes that only reference each other, wired to nothing else —
-        // disconnected *and* cyclic. Both facts are true and worth reporting;
-        // this check specifically must not stay silent about disconnection
-        // just because a cycle also exists.
+        // Two nodes that only reference each other, wired to nothing else:
+        // disconnected *and* cyclic. Both are worth reporting; this check must
+        // not stay silent about disconnection just because a cycle also exists.
         let root = base_node(CoreNodeType::TriggerRoot);
         let a = base_node(CoreNodeType::Fork);
         let b = base_node(CoreNodeType::Fork);
@@ -843,7 +834,7 @@ mod tests {
     #[test]
     fn action_node_with_inherited_camera_is_not_flagged() {
         // `camera_id: None` inherits from the TriggerContext at execution
-        // time — nothing to check here, and definitely not "dangling".
+        // time, so there's nothing to check and it isn't dangling.
         let mut node = base_node(CoreNodeType::Action);
         node.action_config = Some(snapshot_config(None));
 
@@ -1022,12 +1013,12 @@ mod tests {
     #[test]
     fn merge_clips_fed_by_a_condition_branch_with_no_artifact_is_flagged() {
         // Condition -> [true: Extract Clip, false: Compress (no artifact of
-        // its own)] -> both reconverge into the same Merge Clips node. Only
-        // one branch is ever active on a given run, so Merge Clips is safe
-        // when the true branch fires and unsafe when the false branch fires
-        // — a check that just ORs across Merge Clips' direct parents
-        // (ignoring that they're mutually exclusive alternatives of the same
-        // Condition) would miss the false-branch failure entirely.
+        // its own)], with both branches reconverging into the same Merge Clips
+        // node. Only one branch is active on a given run, so Merge Clips is safe
+        // when the true branch fires and unsafe when the false branch fires. A
+        // check that just ORs across Merge Clips' direct parents (ignoring that
+        // they're mutually exclusive alternatives of the same Condition) would
+        // miss the false-branch failure.
         let root = base_node(CoreNodeType::TriggerRoot);
         let mut condition = base_node(CoreNodeType::Condition);
         condition.condition_expr = Some("true".into());
@@ -1062,7 +1053,7 @@ mod tests {
 
     #[test]
     fn unreachable_pass_through_node_is_not_flagged() {
-        // Not wired to the root at all — check_disconnected's problem, not ours.
+        // Not wired to the root at all: check_disconnected's problem, not ours.
         let root = base_node(CoreNodeType::TriggerRoot);
         let orphan = action_node(transcode_config());
         assert!(check_artifact_lineage(&[root, orphan], &[]).is_empty());

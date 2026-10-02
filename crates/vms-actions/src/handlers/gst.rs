@@ -111,11 +111,9 @@ pub fn wire_decodebin(
             // itself (decoders vary in which formats they can convert to).
             // A hardware decoder's output pad can offer several equivalent
             // memory layouts for the same format (GPU memory, DMA buffer,
-            // plain system memory), and leaving that choice to implicit
-            // negotiation is the kind of ambiguity that shows up as
-            // occasional corrupted frames rather than a consistent
-            // failure. This keeps hardware decode in place, it only pins
-            // what comes out of it.
+            // plain system memory). Leaving that choice to implicit
+            // negotiation can cause occasional corrupted frames. Hardware
+            // decoding still happens; only its output memory is pinned.
             let capsfilter = match gstreamer::ElementFactory::make("capsfilter")
                 .property("caps", gstreamer::Caps::builder("video/x-raw").build())
                 .build()
@@ -145,8 +143,8 @@ pub fn wire_decodebin(
                 tracing::warn!("wire_decodebin: capsfilter link failed: {e}");
             }
         } else if s.name().starts_with("audio/") {
-            // Sink audio to fakesink — keeps the pipeline from stalling when
-            // we only need the video stream.
+            // Sink audio to fakesink so the pipeline doesn't stall when only
+            // the video stream is needed.
             let Some(pl) = pipeline_weak.upgrade() else {
                 return;
             };

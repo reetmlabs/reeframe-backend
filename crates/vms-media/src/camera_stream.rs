@@ -31,13 +31,13 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
             parse_factory: "h265parse",
             parse_caps_mime: Some("video/x-h265"),
         }),
-        // Motion JPEG — RTP encoding name per RFC 2435
+        // Motion JPEG, RTP encoding name per RFC 2435
         "JPEG" => Some(CodecElements {
             depay_factory: "rtpjpegdepay",
             parse_factory: "jpegparse",
             parse_caps_mime: None,
         }),
-        // AV1 — RTP encoding name per RFC 9671
+        // AV1, RTP encoding name per RFC 9671
         "AV1" => Some(CodecElements {
             depay_factory: "rtpav1depay",
             parse_factory: "av1parse",
@@ -47,9 +47,9 @@ pub(crate) fn codec_for(encoding_name: &str) -> Option<CodecElements> {
     }
 }
 
-/// Forces inline, repeated SPS/PPS and one access unit per buffer — left
-/// unconstrained, a parser can negotiate `avc` instead, which carries
-/// config data out-of-band and breaks standalone re-muxing later.
+/// Forces inline, repeated SPS/PPS and one access unit per buffer. Left
+/// unconstrained, a parser can negotiate `avc`, which carries config data
+/// out-of-band and breaks re-muxing the buffers on their own later.
 fn byte_stream_au_caps(mime: &str) -> gstreamer::Caps {
     gstreamer::Caps::builder(mime)
         .field("stream-format", "byte-stream")
@@ -66,22 +66,21 @@ fn set_config_interval_if_supported(parse: &gstreamer::Element) {
 
 // -- Camera stream builder --
 
-/// State shared between the codec-detection `pad-added` handler, the
-/// `format-location-full` chunk-naming callback (once a recording branch is
-/// attached — see [`attach_recording_branch`]), and the reconnect monitor's
-/// session-timestamp refresh — all three need to agree on the current
-/// session's filename timestamp prefix, and the naming callback additionally
-/// needs whichever codec the pad-added handler most recently detected
-/// (recorded, not assumed, since it's negotiated per-camera from the SDP).
-/// Populated as soon as the live pipeline connects, whether or not recording
-/// is ever attached.
+/// State shared by the codec-detection `pad-added` handler, the recording
+/// branch's `format-location-full` naming callback (see
+/// [`attach_recording_branch`]) and the reconnect monitor.
+///
+/// They must agree on the session's filename timestamp prefix, and the naming
+/// callback also needs the codec the pad-added handler last detected from the
+/// SDP. Populated as soon as the live pipeline connects, whether or not
+/// recording is attached.
 pub(crate) struct ChunkNaming {
     session_ts: Mutex<String>,
     codec: Mutex<Option<String>>,
-    /// Path of the fragment currently open, if any — set by
+    /// Path of the fragment currently open, if any, set by
     /// `format-location-full`. Lets a graceful drain (see
-    /// `watch_current_close`) wait for *this* fragment specifically rather
-    /// than being satisfied by an unrelated one closing around the same time.
+    /// `watch_current_close`) wait for this exact fragment instead of any
+    /// fragment that happens to close at the same time.
     current_path: Mutex<Option<String>>,
     /// Registered by a graceful drain, fired by `handle_fragment_closed`
     /// once `current_path`'s fragment closes.
@@ -109,17 +108,16 @@ impl ChunkNaming {
         })
     }
 
-    /// Called by the reconnect monitor so chunks opened after a
-    /// reconnect get a fresh filename prefix — otherwise the fragment index
-    /// restarting from 0 would collide with the previous session's chunk 0
-    /// on disk.
+    /// Called by the reconnect monitor so chunks opened after a reconnect
+    /// get a new filename prefix. The fragment index restarts at 0, which
+    /// would otherwise collide with the previous session's chunk 0 on disk.
     pub(crate) fn refresh_session(&self) {
         *self.session_ts.lock().unwrap() = session_timestamp();
     }
 
-    /// Register interest in the currently-open fragment's close, for a
-    /// graceful stop/reconnect to wait on before tearing the branch down.
-    /// `None` if nothing is currently open — nothing to drain.
+    /// Register interest in the open fragment's close, so a graceful
+    /// stop/reconnect can wait for it before tearing the branch down. `None`
+    /// if no fragment is open.
     fn watch_current_close(&self) -> Option<std::sync::mpsc::Receiver<()>> {
         let path = self.current_path.lock().unwrap().clone()?;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -127,9 +125,9 @@ impl ChunkNaming {
         Some(rx)
     }
 
-    /// Peek the fragment currently open, if any, without registering a drain
-    /// wait — lets a timed-out drain still index the fragment it gave up
-    /// waiting on (see `drain_recording_branch`).
+    /// The fragment currently open, if any, without registering a drain wait.
+    /// Lets a timed-out drain still index the fragment it gave up on (see
+    /// `drain_recording_branch`).
     fn current_path(&self) -> Option<String> {
         self.current_path.lock().unwrap().clone()
     }
@@ -141,25 +139,22 @@ impl ChunkNaming {
     }
 }
 
-/// Build a per-camera "live" GStreamer pipeline — `rtspsrc -> [depay|parse]
-/// -> tee`, nothing written to disk.
+/// Build a per-camera live GStreamer pipeline, `rtspsrc -> [depay|parse] ->
+/// tee`, with nothing written to disk.
 ///
-/// The codec is **not** assumed at build time. When `rtspsrc` connects to the
-/// camera and exposes an RTP src pad, the `pad-added` callback reads the
-/// `encoding-name` field from the SDP caps and inserts the appropriate
-/// depayloader + parser into the running pipeline:
+/// The codec is not known at build time. When `rtspsrc` connects and exposes
+/// an RTP src pad, the `pad-added` callback reads `encoding-name` from the SDP
+/// caps and inserts the matching depayloader and parser:
 ///
 /// ```text
 /// rtspsrc --(pad-added)---> [rtph264depay|rtph265depay] ---> [h264parse|h265parse] ---> tee
 /// ```
 ///
-/// The `tee` is the fan-out point every consumer attaches to as an
-/// independent branch, live pipeline running or not otherwise affected:
-/// recording ([`attach_recording_branch`]), the RTSP relay
-/// (`relay_bridge::attach`), motion detection (`motion_branch::attach`),
-/// thumbnail capture (`thumbnail_branch::attach`), and the ring buffer
-/// (`ring_buffer_branch::attach`). Recording is just one more tap, not a
-/// precondition for any of the others — see `MediaManager::start_recording`.
+/// Every consumer attaches to the `tee` as an independent branch: recording
+/// ([`attach_recording_branch`]), the RTSP relay (`relay_bridge::attach`),
+/// motion detection (`motion_branch::attach`), thumbnail capture
+/// (`thumbnail_branch::attach`) and the ring buffer
+/// (`ring_buffer_branch::attach`). None of them requires recording.
 pub(crate) fn build_camera_stream(
     camera_id: Uuid,
     rtsp_url: &str,
@@ -175,7 +170,7 @@ pub(crate) fn build_camera_stream(
         .build()
         .map_err(|e| VmsError::Media(format!("rtspsrc: {e}")))?;
 
-    // -- Tee (fan-out point — recording, relay, ring buffer, analytics all tap this) --
+    // -- Tee (recording, relay, ring buffer and analytics all tap this) --
     // `allow-not-linked`: every consumer attaches at runtime, so the tee must
     // tolerate having none. Otherwise its first buffer fails with
     // `not-linked` and the pipeline reconnects.
@@ -186,8 +181,8 @@ pub(crate) fn build_camera_stream(
         .map_err(|e| VmsError::Media(format!("tee: {e}")))?;
 
     // -- Assemble static part of the pipeline --
-    // Depayloader + parser are NOT added here — they are created dynamically
-    // in the pad-added callback once we know the codec from the camera's SDP.
+    // Depayloader and parser are created in the pad-added callback once the
+    // codec is known from the camera's SDP.
     gst_pipeline
         .add_many([&src, &tee])
         .map_err(|e| VmsError::Media(format!("add_many: {e}")))?;
@@ -196,9 +191,9 @@ pub(crate) fn build_camera_stream(
     // rtspsrc only exposes src pads after it receives the SDP from the camera,
     // so we must wire the depay+parse chain at pad-added time.
     //
-    // On reconnect: rtspsrc removes and re-adds its src pad.  The depay/parse
-    // elements already exist in the pipeline (added on first connection), so we
-    // only need to re-link the rtspsrc src pad to the depay sink.
+    // On reconnect rtspsrc removes and re-adds its src pad. The depay/parse
+    // elements from the first connection are still in the pipeline, so only
+    // the rtspsrc src pad needs re-linking to the depay sink.
     let pipeline_weak = gst_pipeline.downgrade();
     let tee_weak = tee.downgrade();
     let cam_id = camera_id;
@@ -218,14 +213,13 @@ pub(crate) fn build_camera_stream(
             return;
         }
 
-        // Audio pads are intentionally ignored — this pipeline is video-only.
-        // Checking `media=audio` here avoids spurious "unsupported encoding"
-        // warnings for cameras that stream both video and audio over RTSP.
+        // The pipeline is video-only. Skipping `media=audio` here avoids
+        // "unsupported encoding" warnings for cameras that also stream audio.
         if structure.get::<&str>("media").ok() == Some("audio") {
             tracing::debug!(
                 camera_id = %cam_id,
                 encoding = structure.get::<&str>("encoding-name").unwrap_or("unknown"),
-                "Audio stream detected — skipped (video-only pipeline)",
+                "Audio stream detected, skipped (video-only pipeline)",
             );
             return;
         }
@@ -260,7 +254,7 @@ pub(crate) fn build_camera_stream(
 
         // -- First connection: create depay + parse for the negotiated codec --
         let Some(codec) = codec_for(&encoding) else {
-            tracing::warn!(camera_id = %cam_id, encoding, "Unsupported RTP encoding — camera feed ignored");
+            tracing::warn!(camera_id = %cam_id, encoding, "Unsupported RTP encoding, camera feed ignored");
             return;
         };
 
@@ -294,9 +288,9 @@ pub(crate) fn build_camera_stream(
         };
         if let Err(e) = link_result {
             tracing::error!(camera_id = %cam_id, "link depay->parse->tee: {e}");
-            // Tear the half-wired elements back out — otherwise the next
-            // reconnect finds `depay` already present, assumes the chain is
-            // fully wired (see the branch above), and never retries the link.
+            // Remove the half-wired elements. Otherwise the next reconnect
+            // finds `depay`, assumes the chain is wired (see the reconnect
+            // path above) and never retries the link.
             for el in [&depay, &parse] {
                 el.set_state(gstreamer::State::Null).ok();
                 gst_pipeline.remove(el).ok();
@@ -327,32 +321,25 @@ pub(crate) fn build_camera_stream(
 
 // -- Recording branch (queue -> splitmuxsink) --
 
-// NOTE on faststart: `mp4mux`'s own `faststart=true` property looked like
-// the cheap way to get progressively-servable chunks (HTTP Range streaming
-// needs `moov` before `mdat`), but it only takes effect through
-// `muxer-properties`, which itself only applies when `async-finalize=true`
-// (confirmed via `gst-inspect-1.0 splitmuxsink`). Turning that on was tested
-// live and reproducibly broke the reconnect path — every reconnect
-// eventually errored with "Queued GOP time is negative" a couple of minutes
-// later, because async-finalize's internal GOP queueing doesn't survive
-// this pipeline's Null->Playing reconnect cycle cleanly. Continuous
-// recording is the one thing that must never destabilize, so faststart is
-// done as a separate pass on `fragment-closed` instead (see
-// `remux_faststart`) — more disk I/O per chunk, but completely decoupled
-// from the live pipeline's own state.
+// Faststart: HTTP Range streaming needs `moov` before `mdat`. Setting
+// `mp4mux`'s `faststart=true` inside splitmuxsink only works through
+// `muxer-properties`, which requires `async-finalize=true`, and with that
+// enabled every reconnect later fails with "Queued GOP time is negative"
+// because the async-finalize GOP queue does not survive the Null->Playing
+// cycle. So faststart runs as a separate pass on `fragment-closed` (see
+// `remux_faststart`). It costs extra disk I/O per chunk but keeps recording
+// independent of the live pipeline's state.
 
-/// Build the recording branch — `queue -> [recparse ->] splitmuxsink`, with
-/// `format-location-full` wired to the naming/chunk-event machinery — as a
-/// standalone, unattached set of elements. Used both for the initial
-/// pipeline construction (`build_camera_stream`) and to build a fresh
-/// replacement on every reconnect (`rebuild_recording_branch`) — the caller
-/// adds the returned elements to the pipeline and links them to `tee`.
+/// Build the unattached recording branch, `queue -> [recparse ->]
+/// splitmuxsink`, with `format-location-full` wired to chunk naming and chunk
+/// events. Used when attaching recording and when rebuilding it on reconnect
+/// (`rebuild_recording_branch`); the caller adds the elements to the pipeline
+/// and links them to `tee`.
 ///
-/// `recparse` (`Some` for H264/H265) restructures `tee`'s byte-stream/au
-/// feed back into `avc`/`avc3` — `splitmuxsink`'s muxer only accepts H264/
-/// H265 in that format, never byte-stream, so a second parser instance is
-/// needed here even though the shared live-pipeline parser is forced to
-/// byte-stream for `extract_clip`'s sake (see `byte_stream_au_caps`).
+/// `recparse` (`Some` for H264/H265) converts `tee`'s byte-stream/au feed back
+/// to `avc`/`avc3`, the only H264/H265 format `splitmuxsink`'s muxer accepts.
+/// The shared parser is forced to byte-stream for `extract_clip` (see
+/// `byte_stream_au_caps`), so recording needs its own parser.
 fn build_recording_branch(
     camera_id: Uuid,
     recording_dir: &Path,
@@ -367,10 +354,9 @@ fn build_recording_branch(
     ),
     VmsError,
 > {
-    // A fresh instance has nothing open yet — clears any stale path left
-    // over from a prior recording session so a drain issued before this
-    // instance's first fragment opens doesn't wait on one that will never
-    // close (see `watch_current_close`).
+    // Clear any path left from a previous recording session, so a drain
+    // issued before this branch opens its first fragment does not wait on a
+    // fragment that will never close (see `watch_current_close`).
     *naming.current_path.lock().unwrap() = None;
 
     let recparse = match naming.codec.lock().unwrap().as_deref().and_then(codec_for) {
@@ -403,10 +389,9 @@ fn build_recording_branch(
 
     // -- Chunk-open naming + indexing --
     // `format-location-full` fires synchronously right before splitmuxsink
-    // opens each new fragment — the one point that gives the real wall-clock
-    // instant a specific chunk started (deriving it from filenames/chunk-index
-    // arithmetic would drift silently across reconnects). Returning a path
-    // here overrides the `location` property's own `%05d` pattern entirely.
+    // opens each fragment, so it gives the real wall-clock start of the
+    // chunk. Deriving it from the chunk index would drift across reconnects.
+    // The returned path overrides the `location` property's `%05d` pattern.
     {
         let naming = naming.clone();
         let tx = chunk_event_tx.clone();
@@ -438,18 +423,18 @@ fn tee_name(camera_id: Uuid) -> String {
     format!("cam_{}_tee", camera_id.as_simple())
 }
 
-/// How long to wait for the video codec to wire into `tee` before giving up
-/// — SDP negotiation is normally sub-second, this is generous headroom.
+/// How long to wait for the video codec to link into `tee`. SDP negotiation
+/// normally takes under a second.
 const CODEC_WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEC_WIRE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Wait until the live pipeline's video codec is wired into `tee` (its sink
-/// pad linked). Attaching the recording branch before this finishes lets
-/// `splitmuxsink` link into `tee` first, which narrows `tee`'s negotiable
-/// caps and can permanently fail the video link — see
-/// `build_camera_stream`'s pad-added handler. Errors after
-/// `CODEC_WIRE_TIMEOUT`, since the branch would also be built without its
-/// converting parser and never write a file.
+/// Wait until the live pipeline's video codec is linked into `tee`.
+///
+/// If the recording branch attaches first, `splitmuxsink` narrows `tee`'s
+/// negotiable caps and the video link in `build_camera_stream`'s pad-added
+/// handler can fail for good. Errors after `CODEC_WIRE_TIMEOUT`, because a
+/// branch built then would also lack its converting parser and never write
+/// a file.
 pub(crate) async fn wait_for_codec_wired(
     gst_pipeline: &gstreamer::Pipeline,
     camera_id: Uuid,
@@ -486,18 +471,17 @@ fn splitmux_name(camera_id: Uuid) -> String {
     format!("cam_{}_splitmux", camera_id.as_simple())
 }
 
-/// Return `true` if a recording branch is currently attached to `camera_id`'s
-/// live pipeline — presence of the `splitmuxsink` element doubles as the
-/// state flag, since [`attach_recording_branch`]/[`detach_recording_branch`]
-/// are the only things that add/remove it.
+/// Return `true` if a recording branch is attached to `camera_id`'s live
+/// pipeline. The `splitmuxsink` element's presence is the state flag, since
+/// only the attach/rebuild/detach functions here add or remove it.
 pub(crate) fn is_recording_attached(camera_id: Uuid, gst_pipeline: &gstreamer::Pipeline) -> bool {
     gst_pipeline.by_name(&splitmux_name(camera_id)).is_some()
 }
 
 /// Attach the recording branch (`queue -> splitmuxsink`) to the tee of an
 /// already-running live pipeline. No-op if a recording branch is already
-/// attached. Safe to call while the pipeline is `Playing` — same
-/// attach-to-live-tee pattern as `ring_buffer_branch`/`motion_branch`.
+/// attached. Safe to call while the pipeline is `Playing`, using the same
+/// live-tee attach pattern as `ring_buffer_branch` and `motion_branch`.
 pub(crate) fn attach_recording_branch(
     camera_id: Uuid,
     gst_pipeline: &gstreamer::Pipeline,
@@ -572,20 +556,20 @@ fn attach_recording_branch_locked(
     Ok(())
 }
 
-/// Link `queue -> [recparse ->] splitmuxsink`, bring those elements up to
-/// the pipeline's state from the sink backwards, and only then connect the
-/// tee. Data reaching an element still in `Null` gets `FLUSHING`, which
-/// stops the queue's streaming task for good; `splitmuxsink`'s first state
-/// change can take seconds while its muxer plugin loads.
+/// Link `queue -> [recparse ->] splitmuxsink`, bring the elements up to the
+/// pipeline's state from the sink backwards, then connect the tee. Data
+/// reaching an element still in `Null` gets `FLUSHING`, which stops the
+/// queue's streaming task for good, and `splitmuxsink`'s first state change
+/// can take seconds while its muxer plugin loads.
 fn link_recording_branch(
     tee: &gstreamer::Element,
     queue: &gstreamer::Element,
     recparse: Option<&gstreamer::Element>,
     splitmux: &gstreamer::Element,
 ) -> Result<(), VmsError> {
-    // Direct pad links throughout — `Element::link()`'s generic pad search
-    // probes splitmuxsink's request pad speculatively and wrongly rejects it
-    // as incompatible against upstream's already-fixed caps.
+    // Link pads directly. `Element::link()`'s generic pad search probes
+    // splitmuxsink's request pad and wrongly rejects it as incompatible with
+    // upstream's fixed caps.
     let queue_src = queue.static_pad("src").ok_or_else(|| {
         VmsError::Media("attach recording branch: new queue has no src pad".into())
     })?;
@@ -648,16 +632,12 @@ fn link_recording_branch(
 /// running live pipeline, giving its in-flight chunk a chance to close
 /// cleanly first. No-op if no recording branch is attached.
 ///
-/// Same blocking-pad-probe pattern as `ring_buffer_branch::detach` /
-/// `relay_bridge::detach`, plus one addition: the probe unlinks the branch
-/// from the tee and pushes EOS into it instead of nulling `splitmuxsink`
-/// outright — a raw state change discards whatever it hadn't finalized yet,
-/// truncating the file it was still writing. A short-lived `std::thread`
-/// then releases the tee's request pad, waits (bounded) for the EOS to
-/// produce the same `splitmuxsink-fragment-closed` message a normal
-/// size-based rotation would, and only then tears the branch elements down.
-/// Returns immediately — cleanup is asynchronous either way. Safe to call
-/// while `Playing`.
+/// Uses the same blocking pad probe as `ring_buffer_branch::detach`, but the
+/// probe unlinks the branch and pushes EOS into it instead of setting
+/// `splitmuxsink` to `Null`, which would truncate the file being written. A
+/// short-lived `std::thread` then releases the tee's request pad, waits up to
+/// 5 s for the resulting `splitmuxsink-fragment-closed` message, and tears the
+/// elements down. Returns immediately. Safe to call while `Playing`.
 pub(crate) fn detach_recording_branch(
     camera_id: Uuid,
     gst_pipeline: &gstreamer::Pipeline,
@@ -705,7 +685,7 @@ pub(crate) fn detach_recording_branch(
             Ok(()) => tracing::info!(camera_id = %camera_id, "Recording branch unlinked from tee"),
             Err(_) => tracing::warn!(
                 camera_id = %camera_id,
-                "recording branch unlink probe timed out — releasing tee pad anyway",
+                "recording branch unlink probe timed out, releasing tee pad anyway",
             ),
         }
         tee.release_request_pad(&tee_src_clone);
@@ -716,7 +696,7 @@ pub(crate) fn detach_recording_branch(
         } else {
             tracing::warn!(
                 camera_id = %camera_id,
-                "recording branch drain timed out — its last chunk may be truncated",
+                "recording branch drain timed out, its last chunk may be truncated",
             );
         }
 
@@ -736,23 +716,16 @@ pub(crate) fn detach_recording_branch(
     Ok(())
 }
 
-/// Give the recording branch's in-flight chunk a chance to close cleanly
-/// before the caller forces the pipeline to `Null` — a raw state change
-/// discards whatever `splitmuxsink` hadn't finalized yet, truncating that
-/// chunk instead of closing it. No-op if no recording branch is attached, or
-/// if no fragment has opened yet.
+/// Let the recording branch close its open chunk before the caller forces
+/// the pipeline to `Null`, which would truncate it. No-op if no recording
+/// branch is attached or no fragment has opened yet.
 ///
-/// Pumps `bus_stream` itself (the same stream the caller's own watch loop
-/// paused to call this) rather than waiting on a side channel, since the
-/// resulting `splitmuxsink-fragment-closed` message can only ever be
-/// delivered to whichever consumer is actually polling this pipeline's bus —
-/// `handle_fragment_closed` needs to keep firing for it here exactly as it
-/// would in the normal loop. Bounded by a timeout since the branch may
-/// already be unresponsive if whatever triggered the caller's teardown came
-/// from deeper in the pipeline; any unrelated message seen while draining is
-/// dispatched the same way the normal loop would, except Error/Eos, which
-/// are dropped here since the caller is already tearing down for exactly
-/// that reason.
+/// Polls `bus_stream` itself (the caller's watch loop is paused meanwhile),
+/// because the `splitmuxsink-fragment-closed` message only reaches whoever
+/// polls the bus, and `handle_fragment_closed` must still run for it. Only
+/// fragment-closed element messages are handled; everything else is dropped
+/// since the caller is already tearing down. A 5 s timeout covers a branch
+/// that no longer responds; the open chunk is then indexed from disk.
 async fn drain_recording_branch(
     camera_id: Uuid,
     gst_pipeline: &gstreamer::Pipeline,
@@ -779,8 +752,8 @@ async fn drain_recording_branch(
     loop {
         tokio::select! {
             maybe_msg = bus_stream.next() => {
-                // The bus is gone (pipeline already torn down elsewhere) —
-                // nothing left to wait on.
+                // The bus is gone because the pipeline was torn down
+                // elsewhere, so there is nothing left to wait on.
                 let Some(msg) = maybe_msg else {
                     tracing::warn!(camera_id = %camera_id, "recording branch drain: bus closed before its chunk closed");
                     return;
@@ -796,7 +769,7 @@ async fn drain_recording_branch(
             _ = &mut deadline => {
                 tracing::warn!(
                     camera_id = %camera_id,
-                    "recording branch drain timed out — indexing its last chunk from disk instead of leaving it open forever",
+                    "recording branch drain timed out, indexing its last chunk from disk instead of leaving it open forever",
                 );
                 if let Some(file_path) = naming.current_path() {
                     naming.close_ack.lock().unwrap().take();
@@ -812,17 +785,15 @@ async fn drain_recording_branch(
     }
 }
 
-/// How long to wait for the pipeline to genuinely finish its transition to
-/// `Null` before giving up on this reconnect attempt — see
-/// [`wait_for_pipeline_null`].
+/// How long to wait for the pipeline to finish its transition to `Null`
+/// before giving up on a reconnect attempt. See [`wait_for_pipeline_null`].
 const NULL_TRANSITION_TIMEOUT: gstreamer::ClockTime = gstreamer::ClockTime::from_seconds(5);
 
 /// Block until `gst_pipeline` has actually finished transitioning to
 /// `Null`, up to [`NULL_TRANSITION_TIMEOUT`].
 ///
-/// `Element::state()` returns `Ok(Async)` — not an error — if the timeout
-/// elapses while still transitioning, so success is only `state ==
-/// Null`, not just an `Ok` result.
+/// `Element::state()` returns `Ok(Async)` rather than an error if the timeout
+/// elapses mid-transition, so success means `state == Null`, not just `Ok`.
 fn wait_for_pipeline_null(gst_pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
     let (result, state, _pending) = gst_pipeline.state(NULL_TRANSITION_TIMEOUT);
     result.map_err(|e| VmsError::Media(format!("pipeline Null transition failed: {e:?}")))?;
@@ -834,30 +805,22 @@ fn wait_for_pipeline_null(gst_pipeline: &gstreamer::Pipeline) -> Result<(), VmsE
     Ok(())
 }
 
-/// Tear down and rebuild the recording branch (`queue` + `splitmuxsink`)
-/// fresh on every reconnect, instead of reusing the same `splitmuxsink`
-/// instance indefinitely. No-op if no recording branch is currently attached
-/// — a camera that's live-only has nothing to rebuild.
+/// Replace the recording branch (`queue`, optional `recparse`,
+/// `splitmuxsink`) with fresh elements on every reconnect. No-op if no
+/// recording branch is attached.
 ///
-/// Fixes a reproduced bug: reused across a bare `Null`->`Playing` reconnect
-/// cycle, `splitmuxsink`'s internal GOP-collection state does not reset
-/// cleanly — roughly 100s after any reconnect, newly-arriving buffers'
-/// timestamps appear (from `splitmuxsink`'s perspective) to precede GOP
-/// data it's still holding from before the reconnect, and
-/// `gstsplitmuxsink.c`'s `handle_gathered_gop()` errors with "Queued GOP
-/// time is negative" — which triggers another reconnect, forever. A fresh
-/// `splitmuxsink` instance has no leftover GOP state to get confused by.
+/// A `splitmuxsink` reused across a `Null`->`Playing` cycle keeps its GOP
+/// state. Roughly 100 s later new buffers appear to precede GOP data held
+/// from before the reconnect, `handle_gathered_gop()` fails with "Queued GOP
+/// time is negative", and that triggers another reconnect, repeatedly. A
+/// fresh instance has no stale GOP state.
 ///
-/// `tee`'s other consumers (relay, ring buffer, motion detection — see
-/// `manager.rs`) are untouched: only the recording branch's own request pad
-/// on `tee` is released and re-requested, nothing about `tee` itself or any
-/// other branch hanging off it changes.
+/// Only the recording branch's request pad on `tee` is released and
+/// re-requested; the tee's other branches are untouched.
 ///
-/// Must be called only after [`wait_for_pipeline_null`] has confirmed
-/// `gst_pipeline` actually reached `Null` — `Bin::remove` requires an
-/// element to already be in `Null` state, and removing it while the old
-/// elements are still mid-teardown on their own streaming thread produces
-/// GStreamer-CRITICAL assertions and corrupted fragments.
+/// Call only after [`wait_for_pipeline_null`] confirmed the pipeline reached
+/// `Null`. Removing elements that are still tearing down on their streaming
+/// thread causes GStreamer-CRITICAL assertions and corrupted fragments.
 fn rebuild_recording_branch(
     camera_id: Uuid,
     gst_pipeline: &gstreamer::Pipeline,
@@ -913,27 +876,24 @@ fn rebuild_recording_branch(
 
 /// What the reconnect monitor should do before its next reconnect attempt.
 pub(crate) enum WaitPlan {
-    /// Below the circuit-breaker threshold — normal exponential backoff.
+    /// Within the circuit-breaker threshold: normal exponential backoff.
     Backoff(Duration),
-    /// At or above the circuit-breaker threshold — a persistently failing
-    /// camera stops being retried at the tight backoff cap and instead gets
-    /// one "probe" attempt per long cooldown.
+    /// Past the circuit-breaker threshold: a persistently failing camera gets
+    /// one probe attempt per long cooldown instead of retrying at the backoff
+    /// cap.
     CircuitOpen(Duration),
 }
 
-/// Shared reconnect backoff + circuit-breaker policy for both the main
+/// Reconnect backoff and circuit-breaker policy shared by the main
 /// (`spawn_monitor`) and sub-stream (`sub_stream::spawn_sub_monitor`)
-/// reconnect monitors.
+/// monitors.
 ///
-/// A `set_state(Playing)` call returning `Ok` says nothing about whether the
-/// RTSP connection actually re-established — the connection attempt happens
-/// asynchronously downstream, so a camera that's persistently unreachable
-/// will still get a bus `Error` shortly after. Resetting backoff on every
-/// `Ok` from `set_state` (the previous behavior) therefore let a dead camera
-/// hot-loop reconnects at the base backoff forever. Only staying up for
-/// [`Self::STABLE_UPTIME`] before the *next* failure counts as real
-/// recovery — that's what resets `backoff`/`consecutive_failures` back to
-/// their base values, in [`Self::on_failure`].
+/// `set_state(Playing)` returning `Ok` does not mean the RTSP connection is
+/// back; it connects asynchronously, and an unreachable camera posts a bus
+/// `Error` shortly after. Resetting backoff on that `Ok` would let a dead
+/// camera reconnect at the base backoff forever. Only staying up for
+/// [`Self::STABLE_UPTIME`] before the next failure resets the backoff and
+/// failure count, in [`Self::on_failure`].
 pub(crate) struct ReconnectPolicy {
     connected_at: tokio::time::Instant,
     backoff: Duration,
@@ -943,9 +903,8 @@ pub(crate) struct ReconnectPolicy {
 impl ReconnectPolicy {
     const BASE_BACKOFF: Duration = Duration::from_secs(2);
     const MAX_BACKOFF: Duration = Duration::from_secs(60);
-    /// A reconnect attempt must stay up at least this long before the next
-    /// failure is treated as the start of a fresh failure streak rather than
-    /// a continuation of the current one.
+    /// A reconnect must stay up at least this long for the next failure to
+    /// start a new failure streak.
     const STABLE_UPTIME: Duration = Duration::from_secs(30);
     /// Failures in a row (within one streak) before the circuit opens.
     const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
@@ -979,10 +938,9 @@ impl ReconnectPolicy {
         }
     }
 
-    /// Call right after `set_state(Playing)` itself returns `Ok` — starts
-    /// the uptime clock [`Self::on_failure`] checks against. Deliberately
-    /// does *not* reset `backoff`/`consecutive_failures`; see the type-level
-    /// doc comment.
+    /// Call right after `set_state(Playing)` returns `Ok` to start the uptime
+    /// clock [`Self::on_failure`] checks. It does not reset the backoff or
+    /// failure count; see the type-level docs.
     pub(crate) fn record_attempt(&mut self) {
         self.connected_at = tokio::time::Instant::now();
     }
@@ -996,11 +954,10 @@ impl ReconnectPolicy {
 
 /// Spawn a tokio task that watches the GStreamer bus and reconnects on error/EOS.
 ///
-/// Backoff and circuit breaker: see [`ReconnectPolicy`]. On each reconnect
+/// Backoff and circuit breaker are in [`ReconnectPolicy`]. On each reconnect
 /// `naming`'s session timestamp is refreshed so chunks from different
-/// sessions never collide on disk, and the recording branch (`queue` +
-/// `splitmuxsink`) is torn down and rebuilt fresh — see
-/// `rebuild_recording_branch` for why.
+/// sessions never collide on disk, and the recording branch is rebuilt (see
+/// `rebuild_recording_branch` for why).
 ///
 /// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
 /// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
@@ -1036,7 +993,7 @@ pub(crate) fn spawn_monitor(
                                     camera_id = %camera_id,
                                     error = %err.error(),
                                     debug = ?err.debug(),
-                                    "GStreamer error — will reconnect",
+                                    "GStreamer error, will reconnect",
                                 );
                                 break 'watch true;
                             }
@@ -1045,7 +1002,7 @@ pub(crate) fn spawn_monitor(
                                     tracing::debug!(camera_id = %camera_id, "EOS from a finalizing recording branch, ignored");
                                     continue;
                                 }
-                                tracing::warn!(camera_id = %camera_id, "RTSP stream EOS — will reconnect");
+                                tracing::warn!(camera_id = %camera_id, "RTSP stream EOS, will reconnect");
                                 break 'watch true;
                             }
                             MessageView::Warning(w) => {
@@ -1079,17 +1036,15 @@ pub(crate) fn spawn_monitor(
             .await;
             gst_pipeline.set_state(gstreamer::State::Null).ok();
 
-            // Fresh timestamp prefix -> no chunk filename collisions
+            // New timestamp prefix so chunk filenames do not collide
             naming.refresh_session();
 
-            // -- Retry until Playing genuinely starts, or shutdown --
-            // Handles pipeline tear-down/rebuild failures and a failed
-            // `set_state(Playing)` call directly, without waiting on a bus
-            // message that would never arrive since the pipeline never
-            // reached Playing in the first place. A failure *after*
-            // Playing starts (e.g. the RTSP connection itself failing) is
-            // instead caught by the bus watch above, on the next lap of
-            // 'outer.
+            // -- Retry until Playing starts, or shutdown --
+            // Failures before Playing (teardown, rebuild, `set_state`) are
+            // retried here directly, since no bus message would arrive for
+            // them. Failures after Playing starts, such as the RTSP
+            // connection dropping, are caught by the bus watch above on the
+            // next pass of 'outer.
             'reconnect: loop {
                 let wait_plan = policy.on_failure();
                 match wait_plan {
@@ -1110,7 +1065,7 @@ pub(crate) fn spawn_monitor(
                             camera_id = %camera_id,
                             consecutive_failures = policy.consecutive_failures(),
                             cooldown_secs = cooldown.as_secs(),
-                            "Circuit breaker open — too many reconnect failures in a row, \
+                            "Circuit breaker open, too many reconnect failures in a row, \
                              cooling down before the next attempt",
                         );
                         tokio::select! {
@@ -1124,7 +1079,7 @@ pub(crate) fn spawn_monitor(
                     tracing::error!(
                         camera_id = %camera_id,
                         error = %e,
-                        "Pipeline not fully stopped yet — will retry rebuild",
+                        "Pipeline not fully stopped yet, will retry rebuild",
                     );
                     continue 'reconnect;
                 }
@@ -1140,7 +1095,7 @@ pub(crate) fn spawn_monitor(
                     tracing::error!(
                         camera_id = %camera_id,
                         error = %e,
-                        "Failed to rebuild recording branch — will retry",
+                        "Failed to rebuild recording branch, will retry",
                     );
                     continue 'reconnect;
                 }
@@ -1149,9 +1104,8 @@ pub(crate) fn spawn_monitor(
                     Ok(_) => {
                         tracing::info!(camera_id = %camera_id, "Camera stream restarted");
                         policy.record_attempt();
-                        // Lets whichever task owns recording-intent reconciliation
-                        // resume it the moment the stream is back, not just at
-                        // daemon boot — see `pipeline_live_tx`'s doc comment.
+                        // Lets the task that owns recording intent resume
+                        // recording as soon as the stream is back.
                         let _ = pipeline_live_tx.send(camera_id);
                         break 'reconnect;
                     }
@@ -1178,29 +1132,21 @@ pub(crate) fn spawn_monitor(
 
 // -- Helpers --
 
-/// Below this many bytes, a "closed" fragment is treated as empty/garbage
-/// rather than a real chunk of footage — smaller than any valid MP4 could
-/// plausibly be (`ftyp` + `moov` + `mdat` box headers alone already exceed
-/// this). Observed live as a byproduct of a still-unresolved reconnect bug:
-/// every reconnect that survives long enough eventually produces one
-/// genuinely 0-byte fragment right before erroring out.
+/// A closed fragment smaller than this is treated as garbage, not footage.
+/// Any valid MP4 is larger (`ftyp` + `moov` + `mdat` headers alone exceed
+/// it). Some reconnects leave a 0-byte fragment behind just before erroring.
 const MIN_PLAUSIBLE_CHUNK_BYTES: u64 = 1024;
 
-/// Handle a `splitmuxsink-fragment-closed` element message: the previous
-/// chunk file is finalized on disk. Emits `RecordingChunkEvent::Closed` (or
-/// `Discarded` for an empty/garbage fragment — see
-/// `MIN_PLAUSIBLE_CHUNK_BYTES`) from a `stat()` of the file as it already
-/// is, *then* attempts the faststart remux (see `remux_faststart`) on the
-/// same blocking thread — deliberately in that order. The remux demuxes and
-/// rewrites the whole file, which can take a real, unbounded amount of
-/// wall-clock time; nothing in the graceful-shutdown path
-/// (`drain_recording_branch`) waits for it, only for this event to be sent,
-/// so gating the event on the remux meant a shutdown that raced a slow
-/// remux lost the DB write for an otherwise perfectly good chunk — silently
-/// orphaning it forever, since retention and the daily-coverage sweep both
-/// only ever consider chunks with `end_time IS NOT NULL`. The remux itself
-/// stays best-effort exactly as before; a chunk that misses it is still
-/// fully playable, just not progressively seekable via HTTP Range.
+/// Handle a `splitmuxsink-fragment-closed` element message, meaning the
+/// chunk file is finalized on disk.
+///
+/// Wakes a drain waiting on this fragment, then on a blocking thread sends
+/// `RecordingChunkEvent::Closed` (or `Discarded`, see
+/// `MIN_PLAUSIBLE_CHUNK_BYTES`) and only afterwards runs the faststart remux.
+/// The remux can take a long time and shutdown does not wait for it, so the
+/// event must not depend on it: a chunk whose `end_time` is never written is
+/// skipped by retention and the coverage sweep. The remux is best-effort; a
+/// chunk without it still plays but cannot be streamed progressively.
 fn handle_fragment_closed(
     camera_id: Uuid,
     elem: &gstreamer::message::Element,
@@ -1218,9 +1164,9 @@ fn handle_fragment_closed(
         return;
     };
 
-    // Wake a graceful drain waiting on exactly this fragment (see
-    // `watch_current_close`) — matched by path so an unrelated fragment
-    // closing around the same time can't be mistaken for it.
+    // Wake a graceful drain waiting on this fragment (see
+    // `watch_current_close`). Matching by path keeps another fragment
+    // closing at the same time from being mistaken for it.
     {
         let mut ack = naming.close_ack.lock().unwrap();
         if ack.as_ref().is_some_and(|(path, _)| path == &file_path) {
@@ -1238,13 +1184,13 @@ fn handle_fragment_closed(
     });
 }
 
-/// `stat()` `file_path` and index it as `Closed` (or `Discarded` if it never
-/// grew past `MIN_PLAUSIBLE_CHUNK_BYTES`), then best-effort faststart-remux
-/// it. Shared by `handle_fragment_closed`'s normal close path and by
-/// `drain_recording_branch`'s timeout fallback, so a fragment that never
-/// produces a `splitmuxsink-fragment-closed` message in time still gets
-/// indexed instead of leaving its `recording` row open forever. Blocking —
-/// callers run it on a blocking thread.
+/// `stat()` `file_path` and index it as `Closed` (or `Discarded` below
+/// `MIN_PLAUSIBLE_CHUNK_BYTES`), then try the faststart remux.
+///
+/// Used by `handle_fragment_closed` and by `drain_recording_branch`'s timeout
+/// fallback, so a fragment whose close message never arrives is still
+/// indexed instead of leaving its `recording` row open. Blocking; run it on a
+/// blocking thread.
 fn finalize_fragment_file(
     camera_id: Uuid,
     file_path: String,
@@ -1257,7 +1203,7 @@ fn finalize_fragment_file(
             camera_id = %camera_id,
             file_path,
             size_bytes = on_disk_size,
-            "Discarding empty/garbage fragment — not indexing it as a real chunk",
+            "Discarding empty/garbage fragment, not indexing it as a real chunk",
         );
         std::fs::remove_file(&file_path).ok();
         let _ = chunk_event_tx.send(RecordingChunkEvent::Discarded {
@@ -1274,32 +1220,28 @@ fn finalize_fragment_file(
         size_bytes: on_disk_size as i64,
     });
 
-    // Best-effort from here on — nothing downstream depends on this
-    // completing, or even running at all (see the doc comment above).
+    // Best-effort from here on; nothing depends on the remux succeeding.
     if let Some(codec) = codec.as_deref().and_then(codec_for) {
         if let Err(e) = remux_faststart(&file_path, codec.parse_factory) {
             tracing::warn!(
                 camera_id = %camera_id,
                 file_path,
                 error = %e,
-                "Faststart remux failed — chunk stays playable, just not progressively seekable",
+                "Faststart remux failed, chunk stays playable, just not progressively seekable",
             );
         }
     }
 }
 
-/// Rewrite `path` in place so its `moov` atom sits before `mdat` — what lets
-/// an HTTP Range request serve a chunk progressively instead of
-/// needing the whole file downloaded first. `mp4mux`'s own `faststart=true`
-/// does exactly this, but only takes effect through `splitmuxsink`'s
-/// `muxer-properties`, which in turn requires `async-finalize=true` — tested
-/// live and found to reproducibly break the reconnect path (see the comment
-/// on `build_camera_stream`'s `splitmuxsink` construction). Running it here,
-/// as a completely separate one-shot pipeline over the already-closed file,
-/// costs an extra demux+remux pass per chunk but can never destabilize live
-/// recording — it operates on a file that's already finished.
+/// Rewrite `path` in place so its `moov` atom comes before `mdat`, which lets
+/// HTTP Range requests stream the chunk progressively.
 ///
-/// Blocking — call from `spawn_blocking`, never from the async bus-watcher.
+/// Doing this inside `splitmuxsink` breaks reconnects (see the faststart note
+/// above `build_recording_branch`), so it runs as a separate one-shot
+/// pipeline over the closed file. That costs an extra demux and remux per
+/// chunk but cannot affect live recording.
+///
+/// Blocking; call from `spawn_blocking`, never from the async bus watcher.
 fn remux_faststart(path: &str, parse_factory: &str) -> Result<(), VmsError> {
     let tmp_path = format!("{path}.faststart.tmp");
 
@@ -1333,8 +1275,7 @@ fn remux_faststart(path: &str, parse_factory: &str) -> Result<(), VmsError> {
     gstreamer::Element::link_many([&parse, &mux, &sink])
         .map_err(|e| VmsError::Media(format!("faststart link parse->mux->sink: {e}")))?;
 
-    // qtdemux only exposes its src pad once it has parsed the file's moov —
-    // same dynamic-pad dance as the live pipeline's own codec wiring.
+    // qtdemux only exposes its src pad once it has parsed the file's moov.
     let parse_weak = parse.downgrade();
     demux.connect_pad_added(move |_demux, pad| {
         let Some(parse) = parse_weak.upgrade() else {
@@ -1379,18 +1320,17 @@ fn remux_faststart(path: &str, parse_factory: &str) -> Result<(), VmsError> {
     Ok(())
 }
 
-/// Wall-clock timestamp prefix for a fresh recording session — a new one is
-/// generated by [`ChunkNaming::refresh_session`] on every reconnect so chunk
-/// filenames never collide across sessions.
+/// Wall-clock timestamp prefix for a recording session.
+/// [`ChunkNaming::refresh_session`] generates a new one on every reconnect so
+/// chunk filenames never collide across sessions.
 fn session_timestamp() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string()
 }
 
-/// Unique chunk file location string for a recording session — kept only as
-/// the `location` property's fallback value (used if `format-location-full`
-/// ever returns `None`); the real per-chunk path in normal operation comes
-/// from [`chunk_location`], called from the naming signal in
-/// `build_camera_stream`.
+/// Chunk location pattern for a recording session, used only as the
+/// `location` property's fallback if `format-location-full` returns `None`.
+/// Real per-chunk paths come from [`chunk_location`], called from the naming
+/// signal set up in `build_recording_branch`.
 ///
 /// Example: `/var/recordings/cam_<id>_20260509T143022_chunk%05d.mp4`
 pub(crate) fn recording_location(base_dir: &std::path::Path, camera_id: Uuid) -> String {
@@ -1404,10 +1344,8 @@ pub(crate) fn recording_location(base_dir: &std::path::Path, camera_id: Uuid) ->
         .to_string()
 }
 
-/// The exact path for one chunk, given the session's current timestamp
-/// prefix and this fragment's index — used by the `format-location-full`
-/// callback, which needs a concrete filename per fragment rather than the
-/// `%05d` pattern `recording_location` produces for the property fallback.
+/// The concrete path for one chunk from the session's timestamp prefix and
+/// the fragment index, used by the `format-location-full` callback.
 fn chunk_location(
     base_dir: &std::path::Path,
     camera_id: Uuid,
@@ -1555,7 +1493,7 @@ mod config_interval_tests {
             .build()
             .expect("jpegparse should be available");
 
-        // Must not panic/error — jpegparse has no config-interval property.
+        // Must not panic or error: jpegparse has no config-interval property.
         set_config_interval_if_supported(&parse);
     }
 }
@@ -1596,10 +1534,9 @@ mod byte_stream_caps_tests {
 mod recording_branch_avc_bridge_tests {
     use super::*;
 
-    /// `splitmuxsink`'s internal muxer only accepts H264/H265 in avc/avc3,
-    /// never byte-stream — the format `build_camera_stream`'s shared parser
-    /// forces onto `tee` for `extract_clip`'s sake. `build_recording_branch`
-    /// must insert its own converting parser for those codecs.
+    /// `splitmuxsink`'s muxer only accepts H264/H265 as avc/avc3, while the
+    /// shared parser forces byte-stream onto `tee` for `extract_clip`, so
+    /// `build_recording_branch` must add its own converting parser.
     #[test]
     fn build_recording_branch_adds_a_recparse_for_h264() {
         gstreamer::init().ok();
@@ -1634,10 +1571,9 @@ mod recording_branch_avc_bridge_tests {
         assert!(recparse.is_none());
     }
 
-    /// Regression test for the actual bug: linking `queue` straight into
-    /// `splitmuxsink` once `tee`'s feed is already fixed to byte-stream/au
-    /// fails outright (`mp4mux` cannot mux byte-stream H264). Routing
-    /// through a converting `recparse` first must succeed.
+    /// Linking `queue` straight into `splitmuxsink` fails once `tee`'s feed
+    /// is fixed to byte-stream/au, because `mp4mux` cannot mux byte-stream
+    /// H264. Going through a converting `recparse` must succeed.
     #[test]
     fn recording_branch_links_end_to_end_despite_byte_stream_tee_feed() {
         gstreamer::init().ok();

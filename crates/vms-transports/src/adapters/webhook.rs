@@ -94,9 +94,8 @@ pub async fn deliver(
 
     let env = Environment::new();
 
-    // An explicit message_template is the transport's own text, not the
-    // upstream render_notification node's, so its format only applies to
-    // the fallback (first_text) case.
+    // An explicit message_template is the transport's own text, so the upstream
+    // render_notification format only applies to the fallback (first_text) case.
     let (message_text, message_format) =
         match transport_cfg.and_then(|c| c.message_template.as_deref()) {
             Some(tpl) => match env.render_str(tpl, &tpl_ctx) {
