@@ -126,5 +126,5 @@ CLAUDE.local.md
 # test_camera_server.py pid/log tracking (see Makefile)
 /.camera-pids/
 
-# Per-developer camera credentials — copy from Makefile.local.example
+# Per-developer camera credentials, copied from Makefile.local.example
 /Makefile.local
