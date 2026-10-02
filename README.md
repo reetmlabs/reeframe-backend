@@ -141,6 +141,10 @@ Settings come from `/etc/reeframe/config.toml`, then `./reeframe.toml`, then env
 
 Everything else has a default: the database (SQLite unless you point it at MySQL or PostgreSQL), recording directory, retention, ports and per-camera options. [docs/configuration.md](docs/configuration.md) lists every setting.
 
+## Security
+
+The defaults assume a trusted local network. The API is plain HTTP, and the RTSP relay on port 8554 has no authentication, so anyone who can reach it and knows a camera's ID can watch that camera. To use Reeframe from outside your network, put the API behind a TLS reverse proxy or a VPN, and keep port 8554 local. [SECURITY.md](SECURITY.md) has the full list and explains how to report a vulnerability.
+
 ## Architecture
 
 | Crate | Role |
