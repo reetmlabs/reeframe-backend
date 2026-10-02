@@ -1,6 +1,6 @@
-//! Persistent outbound connection to a Relay/gateway server for WAPP
+//! Persistent outbound connection to a gateway server for mobile app
 //! pairing, plus the registration handshake sent on connect. Only runs
-//! when `[gateway] url` is configured — otherwise this BE stays autonomous.
+//! when `[gateway] url` is configured.
 
 use std::time::Duration;
 
@@ -13,14 +13,13 @@ use uuid::Uuid;
 
 use crate::config::GatewayConfig;
 
-/// Sent once, right after connecting, so the Relay knows which site this
-/// connection belongs to. NDJSON-framed — simplest thing that's both
-/// debuggable and disposable once a real protocol exists.
+/// Sent once, right after connecting, so the gateway knows which site this
+/// connection belongs to. Framed as NDJSON because it is simple and easy to
+/// debug.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct RegistrationMessage {
     be_id: Uuid,
-    /// The most concrete "capability info" that exists today. Extend once
-    /// the Relay side defines real capability flags to route on.
+    /// Daemon version, the only capability information sent so far.
     version: String,
 }
 
@@ -32,8 +31,8 @@ impl RegistrationMessage {
         }
     }
 
-    /// Compact JSON plus a trailing `\n`. Serializing a `Uuid`/`String`
-    /// can't fail, so this returns bytes directly rather than a `Result`.
+    /// Compact JSON plus a trailing `\n`. Serializing a `Uuid` and a
+    /// `String` can't fail, so this returns bytes instead of a `Result`.
     fn encode(&self) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(self).expect("RegistrationMessage always serializes");
         bytes.push(b'\n');
@@ -41,9 +40,9 @@ impl RegistrationMessage {
     }
 }
 
-/// Whether the gateway client should run, and if so, against which
-/// address/identity. `url` unset means `Ok(None)` — no connection is ever
-/// attempted, since this is the only call site that leads to `run`.
+/// Whether the gateway client should run, and if so with which address and
+/// BE ID. Returns `Ok(None)` when `url` is unset; this is the only path to
+/// `run`, so no connection is attempted.
 pub(crate) fn resolve(cfg: &GatewayConfig) -> Result<Option<(String, Uuid)>, String> {
     let Some(url) = cfg.url.clone() else {
         return Ok(None);
@@ -52,22 +51,21 @@ pub(crate) fn resolve(cfg: &GatewayConfig) -> Result<Option<(String, Uuid)>, Str
     Ok(Some((url, be_id)))
 }
 
-/// Rejects a missing `be_id` before any connection is attempted — a
-/// static config gap backoff/retry can't fix. A malformed `be_id` is
-/// rejected even earlier, by `Uuid`'s own `Deserialize`.
+/// Rejects a missing `be_id` up front, since retrying can't fix a config
+/// gap. A malformed `be_id` already fails in `Uuid`'s `Deserialize`.
 fn require_be_id(be_id: Option<Uuid>) -> Result<Uuid, String> {
     be_id.ok_or_else(|| "[gateway] be_id must be set when [gateway] url is configured".into())
 }
 
-/// Exponential backoff with jitter, capped at `max`. Mirrors
-/// `vms_media::camera_stream::ReconnectPolicy`'s "must stay up a while
-/// before failure resets it" design, so flapping escalates instead of hot-looping.
+/// Exponential backoff capped at `max` (jitter is added by [`jittered`]).
+/// Like `vms_media::camera_stream::ReconnectPolicy`, the delay only resets
+/// after a connection has stayed up for a while, so a flapping connection
+/// keeps backing off instead of hot-looping.
 struct Backoff {
     base: Duration,
     max: Duration,
-    /// A connection must stay up at least this long before the next failure
-    /// is treated as the start of a fresh failure streak rather than a
-    /// continuation of the current one.
+    /// How long a connection must stay up before the next failure starts a
+    /// fresh failure streak.
     stable_uptime: Duration,
     connected_at: Instant,
     delay: Duration,
@@ -84,9 +82,8 @@ impl Backoff {
         }
     }
 
-    /// Call once per failed/dropped connection for the next delay.
-    /// Deterministic — jitter is applied separately by the caller so
-    /// this stays exactly testable.
+    /// Call once per failed or dropped connection to get the next delay.
+    /// Deterministic so it can be tested exactly; the caller adds jitter.
     fn next_delay(&mut self) -> Duration {
         if self.connected_at.elapsed() >= self.stable_uptime {
             self.delay = self.base;
@@ -96,24 +93,24 @@ impl Backoff {
         delay
     }
 
-    /// Starts the uptime clock `next_delay` checks. Doesn't reset `delay`
-    /// itself — only a *stable* connection counts as recovery.
+    /// Starts the uptime clock that `next_delay` checks. It doesn't reset
+    /// `delay`, because only a stable connection counts as recovery.
     fn record_connected(&mut self) {
         self.connected_at = Instant::now();
     }
 }
 
-/// Applies up to ±20% jitter to `delay` — so many BEs reconnecting to the
-/// same gateway after a shared outage don't all retry in lockstep.
+/// Applies up to ±20% jitter to `delay` so BEs reconnecting to the same
+/// gateway after a shared outage don't retry in lockstep.
 fn jittered(delay: Duration) -> Duration {
     let jitter_range = delay.as_secs_f64() * 0.2;
     let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
     Duration::from_secs_f64((delay.as_secs_f64() + jitter).max(0.0))
 }
 
-/// Runs until `shutdown` resolves, reconnecting with backoff on any
-/// connect/register failure or dropped connection. `be_id` is required,
-/// not `Option` — see `require_be_id` for why.
+/// Runs until `shutdown` resolves, reconnecting with backoff after any
+/// connect or register failure or dropped connection. `be_id` is checked
+/// by `require_be_id` beforehand.
 pub async fn run(addr: String, be_id: Uuid, shutdown: tokio::sync::oneshot::Receiver<()>) {
     run_with_backoff(
         addr,
@@ -173,16 +170,16 @@ async fn connect_and_register(addr: &str, registration: &[u8]) -> std::io::Resul
     Ok(stream)
 }
 
-/// Why [`wait_for_disconnect`] returned — the caller must not poll
-/// `shutdown` again if it's already the reason this ended.
+/// Why [`wait_for_disconnect`] returned. The caller must not poll
+/// `shutdown` again if shutdown is the reason.
 enum ConnectionEnd {
     Disconnected,
     ShuttingDown,
 }
 
-/// Blocks until the connection drops (EOF or a read error) or `shutdown`
-/// resolves. No wire protocol exists yet — any bytes received are
-/// discarded; only the connection's liveness matters here.
+/// Waits until the connection drops (EOF or a read error) or `shutdown`
+/// resolves. There is no protocol after registration, so received bytes
+/// are discarded.
 async fn wait_for_disconnect(
     mut stream: TcpStream,
     shutdown: &mut tokio::sync::oneshot::Receiver<()>,
@@ -267,8 +264,8 @@ mod tests {
 
     // -- Connection lifecycle against a local mock acceptor --
 
-    /// Accepts then immediately drops each connection, simulating a
-    /// bouncing Relay. Returns the address and an accept counter.
+    /// Accepts and immediately drops each connection, simulating a
+    /// bouncing gateway. Returns the address and an accept counter.
     async fn spawn_flaky_acceptor() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -280,8 +277,8 @@ mod tests {
                     return;
                 };
                 count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                // Dropping `_socket` immediately closes the connection —
-                // the client's next read returns EOF.
+                // Dropping `_socket` closes the connection, so the client's
+                // next read returns EOF.
             }
         });
         (addr, count)
@@ -299,8 +296,8 @@ mod tests {
             test_backoff(),
         ));
 
-        // Each cycle: real local connect+drop, then a virtual-time sleep
-        // for backoff — advancing time skips the wait.
+        // Each cycle is a real local connect and drop, then a backoff sleep
+        // in virtual time that advancing the clock skips.
         for _ in 0..10 {
             tokio::time::advance(Duration::from_millis(100)).await;
             tokio::task::yield_now().await;
@@ -311,9 +308,8 @@ mod tests {
             "expected multiple reconnect attempts against the flaky acceptor"
         );
 
-        // A single task drives the whole lifecycle — shutting it down once
-        // must actually end it, not leave it (or anything it spawned)
-        // running in the background.
+        // A single task drives the whole lifecycle, so one shutdown must end
+        // it and leave nothing running in the background.
         shutdown_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(1), run_handle)
             .await
@@ -329,8 +325,8 @@ mod tests {
             url: None,
             be_id: Some(Uuid::new_v4()),
         };
-        // `resolve` is the only call site leading to `run` — `Ok(None)`
-        // is the actual decision not to connect, not just "no error."
+        // `resolve` is the only path to `run`, so `Ok(None)` means the
+        // client never connects.
         assert_eq!(resolve(&cfg).unwrap(), None);
     }
 
@@ -414,9 +410,9 @@ mod tests {
 
     // -- Recovery across a simulated network interruption --
 
-    /// Same shape as `spawn_flaky_acceptor`, but also verifies the
-    /// registration content first. No real Relay exists yet to test
-    /// against — this stands in for one.
+    /// Stand-in gateway for one connection: like `spawn_flaky_acceptor`,
+    /// but it parses the registration message and reports it before
+    /// dropping the connection.
     async fn spawn_relay_once(
         listener: tokio::net::TcpListener,
     ) -> tokio::sync::mpsc::UnboundedReceiver<RegistrationMessage> {
@@ -435,16 +431,16 @@ mod tests {
                     let _ = tx.send(msg);
                 }
             }
-            // Dropping `reader` (and the socket it owns) here closes the
-            // connection — the client's next read returns EOF.
+            // Dropping `reader` and the socket it owns closes the
+            // connection, so the client's next read returns EOF.
         });
         rx
     }
 
-    /// `relay1` exiting right after registering simulates the path going
-    /// down; rebinding on the same address simulates it coming back. Real
-    /// time, not paused — simpler than driving a paused clock through
-    /// several tasks' worth of interleaved socket I/O.
+    /// The first stand-in gateway closing right after registration simulates
+    /// the path going down; rebinding the same address simulates it coming
+    /// back. Uses real time because driving a paused clock through
+    /// interleaved socket I/O across several tasks is awkward.
     #[tokio::test]
     async fn stays_connected_and_recovers_after_a_simulated_network_interruption() {
         let be_id = Uuid::new_v4();
@@ -466,16 +462,15 @@ mod tests {
             .unwrap();
         assert_eq!(first.be_id, be_id);
 
-        // Nothing is listening on `addr` for a while — each reconnect
-        // attempt fails immediately (connection refused) and backs off.
+        // Nothing listens on `addr` for a while, so each reconnect attempt
+        // is refused and backs off.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // Restore the path, on the exact same address.
+        // Restore the path on the same address.
         let listener2 = tokio::net::TcpListener::bind(&addr).await.unwrap();
         let mut registrations2 = spawn_relay_once(listener2).await;
 
-        // No manual intervention on the client side at all — it registers
-        // again on its own once the path is back.
+        // The client registers again on its own once the path is back.
         let second = tokio::time::timeout(Duration::from_secs(2), registrations2.recv())
             .await
             .unwrap()

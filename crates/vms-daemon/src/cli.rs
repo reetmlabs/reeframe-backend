@@ -1,13 +1,11 @@
 //! CLI subcommands that run instead of starting the daemon.
 //!
-//! `vms-daemon` with no arguments starts the daemon exactly as before this
-//! module existed. `vms-daemon token ...` instead connects to the configured
-//! database, mints/lists/revokes an [`vms_db::ApiKeyRepo`] token, and exits —
-//! no media manager, pipeline engine, or HTTP server is started. This is the
-//! on-demand path for provisioning a credential for the FE (or any other
-//! client) from a shell on the host, without going through the HTTP API's
-//! `POST /auth/login` + `POST /users/{id}/api-keys` round trip, which itself
-//! requires already being logged in as that user.
+//! `vms-daemon` with no arguments starts the daemon. `vms-daemon token ...`
+//! connects to the configured database, mints, lists or revokes an
+//! [`vms_db::ApiKeyRepo`] token, and exits without starting media, pipelines
+//! or the HTTP server. This lets an operator provision a credential for the
+//! FE (or any other client) from a shell on the host, without logging in
+//! through the HTTP API first.
 
 use clap::{Args, Parser, Subcommand};
 use sea_orm::Database;
@@ -74,10 +72,9 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
     }
 }
 
-/// Resolves `--username` against the `users` table, falling back to "the
-/// one user that exists" when there's no ambiguity — most deployments have
-/// exactly one (admin) account, and forcing `--username` on every call in
-/// that common case would just be friction.
+/// Resolves `--username` against the `users` table. Without it, falls back
+/// to the only user if exactly one exists, which is the common single-admin
+/// deployment.
 async fn resolve_user(
     user_repo: &UserRepo,
     username: Option<String>,
