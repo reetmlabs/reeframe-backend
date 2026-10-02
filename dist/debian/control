@@ -1,5 +1,5 @@
 Package: reeframe-backend
-Version: 0.1.0
+Version: 0.2.0
 Architecture: amd64
 Maintainer: Reeframe contributors <https://github.com/reetmlabs/reeframe-backend>
 Section: video

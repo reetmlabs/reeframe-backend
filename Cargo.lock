@@ -6372,7 +6372,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vms-actions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6397,7 +6397,7 @@ dependencies = [
 
 [[package]]
 name = "vms-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6424,7 +6424,7 @@ dependencies = [
 
 [[package]]
 name = "vms-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6436,7 +6436,7 @@ dependencies = [
 
 [[package]]
 name = "vms-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6466,7 +6466,7 @@ dependencies = [
 
 [[package]]
 name = "vms-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -6486,7 +6486,7 @@ dependencies = [
 
 [[package]]
 name = "vms-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6517,7 +6517,7 @@ dependencies = [
 
 [[package]]
 name = "vms-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -6544,7 +6544,7 @@ dependencies = [
 
 [[package]]
 name = "vms-sources"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -6565,7 +6565,7 @@ dependencies = [
 
 [[package]]
 name = "vms-transports"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dashmap",
