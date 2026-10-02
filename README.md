@@ -62,7 +62,7 @@ Pipelines reload without a restart, and each camera only runs what its enabled p
 - Home Assistant events trigger Reeframe pipelines over the HA WebSocket API, and Reeframe calls back into HA automations through webhooks.
 - n8n and similar workflow tools work in both directions. They start pipelines through inbound webhooks (`POST /webhooks/{id}`) or the REST API, and receive results through the webhook transport.
 - MQTT, API polling and file watchers can also feed events in.
-- An MCP server, so AI assistants can query cameras, recordings and events, is planned ([#92](https://github.com/reetmlabs/reeframe-backend/issues/92)).
+- An MCP server, so AI assistants can query cameras, recordings and events, is planned ([#14](https://github.com/reetmlabs/reeframe-backend/issues/14)).
 
 ## Features
 
@@ -111,7 +111,7 @@ curl -X POST localhost:8080/cameras/$CAM/relay/start -H "authorization: Bearer $
 # {"quality":"sub","relay_url":"rtsp://<host>:8554/<camera>/sub"}
 ```
 
-In Docker, `relay_url` contains the container's address; replace it with the Docker host's address to play the stream from another machine ([#94](https://github.com/reetmlabs/reeframe-backend/issues/94)).
+In Docker, `relay_url` contains the container's address; replace it with the Docker host's address to play the stream from another machine ([#15](https://github.com/reetmlabs/reeframe-backend/issues/15)).
 
 For scripts and other services, mint a long-lived API key with `vms-daemon token generate`.
 
