@@ -18,8 +18,7 @@ impl MigrationTrait for Migration {
                             .uuid()
                             .not_null(),
                     )
-                    // Opaque site identifier, same as `tile_profiles.site_id`
-                    // — no local FK.
+                    // Opaque site identifier, same as `tile_profiles.site_id`, with no local FK.
                     .col(
                         ColumnDef::new(ProfileSiteAssignment::SiteId)
                             .uuid()

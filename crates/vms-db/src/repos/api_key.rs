@@ -15,9 +15,9 @@ use crate::entities::{
 };
 
 /// Length, in raw random bytes, of a generated key (before hex encoding and
-/// the `rfk_` prefix). 32 bytes gives 256 bits of entropy — plenty for a
-/// bearer credential that isn't subject to online guessing (the hash lookup
-/// is by exact match, not comparison-per-attempt).
+/// the `rfk_` prefix). 32 bytes gives 256 bits of entropy, plenty for a bearer
+/// credential that isn't subject to online guessing (the hash lookup is by
+/// exact match, not comparison-per-attempt).
 const KEY_BYTES: usize = 32;
 
 // -- Input / output types --
@@ -29,8 +29,8 @@ pub struct CreateApiKey {
 
 pub struct CreatedApiKey {
     pub model: api_key::Model,
-    /// The raw key. Only ever available here, at creation time — it is
-    /// never stored, so it cannot be shown again after this call returns.
+    /// The raw key. Only available here, at creation time. It is never stored,
+    /// so it cannot be shown again after this call returns.
     pub raw_key: String,
 }
 
@@ -72,8 +72,8 @@ impl ApiKeyRepo {
     }
 
     /// Revoke a key. Errors with [`VmsError::ApiKeyNotFound`] if `key_id`
-    /// doesn't exist *or* doesn't belong to `user_id` — the caller can't
-    /// distinguish "not yours" from "doesn't exist" from the outside.
+    /// doesn't exist *or* doesn't belong to `user_id`, so the caller can't tell
+    /// "not yours" from "doesn't exist".
     pub async fn delete(&self, user_id: Uuid, key_id: Uuid) -> Result<(), VmsError> {
         let key = api_key::Entity::find_by_id(key_id)
             .one(&self.db)
@@ -85,11 +85,10 @@ impl ApiKeyRepo {
         Ok(())
     }
 
-    /// Revoke a key by id alone, without checking which user owns it. Only
-    /// for trusted-operator contexts (the `vms-daemon token revoke` CLI) —
-    /// anyone who can call this already has shell/DB access to the host, so
-    /// the per-user ownership check `delete` enforces for the HTTP API
-    /// doesn't add any real protection here.
+    /// Revoke a key by id alone, without checking which user owns it. Only for
+    /// trusted-operator contexts (the `vms-daemon token revoke` CLI): anyone who
+    /// can call this already has shell/DB access to the host, so the per-user
+    /// ownership check in `delete` adds no protection here.
     pub async fn delete_by_id(&self, key_id: Uuid) -> Result<(), VmsError> {
         let key = api_key::Entity::find_by_id(key_id)
             .one(&self.db)
@@ -101,8 +100,8 @@ impl ApiKeyRepo {
     }
 
     /// Resolve a raw key to the user it belongs to, bumping `last_used` on a
-    /// match. Returns `Ok(None)` for an unknown or already-revoked key —
-    /// this is an expected outcome for a bad credential, not an error.
+    /// match. Returns `Ok(None)` for an unknown or revoked key, which is an
+    /// expected outcome for a bad credential.
     pub async fn verify_and_touch(&self, raw_key: &str) -> Result<Option<user::Model>, VmsError> {
         let Some(key) = api_key::Entity::find()
             .filter(api_key::Column::KeyHash.eq(hash_key(raw_key)))

@@ -2,10 +2,10 @@ use sea_orm_migration::prelude::*;
 
 use super::m20260101_000001_create_cameras::Camera;
 
-/// Persisted operator intent — "should this camera be recording" —
-/// independent of whether a recording branch is actually attached right
-/// now. See `MediaManager::is_recording` for the in-memory, achievable-only
-/// counterpart this is *not* a replacement for.
+/// Persisted operator intent ("should this camera be recording"), independent
+/// of whether a recording branch is attached right now. It complements
+/// `MediaManager::is_recording`, the in-memory state of what is actually
+/// running, and does not replace it.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 

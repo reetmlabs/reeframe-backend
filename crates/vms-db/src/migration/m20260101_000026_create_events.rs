@@ -15,9 +15,9 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(ColumnDef::new(Event::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(Event::CameraId).uuid().not_null())
-                    // Free-text, not a DB-level enum — mirrors
-                    // `vms_core::event::Event::event_type`, already a plain
-                    // `String` at the point this gets bridged in.
+                    // Free text instead of a DB-level enum, mirroring
+                    // `vms_core::event::Event::event_type`, which is already a plain
+                    // `String` where events are bridged in.
                     .col(ColumnDef::new(Event::EventType).text().not_null())
                     .col(ColumnDef::new(Event::Payload).json_binary().not_null())
                     .col(

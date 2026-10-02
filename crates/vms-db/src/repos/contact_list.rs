@@ -99,12 +99,11 @@ impl ContactListRepo {
     // -- Membership --
     //
     // `contact_list_members` has `ON DELETE CASCADE` on both FKs, so deleting
-    // a contact or a list cleans up membership rows automatically. That does
-    // *not* stop an insert referencing IDs that never existed in the first
-    // place, so `add_member` still needs the same proactive existence checks
-    // used for every other cross-entity reference in `pipeline.rs` —
-    // otherwise a bad ID surfaces as a raw "FOREIGN KEY constraint failed"
-    // `500` instead of a clean `404`.
+    // a contact or a list cleans up its membership rows. That doesn't stop an
+    // insert that references IDs which never existed, so `add_member` still
+    // checks existence up front, like the other cross-entity references in
+    // `pipeline.rs`. Otherwise a bad ID surfaces as a raw "FOREIGN KEY
+    // constraint failed" `500` instead of a `404`.
 
     pub async fn add_member(
         &self,

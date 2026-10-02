@@ -21,8 +21,7 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(ColumnDef::new(TileCameraBinding::TileId).uuid().not_null())
-                    // Opaque site identifier, same as `tile_profiles.site_id`
-                    // — no local FK.
+                    // Opaque site identifier, same as `tile_profiles.site_id`, with no local FK.
                     .col(ColumnDef::new(TileCameraBinding::SiteId).uuid().not_null())
                     .col(
                         ColumnDef::new(TileCameraBinding::CameraId)
@@ -49,12 +48,10 @@ impl MigrationTrait for Migration {
                             .to(TileFormation::Table, TileFormation::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
-                    // Unlike the FE's own local copy of this schema (which
-                    // has no local `cameras` table to reference), the BE
-                    // owns `cameras` directly — deleting a camera cascades
-                    // to remove this binding row, which is exactly the
-                    // "slot is now unassigned" state (no row = no camera),
-                    // scoped to only the site that actually had it.
+                    // Unlike the frontend's local copy of this schema, which has no
+                    // `cameras` table to reference, the backend owns `cameras`. Deleting a
+                    // camera cascades to this binding row, and a missing row is exactly the
+                    // "slot is unassigned" state, scoped to the one site that had it.
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_tile_camera_bindings_camera")

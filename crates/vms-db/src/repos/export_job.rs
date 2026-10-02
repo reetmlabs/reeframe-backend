@@ -21,10 +21,9 @@ impl ExportJobRepo {
         Self { db }
     }
 
-    /// Insert a new `export_jobs` row in `Pending` state. Returns
-    /// immediately — the caller (an API handler) spawns the actual
-    /// concat/trim work in a background task and reports progress via
-    /// [`Self::start`]/[`Self::complete`]/[`Self::fail`].
+    /// Insert a new `export_jobs` row in `Pending` state and return immediately.
+    /// The caller (an API handler) runs the concat/trim work in a background task
+    /// and reports progress via [`Self::start`]/[`Self::complete`]/[`Self::fail`].
     pub async fn create(
         &self,
         camera_id: Uuid,

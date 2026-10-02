@@ -47,7 +47,7 @@ pub struct UpdatePipeline {
 pub enum EnableOutcome {
     /// The `enabled` flag was written as requested.
     Applied,
-    /// Turning on was refused — these are the blocking errors found.
+    /// Enabling was refused; these are the blocking errors.
     BlockedByErrors(Vec<ValidationIssue>),
 }
 
@@ -63,10 +63,9 @@ pub struct CreateNode {
     pub pos_y: Option<f64>,
 }
 
-/// `node_type` is intentionally absent — changing a node's type would also
+/// `node_type` is intentionally absent: changing a node's type would also
 /// invalidate whichever of `action_config`/`transport_config`/`condition_expr`
-/// used to apply to it. Callers who need a different type delete and
-/// recreate the node.
+/// applied to it. To change the type, delete and recreate the node.
 pub struct UpdateNode {
     pub action_config: Option<ActionConfig>,
     pub transport_config: Option<TransportConfig>,
@@ -84,9 +83,9 @@ pub struct CreateEdge {
     pub edge_type: CoreEdgeType,
 }
 
-/// `from_node_id`/`to_node_id` are intentionally absent — moving an edge's
-/// endpoints is structurally a different edge. Callers who need that delete
-/// and recreate it, same rationale as `UpdateNode` for `node_type`.
+/// `from_node_id`/`to_node_id` are intentionally absent: moving an edge's
+/// endpoints makes it a different edge. Delete and recreate it instead, as
+/// with `UpdateNode`'s `node_type`.
 pub struct UpdateEdge {
     pub edge_type: CoreEdgeType,
 }
@@ -98,9 +97,9 @@ pub struct CreateTrigger {
     pub enabled: bool,
 }
 
-/// `config`, if supplied, must be the same `TriggerConfig` variant the
-/// trigger already has — changing trigger type is a delete + recreate, same
-/// rationale as `UpdateNode`'s immutable `node_type`.
+/// `config`, if supplied, must be the same `TriggerConfig` variant the trigger
+/// already has. Changing trigger type means delete and recreate, as with
+/// `UpdateNode`'s immutable `node_type`.
 pub struct UpdateTrigger {
     pub config: Option<TriggerConfig>,
     pub source_id: Option<Option<Uuid>>,
@@ -295,13 +294,13 @@ impl PipelineRepo {
 
     // -- Node CRUD --
 
-    /// Create a node. Validates the node-level structural rules from the
-    /// `PipelineDag` doc comment that don't require edges to check (rules
-    /// 6 and 7: a `Condition` node needs a non-empty `condition_expr`, a
-    /// `Transport` node needs a `destination_id`) plus root uniqueness
-    /// (rules 1 and 2). The edge-dependent rules (3, 4, 5 — no cycles,
-    /// `Transport`/`DeviceControl` must be leaves, `Condition` needs exactly
-    /// two outgoing edges) can't be checked until edges exist.
+    /// Create a node. Rejects a config shape the node type doesn't use and a second
+    /// `trigger_root` in the same pipeline, and checks that a referenced
+    /// destination and contact list exist. Missing values (an empty
+    /// `condition_expr`, no `destination_id`) are allowed while the pipeline is
+    /// being edited and show up as validation issues instead. The edge-dependent
+    /// rules (no cycles, `Transport`/`DeviceControl` as leaves, `Condition` with
+    /// both branches) can't be checked until edges exist.
     pub async fn create_node(
         &self,
         pipeline_id: Uuid,
@@ -379,10 +378,10 @@ impl PipelineRepo {
         node_from_db(m).map(Some)
     }
 
-    /// Partial update. Only `action_config`, `transport_config`, or
+    /// Partial update. Only the `action_config`, `transport_config`, or
     /// `condition_expr` matching the node's existing (immutable) type may be
-    /// provided — supplying the wrong one is rejected rather than silently
-    /// ignored, same as `create_node`.
+    /// provided; supplying the wrong one is rejected instead of ignored, same as
+    /// `create_node`.
     pub async fn update_node(
         &self,
         node_id: Uuid,
@@ -466,10 +465,9 @@ impl PipelineRepo {
         Ok(updated)
     }
 
-    /// Delete a node. Cascades to any edges referencing it (the
-    /// `pipeline_edges` foreign keys are `ON DELETE CASCADE`) — deleting a
-    /// node mid-graph silently prunes its edges rather than leaving
-    /// dangling references.
+    /// Delete a node. Its edges go with it (the `pipeline_edges` foreign keys are
+    /// `ON DELETE CASCADE`), so deleting a node mid-graph prunes its edges instead
+    /// of leaving dangling references.
     pub async fn delete_node(&self, node_id: Uuid) -> Result<(), VmsError> {
         let node = pipeline_node::Entity::find_by_id(node_id)
             .one(&self.db)
@@ -483,20 +481,15 @@ impl PipelineRepo {
 
     // -- Edge CRUD --
 
-    /// Create an edge. Validates everything from the `PipelineDag` doc
-    /// comment that's checkable without requiring the rest of the graph to
-    /// already be complete: rule 3 (no cycle — via `check_no_cycle`,
-    /// evaluated against the graph *with* this edge added), rule 4
-    /// (`Transport`/`DeviceControl` source nodes can never have an outgoing
-    /// edge, checked immediately rather than waiting for "must be a leaf" to
-    /// matter at compile time), and the shape of rule 5 that's assessable
-    /// per-edge (a `Condition` source can only take `true_branch`/
-    /// `false_branch`, never both from the same source twice, and never
-    /// more than two outgoing edges total). Whether a `Condition` node
-    /// *eventually* gets both branches, and whether every node ends up
-    /// reachable from the root, are still only checked at full compile time
-    /// — those require the graph to be finished, which it isn't yet if
-    /// someone's still wiring it up.
+    /// Create an edge. Validates everything from the `PipelineDag` doc comment
+    /// that can be checked before the graph is complete: rule 3 (no cycle, via
+    /// `check_no_cycle` on the graph *with* this edge added), rule 4
+    /// (`Transport`/`DeviceControl` nodes can never have an outgoing edge), and
+    /// the per-edge part of rule 5 (a `Condition` source only takes
+    /// `true_branch`/`false_branch`, each at most once, and at most two outgoing
+    /// edges in total). Whether a `Condition` node ends up with both branches,
+    /// and whether every node is reachable from the root, are only checked at
+    /// compile time, since the graph may still be half wired.
     pub async fn create_edge(
         &self,
         pipeline_id: Uuid,
@@ -552,9 +545,9 @@ impl PipelineRepo {
     }
 
     /// Update an edge's `edge_type`. Endpoints are immutable (see
-    /// [`UpdateEdge`]); since they can't change, neither the cycle check nor
-    /// the duplicate-pair check from `create_edge` applies here — only the
-    /// source-node/edge-type compatibility and branch-uniqueness checks do.
+    /// [`UpdateEdge`]), so the cycle and duplicate-pair checks from `create_edge`
+    /// don't apply; only the source-node/edge-type compatibility and
+    /// branch-uniqueness checks do.
     pub async fn update_edge(
         &self,
         edge_id: Uuid,
@@ -617,19 +610,16 @@ impl PipelineRepo {
     // -- Cross-entity FK existence checks --
     //
     // `pipeline_nodes.destination_id`/`contact_list_id` and
-    // `pipeline_triggers.source_id`/`camera_id` are all `ON DELETE
-    // RESTRICT` foreign keys, so an unknown id isn't silently accepted —
-    // but without a check here it surfaces as a raw "FOREIGN KEY
-    // constraint failed" `VmsError::Database` (a `500`), not the clean
-    // `404`-mapped not-found error every other cross-entity reference in
-    // this file returns. Caught live while verifying a trigger's
-    // `source_id`/`camera_id` validation; fixed here for nodes'
-    // `destination_id`/`contact_list_id` too since it's the exact same bug
-    // shape.
+    // `pipeline_triggers.source_id`/`camera_id` are all foreign keys (`ON DELETE
+    // RESTRICT`, except `contact_list_id`, which is `SET NULL`), so an unknown id
+    // is never accepted. Without a check here, though, it surfaces as a raw
+    // "FOREIGN KEY constraint failed" `VmsError::Database` (a `500`) instead of
+    // the `404`-mapped not-found error the other cross-entity references in this
+    // file return.
 
-    /// Returns the destination row so callers can also check `enabled` — a
-    /// node created or repointed against a disabled destination is still
-    /// allowed, just immediately marked `unresolved_reference`.
+    /// Returns the destination row so callers can also check `enabled`. A node
+    /// created or repointed against a disabled destination is allowed, but is
+    /// immediately marked `unresolved_reference`.
     async fn require_destination_exists(
         &self,
         destination_id: Uuid,
@@ -650,9 +640,9 @@ impl PipelineRepo {
             .ok_or(VmsError::ContactListNotFound(contact_list_id))
     }
 
-    /// Returns the source row so callers can also check `enabled` — a
-    /// trigger created or repointed against a disabled source is still
-    /// allowed, just immediately marked `unresolved_reference`.
+    /// Returns the source row so callers can also check `enabled`. A trigger
+    /// created or repointed against a disabled source is allowed, but is
+    /// immediately marked `unresolved_reference`.
     async fn require_source_exists(&self, source_id: Uuid) -> Result<source::Model, VmsError> {
         source::Entity::find_by_id(source_id)
             .one(&self.db)
@@ -672,13 +662,11 @@ impl PipelineRepo {
 
     // -- Resource Manager ref-table derivation --
 
-    /// Recompute `pipeline_camera_refs`/`pipeline_source_refs` for
-    /// `pipeline_id` from its current nodes and triggers, replacing
-    /// whatever was stored before in one transaction. Called after every
-    /// node/trigger write (create/update/delete) — recomputing the small
-    /// number of rows one pipeline can have is simpler and just as correct
-    /// as diffing, and this never runs on any hot path (only pipeline-graph
-    /// edits, never pipeline execution).
+    /// Recompute `pipeline_camera_refs`/`pipeline_source_refs` for `pipeline_id`
+    /// from its current nodes and triggers, replacing the stored rows in one
+    /// transaction. Called after every node/trigger write. Recomputing the few
+    /// rows one pipeline has is simpler than diffing, and this only runs on
+    /// graph edits, never during pipeline execution.
     pub async fn recompute_refs(&self, pipeline_id: Uuid) -> Result<(), VmsError> {
         let nodes = self.load_nodes(pipeline_id).await?;
         let triggers = self.load_triggers(pipeline_id).await?;
@@ -786,11 +774,11 @@ impl PipelineRepo {
         trigger_from_db(m).map(Some)
     }
 
-    /// Record (or clear, passing `None`) a trigger's most recent
-    /// filter-evaluation failure, so a bad `evalexpr` filter is visible via
-    /// the trigger's own API representation instead of only a
-    /// `tracing::warn!` line. Silently no-ops if the trigger has since been
-    /// deleted — the evaluator's next tick will simply stop reporting it.
+    /// Record (or clear, with `None`) a trigger's most recent filter-evaluation
+    /// failure, so a bad `evalexpr` filter shows up in the trigger's API
+    /// representation instead of only in a `tracing::warn!` line. A no-op if the
+    /// trigger has since been deleted; the evaluator stops reporting it on its
+    /// next tick.
     pub async fn set_trigger_error(
         &self,
         trigger_id: Uuid,
@@ -812,11 +800,9 @@ impl PipelineRepo {
     }
 
     /// Partial update. `config` cannot change trigger type (see
-    /// [`UpdateTrigger`]'s doc comment). Re-validates the combination of
-    /// whichever fields are being changed against whichever are staying the
-    /// same — e.g. changing just `camera_id` on an existing `Event` trigger
-    /// still needs to be checked against that trigger's existing
-    /// `source_id`, not just the field actually being edited.
+    /// [`UpdateTrigger`]). Changed fields are re-validated together with the
+    /// unchanged ones: changing only `camera_id` on an existing `Event` trigger is
+    /// still checked against that trigger's existing `source_id`.
     pub async fn update_trigger(
         &self,
         trigger_id: Uuid,
@@ -849,9 +835,9 @@ impl PipelineRepo {
             effective_source_id,
             effective_camera_id_input,
         )?;
-        // Only recompute unresolved_reference when source_id is actually
-        // being changed by this call — an update that leaves it alone
-        // shouldn't clear or reassert a status set by something else.
+        // Only recompute unresolved_reference when this call changes source_id.
+        // An update that leaves it alone shouldn't clear or reassert a status
+        // set by something else.
         let mut new_unresolved_reference = None;
         if let Some(src_id) = effective_source_id {
             let source = self.require_source_exists(src_id).await?;
@@ -896,25 +882,25 @@ impl PipelineRepo {
         self.recompute_refs(pipeline_id).await
     }
 
-    /// Create or update the pipeline's one trigger to match `input`, keyed by
-    /// convention — a `pipeline_triggers` row represents its pipeline's single
-    /// `trigger_root` node — rather than a stored FK, since the DAG compiler
-    /// already enforces exactly one `trigger_root` node per pipeline.
+    /// Create or update the pipeline's one trigger to match `input`. By convention
+    /// a `pipeline_triggers` row represents its pipeline's single `trigger_root`
+    /// node, with no stored FK, since the DAG compiler already enforces exactly
+    /// one `trigger_root` node per pipeline.
     pub async fn upsert_node_trigger(
         &self,
         pipeline_id: Uuid,
         input: CreateTrigger,
     ) -> Result<PipelineTrigger, VmsError> {
-        // If more than one trigger row exists for this pipeline (no unique
-        // constraint enforces at most one — see the module doc comment),
-        // update the first and leave the rest alone rather than erroring.
+        // No unique constraint limits a pipeline to one trigger row, so if
+        // several exist, update the first and leave the rest alone instead of
+        // erroring.
         let mut existing = self.load_triggers(pipeline_id).await?;
         let Some(current) = existing.drain(..).next() else {
             return self.create_trigger(pipeline_id, input).await;
         };
 
-        // A trigger's variant can't change via update_trigger (by design — see
-        // its doc comment); switching trigger_type in the UI needs delete+recreate.
+        // update_trigger can't change a trigger's variant (by design, see its doc
+        // comment), so switching trigger_type means delete and recreate.
         if trigger_type_from_config(&input.config) != current.trigger_type {
             self.delete_trigger(current.id).await?;
             return self.create_trigger(pipeline_id, input).await;
@@ -932,9 +918,8 @@ impl PipelineRepo {
         .await
     }
 
-    /// Deletes every trigger row for `pipeline_id` — called when its
-    /// `trigger_root` node is deleted, so no stale enabled trigger survives
-    /// without a node representing it.
+    /// Deletes every trigger row for `pipeline_id`. Called when its `trigger_root`
+    /// node is deleted, so no enabled trigger outlives the node representing it.
     pub async fn delete_triggers_for_pipeline(&self, pipeline_id: Uuid) -> Result<(), VmsError> {
         for t in self.load_triggers(pipeline_id).await? {
             self.delete_trigger(t.id).await?;
@@ -943,10 +928,9 @@ impl PipelineRepo {
     }
 
     /// Called before deleting a source: clears `source_id` and marks
-    /// `unresolved_reference` on every trigger that pointed at it, instead
-    /// of deleting those trigger rows (which used to cascade here) or
-    /// letting `source_id`'s `ON DELETE RESTRICT` reject the delete. Returns
-    /// the affected trigger IDs.
+    /// `unresolved_reference` on every trigger that pointed at it, so the triggers
+    /// are kept and `source_id`'s `ON DELETE RESTRICT` doesn't block the delete.
+    /// Returns the affected triggers.
     pub async fn unlink_deleted_source(
         &self,
         source_id: Uuid,
@@ -968,9 +952,9 @@ impl PipelineRepo {
         Ok(updated)
     }
 
-    /// Marks every trigger currently pointing at `source_id` as having an
-    /// unresolved reference, without touching `source_id` itself — the
-    /// source still exists, just disabled. Returns the affected triggers.
+    /// Marks every trigger pointing at `source_id` as having an unresolved
+    /// reference, leaving `source_id` in place since the source still exists, just
+    /// disabled. Returns the triggers that changed.
     pub async fn mark_source_disabled(
         &self,
         source_id: Uuid,
@@ -978,9 +962,9 @@ impl PipelineRepo {
         self.set_source_unresolved(source_id, true).await
     }
 
-    /// Clears the unresolved-reference status on every trigger currently
-    /// pointing at `source_id` — called when the source is re-enabled.
-    /// Returns the affected triggers.
+    /// Clears the unresolved-reference status on every trigger pointing at
+    /// `source_id`. Called when the source is re-enabled. Returns the triggers that
+    /// changed.
     pub async fn clear_source_unresolved(
         &self,
         source_id: Uuid,
@@ -1035,9 +1019,9 @@ impl PipelineRepo {
         Ok(updated)
     }
 
-    /// Marks every node currently pointing at `destination_id` as having an
-    /// unresolved reference, without touching `destination_id` itself — the
-    /// destination still exists, just disabled. Returns the affected nodes.
+    /// Marks every node pointing at `destination_id` as having an unresolved
+    /// reference, leaving `destination_id` in place since the destination still
+    /// exists, just disabled. Returns the nodes that changed.
     pub async fn mark_destination_disabled(
         &self,
         destination_id: Uuid,
@@ -1045,9 +1029,9 @@ impl PipelineRepo {
         self.set_destination_unresolved(destination_id, true).await
     }
 
-    /// Clears the unresolved-reference status on every node currently
-    /// pointing at `destination_id` — called when the destination is
-    /// re-enabled. Returns the affected nodes.
+    /// Clears the unresolved-reference status on every node pointing at
+    /// `destination_id`. Called when the destination is re-enabled. Returns the
+    /// nodes that changed.
     pub async fn clear_destination_unresolved(
         &self,
         destination_id: Uuid,
@@ -1079,10 +1063,9 @@ impl PipelineRepo {
 
     // -- Pipeline validation --
 
-    /// Every problem currently found with `pipeline_id`'s definition, across
-    /// every category (see `pipeline_validation`). This is the one
-    /// place that combines them — callers never run the individual checks
-    /// themselves.
+    /// Every problem currently found with `pipeline_id`'s definition, across every
+    /// category (see `pipeline_validation`). This is the only place that combines
+    /// the individual checks.
     pub async fn validate_pipeline(
         &self,
         pipeline_id: Uuid,
@@ -1118,10 +1101,10 @@ impl PipelineRepo {
         Ok(issues)
     }
 
-    /// Writes an already-computed issue list onto the pipeline row, without
-    /// recomputing it — shared by `revalidate` and `set_enabled`, which
-    /// needs the issues in hand before it decides whether to also flip the
-    /// `enabled` flag. A no-op if the pipeline no longer exists.
+    /// Writes an already-computed issue list onto the pipeline row without
+    /// recomputing it. Shared by `revalidate` and `set_enabled`, which needs the
+    /// issues before deciding whether to also flip `enabled`. A no-op if the
+    /// pipeline no longer exists.
     async fn persist_validation_issues(
         &self,
         pipeline_id: Uuid,
@@ -1190,13 +1173,12 @@ fn action_type_from_config(cfg: &ActionConfig) -> pipeline_node::ActionType {
 }
 
 /// The camera an action config explicitly targets, for the six action types
-/// that carry a `camera_id: Option<Uuid>` field. Every other action type
-/// operates on an upstream artifact or has no camera concept at all (e.g.
-/// `trigger_alarm_output` addresses a relay by `output_id`, not a camera).
-/// Written as an exhaustive match rather than a wildcard fallback so adding
-/// a camera-scoped variant later forces a decision here instead of silently
-/// defaulting to "no camera". Also used by `pipeline_validation`'s dangling-
-/// camera-reference check.
+/// that carry a `camera_id: Option<Uuid>` field. Every other action type works
+/// on an upstream artifact or has no camera at all (e.g. `trigger_alarm_output`
+/// addresses an alarm output by `output_id`). The match is exhaustive, with no
+/// wildcard, so a new camera-scoped variant forces a decision here instead of
+/// silently defaulting to "no camera". Also used by `pipeline_validation`'s
+/// dangling-camera-reference check.
 pub(super) fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid> {
     match config {
         ActionConfig::ExtractClip(c) => c.camera_id,
@@ -1226,18 +1208,15 @@ pub(super) fn camera_id_from_action_config(config: &ActionConfig) -> Option<Uuid
 ///
 /// A camera is referenced by (a) any *enabled* trigger's resolved
 /// `camera_id`, or (b) any node whose action config carries an explicit
-/// `camera_id` (`camera_id_from_action_config`). For the camera-scoped
-/// action types, `None` means "inherit from the `TriggerContext` at
-/// runtime" (see each config's own doc comment in `vms-core::action`) — in
-/// that case the camera is only statically resolvable if the pipeline also
-/// has at least one camera-scoped enabled trigger, in which case the
-/// node's requirements are applied to *every* such trigger's camera
-/// (over-provisioning a ring buffer on a candidate camera is far cheaper
-/// than silently missing pre-event footage on the real one). If no
-/// trigger resolves a camera either, that node's requirement can't be
-/// placed anywhere and is dropped — a pipeline that only fires from
-/// `Manual`/`Schedule`/unscoped `Event` triggers has no statically knowable
-/// camera for an implicit-camera node until the moment it actually fires.
+/// `camera_id` (`camera_id_from_action_config`). For the camera-scoped action
+/// types, `None` means "inherit from the `TriggerContext` at runtime" (see each
+/// config's doc comment in `vms-core::action`). Such a node's ring-buffer
+/// requirement is applied to the camera of *every* enabled camera-scoped
+/// trigger, because over-provisioning a ring buffer on a candidate camera is
+/// far cheaper than silently missing pre-event footage on the real one. If no
+/// trigger resolves a camera, the requirement is dropped: a pipeline that only
+/// fires from `Manual`/`Schedule`/unscoped `Event` triggers has no statically
+/// knowable camera for that node until it actually fires.
 fn derive_camera_refs(
     nodes: &[PipelineNode],
     triggers: &[PipelineTrigger],
@@ -1296,11 +1275,11 @@ fn derive_camera_refs(
         .collect()
 }
 
-/// Ring buffer seconds an `ExtractClip` node requires — `0` for every other
-/// action type. `pre_event_secs + EXTRACT_CLIP_KEYFRAME_SEARCH_SECS +
+/// Ring buffer seconds an `ExtractClip` node requires (`0` for every other
+/// action type): `pre_event_secs + EXTRACT_CLIP_KEYFRAME_SEARCH_SECS +
 /// post_event_secs + RING_BUFFER_EVICTION_SAFETY_SECS`, capped at
-/// `MAX_RING_BUFFER_SECS` so one misconfigured node can't blow up
-/// per-camera memory use.
+/// `MAX_RING_BUFFER_SECS` so one misconfigured node can't blow up per-camera
+/// memory use.
 fn extract_clip_ring_buffer_secs(action_config: &ActionConfig) -> u32 {
     let ActionConfig::ExtractClip(cfg) = action_config else {
         return 0;
@@ -1313,9 +1292,9 @@ fn extract_clip_ring_buffer_secs(action_config: &ActionConfig) -> u32 {
 }
 
 /// Serialize whichever of `action_config`/`transport_config`/`condition_expr`
-/// applies to `node_type` into the single JSON blob `pipeline_nodes.config`
-/// stores. Callers must run `validate_create_shape` first — this assumes the
-/// combination is already known-valid and will panic via `expect` if not.
+/// applies to `node_type` into the single JSON blob stored in
+/// `pipeline_nodes.config`. Callers run `validate_create_shape` first; this
+/// doesn't re-check the combination and ignores fields `node_type` doesn't use.
 fn config_json_for(
     node_type: &CoreNodeType,
     action_config: &Option<ActionConfig>,
@@ -1323,9 +1302,9 @@ fn config_json_for(
     condition_expr: &Option<String>,
 ) -> Result<serde_json::Value, VmsError> {
     let value = match node_type {
-        // `action_config` may be absent (node not fully configured yet) —
-        // stored as JSON null, which `node_from_db` reads back as `None`
-        // rather than trying to deserialize it as an `ActionConfig`.
+        // `action_config` may be absent while the node isn't fully configured.
+        // It's stored as JSON null, which `node_from_db` reads back as `None`
+        // instead of trying to deserialize it as an `ActionConfig`.
         CoreNodeType::Action | CoreNodeType::DeviceControl => match action_config {
             Some(ac) => serde_json::to_value(ac)?,
             None => serde_json::Value::Null,
@@ -1339,13 +1318,12 @@ fn config_json_for(
     Ok(value)
 }
 
-/// Rule 7 from the `PipelineDag` doc comment: a node must only carry the one
-/// config shape its type actually uses. A node missing a value it'll
-/// eventually need (e.g. an empty `condition_expr`, no `destination_id`) is
-/// deliberately *not* checked here — that's a legitimate work-in-progress
-/// state while a pipeline is being edited, not a shape violation. Rule 6
-/// (exactly one trigger_root) is checked by the caller instead, since it
-/// depends on sibling nodes already in the pipeline.
+/// Rejects a config the node's type doesn't use (e.g. a `transport_config` on
+/// an `Action` node). A missing value the node will eventually need (an empty
+/// `condition_expr`, no `destination_id`) is deliberately *not* checked here:
+/// that's the normal work-in-progress state while a pipeline is being edited.
+/// Root uniqueness depends on sibling nodes already in the pipeline, so the
+/// caller checks it.
 fn validate_create_shape(
     node_type: &CoreNodeType,
     action_config: &Option<ActionConfig>,
@@ -1393,12 +1371,12 @@ fn validate_create_shape(
     Ok(())
 }
 
-/// Same idea as `validate_create_shape`, but for a partial update: fields
-/// left unset (`None`) are always fine — this only rejects a field that
-/// *was* provided but doesn't belong to the node's (immutable) type.
-/// `destination_id` is the doubly-`Option`al update shape (see `UpdateNode`):
-/// only a *provided* value (`Some(Some(_))`) is shape-checked — explicitly
-/// clearing it (`Some(None)`) is always fine, on any node type.
+/// Same idea as `validate_create_shape`, for a partial update: unset (`None`)
+/// fields are always fine, and only a provided field that doesn't belong to
+/// the node's (immutable) type is rejected. `destination_id` uses the
+/// double-`Option` update shape (see `UpdateNode`): only a provided value
+/// (`Some(Some(_))`) is shape-checked, and clearing it (`Some(None)`) is
+/// allowed on any node type.
 fn validate_update_shape(
     node_type: &CoreNodeType,
     action_config: &Option<ActionConfig>,
@@ -1514,18 +1492,17 @@ fn edge_from_db(m: pipeline_edge::Model) -> PipelineEdge {
     }
 }
 
-/// Per-edge checks from `create_edge`/`update_edge` that don't depend on
-/// whether the edge is new or replacing an existing one's `edge_type`:
+/// Per-edge checks shared by `create_edge` and `update_edge`:
 /// - `Transport`/`DeviceControl` sources can never have an outgoing edge
-///   (rule 4 — always true, not just once the graph is "done").
+///   (rule 4, which holds at every stage of editing).
 /// - A `Condition` source's edges must be `true_branch`/`false_branch`,
-///   never `default`; a non-`Condition` source's edges must be `default`,
-///   never a branch tag (rule 5's per-edge half).
-/// - A `Condition` source may not end up with two edges of the same branch,
-///   or more than two outgoing edges at all.
+///   never `default`; any other source's edges must be `default`, never a
+///   branch tag (the per-edge half of rule 5).
+/// - A `Condition` source may not have two edges of the same branch, or more
+///   than two outgoing edges at all.
 ///
-/// `sibling_edges` should be every *other* outgoing edge already recorded
-/// for `from_node` (i.e. excluding the one being replaced, for an update).
+/// `sibling_edges` is every *other* outgoing edge already recorded for
+/// `from_node` (for an update, excluding the one being replaced).
 fn validate_new_edge(
     from_node: &PipelineNode,
     edge_type: &CoreEdgeType,
@@ -1617,11 +1594,11 @@ fn trigger_type_to_db(core_type: &CoreTriggerType) -> pipeline_trigger::TriggerT
     }
 }
 
-/// The `trigger_type` a given `TriggerConfig` implies — `PipelineTrigger`
-/// and the `pipeline_triggers.trigger_type` column both carry this as a
-/// separate field from `config` even though `config`'s own serde tag
-/// already encodes it, mirroring how `pipeline_nodes.action_type` mirrors
-/// `ActionConfig`'s tag (kept for querying without deserializing `config`).
+/// The `trigger_type` a given `TriggerConfig` implies. `PipelineTrigger` and
+/// the `pipeline_triggers.trigger_type` column store it separately from
+/// `config` even though `config`'s serde tag already encodes it, just as
+/// `pipeline_nodes.action_type` mirrors `ActionConfig`'s tag, so it can be
+/// queried without deserializing `config`.
 fn trigger_type_from_config(config: &TriggerConfig) -> CoreTriggerType {
     match config {
         TriggerConfig::Schedule { .. } => CoreTriggerType::Schedule,
@@ -1632,15 +1609,15 @@ fn trigger_type_from_config(config: &TriggerConfig) -> CoreTriggerType {
     }
 }
 
-/// The top-level `camera_id` column to store for a given config + the
+/// The top-level `camera_id` column to store for a given config and
 /// caller-supplied top-level `camera_id`.
 ///
-/// For `System` triggers this is *always* derived from
-/// `TriggerConfig::System::camera_id`, never from the caller's top-level
-/// value (rejected earlier by `validate_trigger_shape`) — `evaluate_event`
-/// (`vms-engine`) reads the config's own `camera_id` for `System` triggers,
-/// not the top-level column, so the two must never be able to diverge. For
-/// every other trigger type the top-level value passes through unchanged.
+/// For `System` triggers this is always derived from
+/// `TriggerConfig::System::camera_id`, never from the caller's top-level value
+/// (which `validate_trigger_shape` already rejects). `evaluate_event`
+/// (`vms-engine`) reads the config's own `camera_id` for `System` triggers, not
+/// the top-level column, so the two must never diverge. For every other
+/// trigger type the top-level value passes through unchanged.
 fn effective_camera_id(config: &TriggerConfig, camera_id: Option<Uuid>) -> Option<Uuid> {
     match config {
         TriggerConfig::System {
@@ -1654,21 +1631,20 @@ fn effective_camera_id(config: &TriggerConfig, camera_id: Option<Uuid>) -> Optio
 /// Rejects `source_id`/`camera_id` combinations that `vms-engine`'s
 /// `TriggerEvaluator` can't act on correctly for `config`'s trigger type:
 ///
-/// - `Schedule`/`Manual` triggers never look at either field — reject both.
-/// - `Event` triggers reject having *both* set: `start_event_listener`
-///   subscribes to the source topic if `source_id` is set, the camera topic
-///   only as a fallback when it isn't — so a `camera_id` alongside a
-///   `source_id` would silently never be checked at subscription time, then
-///   never match at evaluation time (an event arriving on a source topic
-///   has no `camera_id`), making the trigger permanently unreachable. Both
-///   unset is valid — it broadens the subscription to every resource the
-///   pipeline touches.
-/// - `System` triggers scope to a camera via `config`'s own field, not the
-///   top-level one (see `effective_camera_id`) — reject a directly supplied
-///   top-level `camera_id` so there's exactly one place to set it. Reject
-///   `source_id` outright; System triggers always listen on the global
-///   `TopicKey::System`.
-/// - `Stat` triggers have no `source_id` concept; `camera_id` is the *only*
+/// - `Schedule`/`Manual` triggers never look at either field, so both are
+///   rejected.
+/// - `Event` triggers reject having *both* set. `start_event_listener`
+///   subscribes to the source topic when `source_id` is set and falls back to
+///   the camera topic only when it isn't, so a `camera_id` next to a
+///   `source_id` would never be subscribed to, and would never match at
+///   evaluation time either (an event on a source topic has no `camera_id`).
+///   The trigger would be permanently unreachable. Both unset is valid and
+///   broadens the subscription to every resource the pipeline touches.
+/// - `System` triggers scope to a camera through `config`'s own field (see
+///   `effective_camera_id`), so a top-level `camera_id` is rejected to keep a
+///   single place to set it. `source_id` is rejected outright; System
+///   triggers always listen on the global `TopicKey::System`.
+/// - `Stat` triggers have no `source_id` concept. `camera_id` is the *only*
 ///   way to scope a per-feed metric (`FeedBitrateKbps`/`FeedPacketLossPercent`),
 ///   so it's accepted freely.
 fn validate_trigger_shape(
@@ -2354,7 +2330,7 @@ mod tests {
     #[test]
     fn implicit_camera_extract_clip_with_no_scoped_trigger_is_dropped() {
         // Nothing statically identifies which camera this would run
-        // against — a Manual/Schedule-only pipeline, or an unscoped Event
+        // against: a Manual/Schedule-only pipeline, or an unscoped Event
         // trigger, can't resolve it until the moment it actually fires.
         let nodes = vec![action_node(extract_clip_config(None))];
         let triggers = vec![trigger_row(schedule_config(), None, None, true)];
@@ -2700,7 +2676,7 @@ mod tests {
         }
     }
 
-    /// An `UpdateNode` that leaves every field untouched — start from this
+    /// An `UpdateNode` that leaves every field untouched. Start from this
     /// and override just the field(s) a test cares about.
     fn bare_update_node() -> UpdateNode {
         UpdateNode {
@@ -2734,9 +2710,9 @@ mod tests {
             .unwrap();
 
         // Dangling: references a camera that existed when the node was
-        // created (so recompute_refs' own FK-guarded pipeline_camera_ref
-        // write succeeds) but is deleted afterward — the real-world way
-        // this happens, not something creatable directly.
+        // created (so recompute_refs' FK-guarded pipeline_camera_ref write
+        // succeeds) but is deleted afterward. That's how this happens in
+        // practice; it can't be created directly.
         let camera = camera::ActiveModel {
             id: Set(Uuid::new_v4()),
             name: Set("test cam".into()),
@@ -2803,13 +2779,11 @@ mod tests {
         .await
         .unwrap();
 
-        // Malformed + disconnected: a pre-existing bad record inserted
-        // directly, bypassing validate_create_shape entirely — the
-        // wrong-shape check it performs can't be produced through the repo
-        // API at all, so this simulates a row that predates that check
-        // existing. Left with no edges, so it's also unreachable from the
-        // root, and being an extra parentless node it independently trips
-        // PipelineDag::compile's root-count rule too.
+        // Malformed + disconnected: a bad record inserted directly, bypassing
+        // validate_create_shape, since the repo API can't produce a wrong-shape
+        // row. This stands in for a row written before that check existed. It
+        // has no edges, so it's unreachable from the root, and as an extra
+        // parentless node it also trips PipelineDag::compile's root-count rule.
         let dest = destination::ActiveModel {
             id: Set(Uuid::new_v4()),
             name: Set("test".into()),
@@ -2861,7 +2835,7 @@ mod tests {
         let repo = test_repo().await;
         let pipeline_id = make_pipeline(&repo).await;
 
-        // No nodes at all yet — missing trigger_root is a structural violation.
+        // No nodes at all yet, so the missing trigger_root is a structural violation.
         let issues = repo.revalidate(pipeline_id).await.unwrap();
         assert_eq!(issues.len(), 1);
 
@@ -2913,7 +2887,7 @@ mod tests {
         let repo = test_repo().await;
         let pipeline_id = make_pipeline(&repo).await;
 
-        // Incomplete Transport node — never calling repo.revalidate()
+        // Incomplete Transport node. repo.revalidate() is never called
         // directly, so this only passes if create_node triggers it itself.
         repo.create_node(pipeline_id, bare_node(CoreNodeType::Transport))
             .await
@@ -2923,7 +2897,7 @@ mod tests {
             .contains(&ValidationCategory::ConfigIncomplete));
 
         // Disconnected only appears once a root exists to be unreachable
-        // from — proves this second create_node call re-ran validation too.
+        // from, which proves the second create_node call re-ran validation too.
         repo.create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
             .await
             .unwrap();
@@ -2966,8 +2940,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Not asserting the exact count — both the disconnected node and
-        // the extra parentless node trip their own separate checks.
+        // Not asserting the exact count: the disconnected node and the
+        // extra parentless node each trip their own check.
         let disconnected_count = stored_issue_count(&repo, pipeline_id).await;
         assert!(disconnected_count > 0);
 
@@ -3051,7 +3025,7 @@ mod tests {
         .unwrap();
         assert_eq!(stored_issue_count(&repo, pipeline_id).await, 0);
 
-        // The camera is deleted without touching this pipeline again — its
+        // The camera is deleted without touching this pipeline again, so its
         // stored issues stay stale until something re-checks them.
         camera::Entity::delete_by_id(camera.id)
             .exec(&repo.db)
@@ -3069,9 +3043,9 @@ mod tests {
         let repo = test_repo().await;
         let pipeline_id = make_pipeline(&repo).await;
 
-        // root -> wired is a complete, valid pipeline on its own; the
-        // second action node is left unwired so its only problem is being
-        // disconnected — a warning, not an error.
+        // root -> wired is a complete, valid pipeline on its own. The second
+        // action node is left unwired, so its only problem is being
+        // disconnected, which is a warning, not an error.
         let root = repo
             .create_node(pipeline_id, bare_node(CoreNodeType::TriggerRoot))
             .await
@@ -3116,7 +3090,7 @@ mod tests {
         let repo = test_repo().await;
         let pipeline_id = make_pipeline(&repo).await;
 
-        // No nodes at all — a structural-violation error.
+        // No nodes at all: a structural-violation error.
         let outcome = repo.set_enabled(pipeline_id, true).await.unwrap();
         assert!(matches!(outcome, EnableOutcome::BlockedByErrors(_)));
         assert!(!repo.get(pipeline_id).await.unwrap().unwrap().enabled);
@@ -3274,7 +3248,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(repo.mark_source_disabled(source_id).await.unwrap().len(), 1);
-        // Already marked — nothing left to change.
+        // Already marked, so nothing changes.
         assert_eq!(repo.mark_source_disabled(source_id).await.unwrap().len(), 0);
     }
 
@@ -3312,8 +3286,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Complete and valid on its own — confirm it enables before the
-        // source is touched, then disable again to test the actual case.
+        // Complete and valid on its own. Confirm it enables before the source
+        // is touched, then disable it again to test the actual case.
         assert!(matches!(
             repo.set_enabled(pipeline_id, true).await.unwrap(),
             EnableOutcome::Applied
@@ -3598,7 +3572,7 @@ mod tests {
             repo.mark_destination_disabled(dest_id).await.unwrap().len(),
             1
         );
-        // Already marked — nothing left to change.
+        // Already marked, so nothing changes.
         assert_eq!(
             repo.mark_destination_disabled(dest_id).await.unwrap().len(),
             0
@@ -3636,8 +3610,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Complete and valid on its own — confirm it enables before the
-        // destination is touched, then disable again to test the actual case.
+        // Complete and valid on its own. Confirm it enables before the
+        // destination is touched, then disable it again to test the actual case.
         assert!(matches!(
             repo.set_enabled(pipeline_id, true).await.unwrap(),
             EnableOutcome::Applied

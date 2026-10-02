@@ -18,9 +18,9 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(TileProfile::Name).text().not_null())
-                    // Opaque site identifier — Coordinator (or, before that
-                    // integration, the FE itself) is the sole owner of site
-                    // identity; deliberately no local `sites` table/FK here.
+                    // Opaque site identifier. Site identity is owned outside this backend (by
+                    // the Coordinator, or by the frontend when there is none), so there is
+                    // deliberately no local `sites` table or FK.
                     .col(ColumnDef::new(TileProfile::SiteId).uuid().not_null())
                     .col(
                         ColumnDef::new(TileProfile::CreatedAt)

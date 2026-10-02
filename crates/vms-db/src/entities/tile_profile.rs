@@ -9,7 +9,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub name: String,
-    /// Opaque site identifier — no local FK; see the migration's doc comment.
+    /// Opaque site identifier with no local FK; see the migration's comment.
     pub site_id: Uuid,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,

@@ -3,8 +3,8 @@ use sea_orm_migration::prelude::*;
 use super::m20260101_000008_create_pipeline_triggers::PipelineTrigger;
 
 /// Surfaces a trigger's most recent filter-evaluation failure (bad syntax,
-/// unknown identifier) to the API instead of only `tracing::warn!` —
-/// previously such a trigger just silently never fired.
+/// unknown identifier) through the API, so a broken trigger is visible instead
+/// of silently never firing with only a `tracing::warn!` to show for it.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 

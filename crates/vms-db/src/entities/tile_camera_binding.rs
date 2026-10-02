@@ -13,7 +13,7 @@ pub struct Model {
     pub profile_id: Uuid,
     #[sea_orm(primary_key, auto_increment = false)]
     pub tile_id: Uuid,
-    /// Opaque site identifier — no local FK; see the migration's doc comment.
+    /// Opaque site identifier with no local FK; see the migration's comment.
     #[sea_orm(primary_key, auto_increment = false)]
     pub site_id: Uuid,
     pub camera_id: Uuid,

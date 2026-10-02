@@ -1,12 +1,12 @@
-//! Tile/matrix camera-layout profiles — moved from the FE's local sqlite
-//! (`tile_profiles` / `tile_formations` / `tile_camera_bindings` /
-//! `profile_site_assignments` in `AppDatabase.cpp`) onto the BE, so any
-//! client (not just the desktop FE with a local sqlite file) can read and
-//! write the same layout data.
+//! Tile/matrix camera-layout profiles, stored in the backend so every client
+//! reads and writes the same layouts. The tables mirror the ones the desktop
+//! frontend keeps in its local SQLite database (`tile_profiles` /
+//! `tile_formations` / `tile_camera_bindings` / `profile_site_assignments` in
+//! `AppDatabase.cpp`).
 //!
-//! `site_id` throughout this module is an opaque identifier with no local
-//! FK — Coordinator (or, today, the FE itself) is the sole owner of site
-//! identity; this repo just stores whatever `site_id` a caller supplies.
+//! `site_id` throughout this module is an opaque identifier with no local FK.
+//! Site identity is owned by the Coordinator (or by the frontend when there is
+//! none); this repo stores whatever `site_id` a caller supplies.
 
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait,
@@ -55,9 +55,9 @@ impl TileLayoutRepo {
 
     // -- Tile profiles --
 
-    /// Profiles visible to `site_id`: the ones it owns, plus any shared to
-    /// it via `profile_site_assignments` — mirrors the FE's own
-    /// `loadTileProfilesForSite` UNION query.
+    /// Profiles visible to `site_id`: the ones it owns plus any shared to it via
+    /// `profile_site_assignments`. Mirrors the frontend's `loadTileProfilesForSite`
+    /// UNION query.
     pub async fn list_profiles_for_site(
         &self,
         site_id: Uuid,
@@ -138,7 +138,7 @@ impl TileLayoutRepo {
 
     // -- Profile <-> site assignments --
 
-    /// Idempotent — matches the FE's `INSERT OR IGNORE`.
+    /// Idempotent, matching the frontend's `INSERT OR IGNORE`.
     pub async fn assign_profile_to_site(
         &self,
         profile_id: Uuid,
@@ -262,10 +262,9 @@ impl TileLayoutRepo {
             .map_err(db_err)
     }
 
-    /// Upsert — matches the FE's `INSERT OR REPLACE`. `tile_id` must be a
-    /// formation belonging to `profile_id`, checked here rather than trusted
-    /// from the caller (same reasoning as `pipeline_nodes`' parent-child
-    /// membership check).
+    /// Upsert, matching the frontend's `INSERT OR REPLACE`. `tile_id` must be a
+    /// formation belonging to `profile_id`. That is checked here instead of
+    /// trusted from the caller, like the parent-child check for `pipeline_nodes`.
     pub async fn set_binding(
         &self,
         profile_id: Uuid,
@@ -302,8 +301,8 @@ impl TileLayoutRepo {
         }
     }
 
-    /// Clears a binding. Absence of a row *is* "unassigned" — no sentinel
-    /// value needed, matching how a deleted camera cascades this row away.
+    /// Clears a binding. A missing row means "unassigned", so no sentinel value is
+    /// needed; a deleted camera cascades the row away the same way.
     pub async fn clear_binding(
         &self,
         profile_id: Uuid,
@@ -559,9 +558,8 @@ mod tests {
             .await
             .unwrap();
 
-        // The profile — and its one formation — is visible to both the
-        // owning site and the site it was shared to, but not a third,
-        // uninvolved site.
+        // The profile and its one formation are visible to the owning site and
+        // the site it was shared to, but not to an uninvolved third site.
         let owner_profiles = repo.list_profiles_for_site(site_owner).await.unwrap();
         let shared_profiles = repo.list_profiles_for_site(site_shared).await.unwrap();
         let uninvolved_profiles = repo.list_profiles_for_site(site_uninvolved).await.unwrap();
@@ -631,11 +629,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Only site_a's binding (the one pointing at the deleted camera)
-        // is gone — site_b's binding, and the shared formation itself,
-        // are untouched. This is deliberately stricter than the FE's own
-        // sweep, which deletes the whole formation (breaking every site
-        // sharing it) whenever any one site's bound camera disappears.
+        // Only site_a's binding (the one pointing at the deleted camera) is
+        // gone. site_b's binding and the shared formation are untouched. This is
+        // deliberately stricter than the frontend's own sweep, which deletes the
+        // whole formation (breaking every site sharing it) when any one site's
+        // bound camera disappears.
         assert!(repo
             .list_bindings(profile.id, site_a)
             .await
@@ -721,9 +719,8 @@ mod tests {
         assert_eq!(remaining_assignments, 0);
     }
 
-    /// Test-only accessor — `TileLayoutRepo::db` is private, and these two
-    /// tests need it to assert on rows the repo's own API has no "count"
-    /// method for.
+    /// Test-only accessor. `TileLayoutRepo::db` is private, and these tests need
+    /// to count rows the repo API has no method for.
     fn repo_db(repo: &TileLayoutRepo) -> &DatabaseConnection {
         &repo.db
     }

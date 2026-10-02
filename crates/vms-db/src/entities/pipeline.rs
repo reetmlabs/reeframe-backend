@@ -22,13 +22,13 @@ pub struct Model {
     pub description: Option<String>,
     pub pipeline_type: PipelineType,
     pub enabled: bool,
-    /// UUID of the user who created this pipeline (references users table, not in this schema).
+    /// UUID of the user who created this pipeline. Not a foreign key.
     pub created_by: Option<Uuid>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
-    /// Serialized `Vec<pipeline_validation::ValidationIssue>` from the most
-    /// recent `PipelineRepo::revalidate` call — recomputed on every node/
-    /// edge/trigger save and on enable, never on read.
+    /// Serialized `Vec<pipeline_validation::ValidationIssue>` from the most recent
+    /// `PipelineRepo::revalidate` call. Recomputed on every node/edge/trigger save
+    /// and on enable, never on read.
     pub validation_issues: Json,
 }
 

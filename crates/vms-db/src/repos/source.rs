@@ -66,7 +66,7 @@ impl SourceRepo {
             .map_err(db_err)
     }
 
-    /// Returns the row with credential fields **decrypted** — ready for adapter use.
+    /// Returns the row with credential fields **decrypted**, ready for adapter use.
     pub async fn get_decrypted(&self, id: Uuid) -> Result<Option<source::Model>, VmsError> {
         let Some(mut src) = self.get(id).await? else {
             return Ok(None);

@@ -34,11 +34,10 @@ impl DailyRecordingCoverageRepo {
         Self { db }
     }
 
-    /// Insert or overwrite the row for `(camera_id, day)`. Called from a
-    /// single-threaded background sweep, never concurrently for the same
-    /// key — a plain find-then-write is enough, no need for a
-    /// backend-specific `ON CONFLICT`/`ON DUPLICATE KEY` upsert (MySQL,
-    /// Postgres, and SQLite all differ there).
+    /// Insert or overwrite the row for `(camera_id, day)`. Only called from a
+    /// single-threaded background sweep, never concurrently for the same key, so
+    /// a plain find-then-write is enough and avoids backend-specific upsert syntax
+    /// (`ON CONFLICT`/`ON DUPLICATE KEY` differ across MySQL, Postgres, and SQLite).
     pub async fn upsert(
         &self,
         input: UpsertDailyCoverage,
@@ -97,8 +96,8 @@ impl DailyRecordingCoverageRepo {
             .map_err(db_err)
     }
 
-    /// Same as [`Self::list_range`], across multiple cameras at once — the
-    /// fleet-overview shape, one query instead of N.
+    /// Same as [`Self::list_range`] across several cameras in one query, for the
+    /// fleet overview.
     pub async fn list_range_bulk(
         &self,
         camera_ids: &[Uuid],
@@ -115,8 +114,8 @@ impl DailyRecordingCoverageRepo {
             .map_err(db_err)
     }
 
-    /// Whether a row already exists for `(camera_id, day)` — used by the
-    /// backfill pass to skip days it's already computed.
+    /// Whether a row already exists for `(camera_id, day)`. Used by the backfill
+    /// pass to skip days it has already computed.
     pub async fn exists(&self, camera_id: Uuid, day: Date) -> Result<bool, VmsError> {
         daily_recording_coverage::Entity::find()
             .filter(daily_recording_coverage::Column::CameraId.eq(camera_id))

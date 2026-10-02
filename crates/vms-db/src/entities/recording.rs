@@ -10,7 +10,7 @@ pub struct Model {
     pub file_path: String,
     pub chunk_index: i32,
     pub start_time: DateTimeWithTimeZone,
-    /// `None` while the chunk is still being written — backfilled when
+    /// `None` while the chunk is still being written; backfilled when
     /// `splitmuxsink` closes the fragment.
     pub end_time: Option<DateTimeWithTimeZone>,
     pub size_bytes: Option<i64>,

@@ -3,9 +3,9 @@ use sea_orm_migration::prelude::*;
 use super::m20260101_000008_create_pipeline_triggers::PipelineTrigger;
 
 /// Set when the trigger's source is deleted or disabled, instead of the
-/// trigger row being dropped or the delete/disable being blocked. Distinct
-/// from `last_error`, which tracks a runtime filter-evaluation failure, not
-/// a structural problem with what the trigger points at.
+/// trigger row being dropped or the delete/disable being blocked. Separate
+/// from `last_error`, which tracks runtime filter-evaluation failures; this
+/// flag marks a structural problem with what the trigger points at.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 

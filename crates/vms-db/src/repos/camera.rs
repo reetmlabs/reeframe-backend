@@ -223,9 +223,9 @@ impl CameraRepo {
         Ok(())
     }
 
-    /// Persist operator intent — called from the `recording/start`/`stop`
-    /// routes before touching `MediaManager`, regardless of whether that
-    /// call succeeds, so this always reflects the last explicit request.
+    /// Persist operator intent. Called from the `recording/start`/`stop` routes
+    /// before touching `MediaManager`, whether or not that call succeeds, so this
+    /// always reflects the last explicit request.
     pub async fn set_desired_recording(&self, id: Uuid, desired: bool) -> Result<(), VmsError> {
         let cam = camera::Entity::find_by_id(id)
             .one(&self.db)

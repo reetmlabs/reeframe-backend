@@ -64,9 +64,8 @@ impl SettingsRepo {
         Ok(())
     }
 
-    /// Called once a restart-required setting's stored value has actually
-    /// been applied (i.e. at the startup that follows the change) — clears
-    /// the "waiting for a restart" flag.
+    /// Called once a restart-required setting's stored value has been applied (at
+    /// the startup following the change). Clears the "waiting for a restart" flag.
     pub async fn clear_pending(&self, key: &str) -> Result<(), VmsError> {
         if let Some(row) = self.get(key).await? {
             let mut active: ActiveModel = row.into_active_model();

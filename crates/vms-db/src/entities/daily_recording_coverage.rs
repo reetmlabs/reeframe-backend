@@ -10,12 +10,11 @@ pub struct Model {
     /// Calendar day this row summarizes, in this camera's own configured
     /// timezone, not the viewer's (see `coverage.rs`'s module doc for why).
     pub day: Date,
-    /// Sum of merged session spans for `day` — an in-progress session
-    /// contributes 0 until it closes, same as the reference algorithm this
-    /// mirrors (`RecordingModel::dailySummaries` in the Qt frontend).
+    /// Sum of merged session spans for `day`. An in-progress session contributes 0
+    /// until it closes, matching `RecordingModel::dailySummaries` in the Qt frontend.
     pub coverage_seconds: i64,
-    /// `[{start, end, chunk_count, size_bytes}]` — `end: null` marks the
-    /// session that's still being recorded, if any.
+    /// `[{start, end, chunk_count, size_bytes}]`. `end: null` marks the session
+    /// that's still being recorded, if any.
     pub session_ranges: Json,
     pub chunk_count: i32,
     /// `None` if any contributing chunk's size is still unknown.
@@ -23,9 +22,8 @@ pub struct Model {
     /// `true` once `day` is fully in the past and will never be recomputed
     /// again, other than by the retention-purge hook.
     pub is_finalized: bool,
-    /// `true` once retention has deleted every chunk `day` had — the row is
-    /// kept, zeroed, so the UI can tell "recorded, then purged" apart from
-    /// "never recorded."
+    /// `true` once retention has deleted every chunk `day` had. The row is kept,
+    /// zeroed, so the UI can tell "recorded, then purged" apart from "never recorded".
     pub purged_by_retention: bool,
     pub computed_at: DateTimeWithTimeZone,
 }

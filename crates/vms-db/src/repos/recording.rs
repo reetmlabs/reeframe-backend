@@ -31,10 +31,10 @@ impl RecordingRepo {
         Self { db }
     }
 
-    /// Insert a row the instant `splitmuxsink` opens a new fragment
-    /// (`format-location-full`) — this is the one point that gives the real
-    /// wall-clock instant a chunk started; deriving it from filenames/chunk
-    /// index math would drift silently across reconnects.
+    /// Insert a row as soon as `splitmuxsink` opens a new fragment
+    /// (`format-location-full`). That is the only point that gives the real
+    /// wall-clock start of a chunk; deriving it from filenames or chunk-index math
+    /// would drift silently across reconnects.
     pub async fn open_chunk(&self, input: OpenChunk) -> Result<recording::Model, VmsError> {
         ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -55,11 +55,10 @@ impl RecordingRepo {
     /// Backfill `end_time`/`size_bytes` when `splitmuxsink-fragment-closed`
     /// fires and the previous file is finalized on disk.
     ///
-    /// Looked up by `(camera_id, file_path)` rather than a DB id — the
-    /// `vms-media` producer of this event has no DB access (by design, see
-    /// `vms_core::RecordingChunkEvent`) and therefore never learns the row's
-    /// generated id; the still-open row for this exact path is always
-    /// unique, so this is an unambiguous lookup.
+    /// Looked up by `(camera_id, file_path)` instead of a DB id because the
+    /// `vms-media` producer of this event has no DB access by design (see
+    /// `vms_core::RecordingChunkEvent`) and never learns the row's generated id.
+    /// The still-open row for a given path is always unique.
     pub async fn close_chunk_by_path(
         &self,
         camera_id: Uuid,
@@ -67,9 +66,8 @@ impl RecordingRepo {
         end_time: DateTimeWithTimeZone,
         size_bytes: i64,
     ) -> Result<(), VmsError> {
-        // No `tracing` dependency in this crate — a missing match is
-        // surfaced as an error so the caller (which does have `tracing`)
-        // logs it, rather than being silently swallowed here.
+        // This crate has no `tracing` dependency, so a missing match is returned
+        // as an error for the caller to log instead of being swallowed here.
         let row = recording::Entity::find()
             .filter(recording::Column::CameraId.eq(camera_id))
             .filter(recording::Column::FilePath.eq(file_path))
@@ -90,11 +88,10 @@ impl RecordingRepo {
         Ok(())
     }
 
-    /// Delete the still-open row for a fragment that `splitmuxsink` opened
-    /// but never wrote any real data to (`RecordingChunkEvent::Discarded`)
-    /// — a byproduct of a reconnect bug, not a real chunk of footage, so it
-    /// has no place in the index at all rather than being backfilled with
-    /// zero duration/size.
+    /// Delete the still-open row for a fragment that `splitmuxsink` opened but
+    /// never wrote real data to (`RecordingChunkEvent::Discarded`). Such a
+    /// fragment is a byproduct of a reconnect bug, not footage, so it is removed
+    /// from the index instead of being backfilled with zero duration and size.
     pub async fn discard_open_chunk(
         &self,
         camera_id: Uuid,
@@ -133,12 +130,11 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
-    /// Chunks whose `start_time` falls in `[from, to)`, oldest first — unlike
-    /// [`Self::list_for_camera`], this is not overlap-based: a chunk is
-    /// selected by its start time alone, matching how the daily-coverage
-    /// aggregator (and the FE's own `dailySummaries()`) buckets a whole
-    /// chunk into the single day its start falls on, never splitting one
-    /// across a day boundary.
+    /// Chunks whose `start_time` falls in `[from, to)`, oldest first. Unlike
+    /// [`Self::list_for_camera`] this is not overlap-based: each chunk belongs to
+    /// the day its start falls on and is never split across a day boundary,
+    /// matching the daily-coverage aggregator and the frontend's
+    /// `dailySummaries()`.
     pub async fn list_starting_in_range_for_camera(
         &self,
         camera_id: Uuid,
@@ -155,14 +151,13 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
-    /// Resolve a specific instant to the chunk covering it —
-    /// `start_time <= at` and (`end_time IS NULL` or `at < end_time`), i.e.
-    /// including the chunk currently being written.
+    /// Resolve an instant to the chunk covering it: `start_time <= at` and
+    /// (`end_time IS NULL` or `at < end_time`), which includes the chunk
+    /// currently being written.
     ///
-    /// Ordered by `start_time DESC` in case more than one row matches (e.g. a
-    /// chunk orphaned mid-recording with `end_time` never set) — the most
-    /// recently started match is always the correct/current chunk, never a
-    /// stale earlier one.
+    /// Ordered by `start_time DESC` in case several rows match (e.g. a chunk
+    /// orphaned mid-recording with `end_time` never set). The most recently
+    /// started match is the current chunk.
     pub async fn resolve_at(
         &self,
         camera_id: Uuid,
@@ -182,10 +177,10 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
-    /// When [`Self::resolve_at`] finds no covering chunk (a gap — camera was
-    /// offline, or `at` is before/after all recorded history), the nearest
-    /// chunk boundaries on either side, so the caller can offer "jump to
-    /// nearest available footage" instead of a dead end.
+    /// When [`Self::resolve_at`] finds no covering chunk (a gap: the camera was
+    /// offline, or `at` is outside the recorded history), the nearest chunk
+    /// boundaries on either side, so the caller can offer "jump to nearest
+    /// available footage".
     pub async fn nearest_boundaries(
         &self,
         camera_id: Uuid,
@@ -220,8 +215,8 @@ impl RecordingRepo {
             .ok_or(VmsError::RecordingNotFound(id))
     }
 
-    /// Chunks belonging to a camera, oldest first — used to build a
-    /// concatenated export.
+    /// Chunks belonging to a camera, oldest first. Used to build a concatenated
+    /// export.
     pub async fn list_range_ordered(
         &self,
         camera_id: Uuid,
@@ -231,9 +226,9 @@ impl RecordingRepo {
         self.list_for_camera(camera_id, from, to).await
     }
 
-    /// Finalized chunks (both a real `end_time` and `size_bytes`, i.e. not
-    /// the one currently being written) older than `cutoff` — the age-based
-    /// half of the retention sweep.
+    /// Finalized chunks (with both `end_time` and `size_bytes`, so not the one
+    /// being written) older than `cutoff`. This is the age-based half of the
+    /// retention sweep.
     pub async fn list_older_than(
         &self,
         cutoff: DateTimeWithTimeZone,
@@ -246,8 +241,8 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
-    /// Same as [`Self::list_older_than`], scoped to a single camera — used
-    /// when that camera has its own retention-days override.
+    /// Same as [`Self::list_older_than`], scoped to one camera. Used when that
+    /// camera has its own retention-days override.
     pub async fn list_older_than_for_camera(
         &self,
         camera_id: Uuid,
@@ -262,10 +257,9 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
-    /// Finalized chunks across every camera, oldest first — the
-    /// disk-threshold half of the retention sweep (delete the oldest
-    /// chunks first until usage drops back under the configured
-    /// threshold).
+    /// Finalized chunks across every camera, oldest first. This is the
+    /// disk-threshold half of the retention sweep, which deletes the oldest
+    /// chunks until usage drops back under the configured threshold.
     pub async fn list_oldest_finalized(
         &self,
         limit: u64,
@@ -296,10 +290,9 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
-    /// Every row still open (`end_time IS NULL`), across all cameras — used
-    /// by the daemon-startup reconciliation sweep, where every such row is
-    /// unconditionally left over from a previous process lifetime (this
-    /// runs before any camera in the current process has opened a chunk).
+    /// Every row still open (`end_time IS NULL`) across all cameras. Used by the
+    /// startup reconciliation sweep, which runs before any camera in this process
+    /// has opened a chunk, so every such row is left over from a previous run.
     pub async fn list_open_chunks(&self) -> Result<Vec<recording::Model>, VmsError> {
         recording::Entity::find()
             .filter(recording::Column::EndTime.is_null())
@@ -308,12 +301,11 @@ impl RecordingRepo {
             .map_err(db_err)
     }
 
-    /// Backfill `end_time`/`size_bytes` on an already-fetched row — used by
-    /// the startup reconciliation sweep to heal a chunk whose file turned
-    /// out to be valid despite the row being left open. Takes the row
-    /// itself (from [`Self::list_open_chunks`]) rather than an id, unlike
-    /// [`Self::close_chunk_by_path`], since the caller already has it and a
-    /// re-lookup by id would be redundant.
+    /// Backfill `end_time`/`size_bytes` on an already-fetched row. Used by the
+    /// startup reconciliation sweep to heal a chunk whose file turned out to be
+    /// valid even though its row was left open. Takes the row from
+    /// [`Self::list_open_chunks`] instead of an id, since the caller already has
+    /// it.
     pub async fn backfill_end_time(
         &self,
         row: recording::Model,

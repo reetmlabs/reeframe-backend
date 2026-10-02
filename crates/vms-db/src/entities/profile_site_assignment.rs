@@ -1,15 +1,14 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// Extends a `tile_profile`'s visibility to a site beyond the one that owns
-/// it (`tile_profiles.site_id`) — this is the "shared across multiple sites"
-/// half of the profile-sharing model.
+/// Shares a `tile_profile` with a site other than the one that owns it
+/// (`tile_profiles.site_id`).
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "profile_site_assignments")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub profile_id: Uuid,
-    /// Opaque site identifier — no local FK; see the migration's doc comment.
+    /// Opaque site identifier with no local FK; see the migration's comment.
     #[sea_orm(primary_key, auto_increment = false)]
     pub site_id: Uuid,
 }
