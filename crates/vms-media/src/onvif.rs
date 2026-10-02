@@ -1,22 +1,18 @@
 //! ONVIF device discovery and stream-profile resolution.
 //!
-//! Two independent operations, both stateless (nothing here touches the DB
-//! or any camera already configured in it):
+//! Two stateless operations that never touch the DB or configured cameras:
 //!
-//! - [`discover`] — WS-Discovery: broadcasts a multicast probe on the LAN and
-//!   collects whatever ONVIF-compliant devices reply, each identified by its
+//! - [`discover`]: WS-Discovery. Sends a multicast probe on the LAN and
+//!   collects the ONVIF devices that reply, each identified by its
 //!   device-service `xaddr`.
-//! - [`resolve_streams`] — given one discovered device's `xaddr`, calls its
-//!   ONVIF Media service (`GetCapabilities` -> `GetProfiles` ->
-//!   `GetStreamUri`) to resolve the camera's main and (if it has one)
-//!   sub-stream RTSP URLs — the values a caller hands to `POST /cameras`'
-//!   `rtsp_url`/`sub_rtsp_url` fields.
+//! - [`resolve_streams`]: calls a device's ONVIF Media service
+//!   (`GetCapabilities` -> `GetProfiles` -> `GetStreamUri`) to get its main
+//!   and optional sub-stream RTSP URLs, the values for the `rtsp_url` and
+//!   `sub_rtsp_url` fields of `POST /cameras`.
 //!
-//! No ONVIF crate is used — the two operations needed here are a small,
-//! fixed slice of the spec (one UDP probe, three SOAP calls), and the
-//! available crates either panic on the (completely normal) empty-discovery
-//! case or skip WS-Security authentication entirely, which most real
-//! cameras require for the Media service calls.
+//! No ONVIF crate is used. We only need one UDP probe and three SOAP calls,
+//! and the available crates either panic when discovery finds nothing or
+//! lack the WS-Security authentication most cameras require for Media calls.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -38,13 +34,12 @@ const WS_DISCOVERY_MULTICAST: &str = "239.255.255.250:3702";
 /// One device that answered a WS-Discovery probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredDevice {
-    /// The device service URL — pass this to [`resolve_streams`] to fetch
-    /// its stream URIs.
+    /// The device service URL. Pass it to [`resolve_streams`] to fetch the
+    /// stream URIs.
     pub xaddr: String,
     /// Raw ONVIF scope URIs (e.g. `onvif://www.onvif.org/name/CAM1`,
-    /// `onvif://www.onvif.org/hardware/...`) — best-effort identification
-    /// hints, not guaranteed to be present or consistently formatted across
-    /// vendors.
+    /// `onvif://www.onvif.org/hardware/...`). Best-effort identification
+    /// hints; vendors may omit them or format them differently.
     pub scopes: Vec<String>,
 }
 
@@ -59,9 +54,8 @@ pub struct ResolvedStreams {
 // -- Discovery --
 
 /// Broadcast a WS-Discovery probe and collect `ProbeMatch` replies until
-/// `timeout` elapses. An empty network (no ONVIF devices, or multicast
-/// blocked by the LAN) is a normal outcome — this returns `Ok(vec![])`, not
-/// an error.
+/// `timeout` elapses. Finding nothing (no ONVIF devices, or multicast blocked
+/// on the LAN) returns `Ok(vec![])`.
 pub async fn discover(timeout: Duration) -> Result<Vec<DiscoveredDevice>, VmsError> {
     let socket = UdpSocket::bind("0.0.0.0:0")
         .await
@@ -132,9 +126,9 @@ fn probe_message(message_id: Uuid) -> String {
 }
 
 /// Parses every `ProbeMatch` block in one WS-Discovery UDP datagram.
-/// Tag matching is by local name only — vendors bind the discovery
-/// namespaces to different prefixes (or none), and the local names are the
-/// only part the spec actually fixes.
+/// Tags are matched by local name only, because vendors bind the discovery
+/// namespaces to different prefixes (or none) and only the local names are
+/// fixed by the spec.
 fn parse_probe_matches(xml: &str) -> Vec<DiscoveredDevice> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -198,10 +192,9 @@ fn parse_probe_matches(xml: &str) -> Vec<DiscoveredDevice> {
 // -- Stream resolution --
 
 /// Resolve a discovered device's main and (if present) sub-stream RTSP URLs
-/// via its ONVIF Media service. `credentials` is `(username, password)` —
-/// most cameras reject `GetProfiles`/`GetStreamUri` without WS-Security auth,
-/// but an unauthenticated attempt is allowed since some test/dev cameras
-/// have none configured.
+/// via its ONVIF Media service. `credentials` is `(username, password)`.
+/// Most cameras reject `GetProfiles`/`GetStreamUri` without WS-Security auth,
+/// but `None` is allowed for test cameras that have no auth configured.
 pub async fn resolve_streams(
     xaddr: &str,
     credentials: Option<(&str, &str)>,
@@ -210,8 +203,8 @@ pub async fn resolve_streams(
 
     let caps_response =
         soap_call(xaddr, &envelope(security.as_deref(), GET_CAPABILITIES_BODY)).await?;
-    // Falls back to the device xaddr itself if `Media` isn't present in the
-    // response — some devices answer Media requests at the same endpoint.
+    // Fall back to the device xaddr if the response has no `Media` entry;
+    // some devices answer Media requests at the same endpoint.
     let media_xaddr = parse_media_xaddr(&caps_response).unwrap_or_else(|| xaddr.to_string());
 
     let profiles_response = soap_call(
@@ -262,11 +255,10 @@ struct ProfileInfo {
     resolution: Option<(u32, u32)>,
 }
 
-/// Highest-resolution profile is "main", the next-highest distinct profile
-/// (if any) is "sub" — mirrors how `sub_rtsp_url` is used elsewhere in this
-/// crate: one high-res stream for recording, one lower-res stream for relay.
-/// Profiles without a resolution sort last, so an unresolvable profile list
-/// still deterministically picks *a* main.
+/// The highest-resolution profile is "main" and the next one, if any, is
+/// "sub": a high-res stream for recording and a lower-res one for the sub relay
+/// and analytics. Profiles without a resolution sort last, so a main profile
+/// is always picked.
 fn pick_main_and_sub(mut profiles: Vec<ProfileInfo>) -> Option<(ProfileInfo, Option<ProfileInfo>)> {
     if profiles.is_empty() {
         return None;
@@ -317,9 +309,9 @@ fn envelope(security: Option<&str>, body: &str) -> String {
     )
 }
 
-/// WS-Security `UsernameToken` header with a `PasswordDigest` — the auth
-/// scheme ONVIF's Media/Device services expect. `username` is XML-escaped;
-/// `password` never appears in the request except hashed into the digest.
+/// WS-Security `UsernameToken` header with a `PasswordDigest`, the auth scheme
+/// ONVIF's Media/Device services expect. `username` is XML-escaped; `password`
+/// only appears hashed into the digest.
 fn ws_security_header(username: &str, password: &str) -> String {
     let mut nonce_bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -341,9 +333,8 @@ fn ws_security_header(username: &str, password: &str) -> String {
 }
 
 /// WS-Security 1.0 `PasswordDigest`: `Base64(SHA1(nonce + created + password))`,
-/// with `nonce` as raw bytes and `created`/`password` as their UTF-8 bytes —
-/// exactly as sent in the surrounding XML, since the receiving camera
-/// recomputes this the same way to verify it.
+/// with `nonce` as raw bytes and `created`/`password` as UTF-8 bytes, exactly
+/// as sent in the XML, because the camera recomputes it the same way.
 fn password_digest(nonce: &[u8], created: &str, password: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(nonce);
@@ -383,10 +374,9 @@ async fn soap_call(url: &str, body: &str) -> Result<String, VmsError> {
 
 // -- Response parsing --
 
-/// Extracts the `Media` service's `XAddr` from a `GetCapabilitiesResponse` —
-/// there's one `XAddr` per service block (`Device`, `Media`, `PTZ`, `Events`,
-/// `Imaging`, ...), all siblings, so this only returns the one nested inside
-/// `Media`.
+/// Extracts the `Media` service's `XAddr` from a `GetCapabilitiesResponse`.
+/// Each sibling service block (`Device`, `Media`, `PTZ`, ...) has its own
+/// `XAddr`; only the one inside `Media` is returned.
 fn parse_media_xaddr(xml: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -713,10 +703,9 @@ mod tests {
         assert_eq!(parse_stream_uri("<Envelope><Body></Body></Envelope>"), None);
     }
 
-    /// Cross-checked against a manual `hashlib.sha1(nonce + created.encode() +
-    /// password.encode()).digest()` + base64 computation in Python, using
-    /// fixed inputs — this is the exact WS-Security 1.0 PasswordDigest
-    /// algorithm ONVIF cameras verify against.
+    /// Expected value computed in Python with base64 of
+    /// `hashlib.sha1(nonce + created.encode() + password.encode()).digest()`
+    /// on the same fixed inputs.
     #[test]
     fn password_digest_matches_known_vector() {
         let nonce = b"0123456789abcdef";

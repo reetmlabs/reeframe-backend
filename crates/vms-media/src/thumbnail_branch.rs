@@ -1,7 +1,8 @@
-//! Periodic thumbnail capture branch attached to a live camera tee — an
-//! interval-driven, indexed extension of `manager.rs`'s one-shot
-//! `capture_snapshot` branch, kept attached instead of detached after one
-//! frame. One JPEG file per capture, named by its own timestamp.
+//! Periodic thumbnail capture branch attached to a live camera tee.
+//!
+//! Works like the one-shot `capture_snapshot` branch in `manager.rs` but stays
+//! attached and captures on an interval. Each capture is one JPEG file named
+//! by its timestamp.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -12,19 +13,18 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-/// JPEG encode quality (0–100). Not currently configurable — only the
-/// capture interval is.
+/// JPEG encode quality (0-100). Not configurable; only the capture interval is.
 const JPEG_QUALITY: i32 = 75;
 
 /// How long the gate stays open waiting for the decoder to emit a frame
-/// before giving up until the next interval, so a stuck decoder can't
-/// leave every frame flowing into it.
+/// before giving up until the next interval, so a stuck decoder does not keep
+/// every frame flowing into it.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A frame whose luma variance is below this is flat (levels²).
 const BLANK_VARIANCE_THRESHOLD: f64 = 4.0;
 /// Flat frames with mean luma at or below / at or above these are treated
-/// as black / white — covers both limited (16–235) and full range.
+/// as black / white. Covers both limited (16-235) and full range.
 const BLANK_BLACK_MAX_MEAN: f64 = 32.0;
 const BLANK_WHITE_MIN_MEAN: f64 = 224.0;
 /// Sample every Nth pixel on every Nth row when checking for a blank frame.
@@ -93,8 +93,8 @@ impl CaptureGate {
     }
 }
 
-/// True for a completely black or completely white frame — what a camera
-/// with no signal typically sends — so it doesn't replace a real thumbnail.
+/// True for an all-black or all-white frame, which is what a camera with no
+/// signal usually sends, so it does not replace a real thumbnail.
 fn is_blank(luma: &[u8]) -> bool {
     let n = luma.len() as f64;
     if n == 0.0 {
@@ -122,9 +122,9 @@ fn sample_luma(buffer: &gstreamer::BufferRef, caps: &gstreamer::CapsRef) -> Opti
     Some(out)
 }
 
-/// Handle to a running per-camera thumbnail-capture branch. Same shape as
-/// `motion_branch::MotionHandle` — holds what [`stop`](Self::stop) needs
-/// to detach the GStreamer elements itself.
+/// Handle to a running per-camera thumbnail-capture branch. Like
+/// `motion_branch::MotionHandle`, it holds what [`stop`](Self::stop) needs to
+/// detach the elements.
 pub struct ThumbnailHandle {
     pipeline: gstreamer::Pipeline,
     camera_id: Uuid,
@@ -229,8 +229,8 @@ pub fn attach(
         .link(&decodebin)
         .map_err(|e| VmsError::Media(format!("thumbnail link queue->decodebin: {e}")))?;
 
-    // Same dynamic-pad-added handling as `capture_snapshot`/`motion_branch`
-    // — decodebin autoplugs off the tee's already-depayed elementary stream.
+    // As in `capture_snapshot`, decodebin autoplugs a decoder for the tee's
+    // depayloaded stream and exposes its video pad here.
     let convert_weak = convert.downgrade();
     decodebin.connect_pad_added(move |_, src_pad| {
         let Some(caps) = src_pad.current_caps() else {
@@ -417,17 +417,12 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
         if fired {
             tracing::info!(camera_id = %camera_id, "Thumbnail capture branch detached");
         } else {
-            // A BLOCK_DOWNSTREAM probe only fires when a buffer/event
-            // actually tries to cross this pad — if the pipeline's upstream
-            // has already died, nothing ever will, and the probe never
-            // fires. Giving up here without also forcing removal leaves
-            // this branch's elements permanently stuck in the pipeline
-            // under their fixed names, so every later `attach()` for this
-            // camera fails at `add_many` with a name collision forever.
-            // Five seconds without a single frame crossing a live tee tap
-            // is a reliable enough signal that nothing is flowing through
-            // this exact link for it to be safe to force the same teardown
-            // here.
+            // A BLOCK_DOWNSTREAM probe only fires when a buffer or event
+            // crosses the pad, so it never fires if upstream is dead. Without
+            // forced removal, the elements would stay in the pipeline under
+            // their fixed names and every later `attach()` for this camera
+            // would fail at `add_many`. Five seconds with no frame means
+            // nothing is flowing, so forcing the teardown is safe.
             tracing::warn!(
                 camera_id = %camera_id,
                 "thumbnail detach probe timed out — forcing removal directly",
@@ -516,8 +511,9 @@ mod attach_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Runs a 25 fps H.264 test pattern with a keyframe every 10 frames,
-    /// shaped like the live tees (SPS/PPS on every keyframe), for `run`, and returns (frames that reached the decoder, JPEGs written).
+    /// Plays a 25 fps H.264 test pattern for `run`, with a keyframe every 10
+    /// frames and SPS/PPS on each keyframe like the live tees. Returns (frames
+    /// that reached the decoder, JPEGs written).
     async fn run_branch(pattern: &str, interval: Duration, run: Duration) -> (usize, usize) {
         gstreamer::init().unwrap();
         let camera_id = Uuid::new_v4();

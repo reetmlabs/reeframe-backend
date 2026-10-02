@@ -19,14 +19,15 @@ pub struct TimestampedFrame {
     pub is_keyframe: bool,
 }
 
-/// Sliding-window buffer of `TimestampedFrame`s bounded by wall-clock duration.
+/// Sliding-window buffer of `TimestampedFrame`s bounded by PTS span.
 ///
 /// Frames are appended in PTS order. On each `push` the oldest frames are
 /// evicted so the total span of buffered PTS values never exceeds
 /// `max_duration`. At least one frame is always retained regardless of the
 /// duration gap.
 ///
-/// Always accessed behind an `Arc<Mutex<RingBuffer>>` — no internal locking.
+/// Always accessed behind an `Arc<Mutex<RingBuffer>>`, so it has no internal
+/// locking.
 pub struct RingBuffer {
     frames: VecDeque<TimestampedFrame>,
     max_duration: Duration,
@@ -57,7 +58,7 @@ impl RingBuffer {
         }
     }
 
-    /// Return all frames whose PTS falls in `[event_pts − pre_secs, event_pts + post_secs]`.
+    /// Return all frames whose PTS falls in `[event_pts - pre_secs, event_pts + post_secs]`.
     ///
     /// Returns an empty `Vec` if the buffer is empty or no frames fall in the window.
     pub fn extract(
@@ -81,9 +82,8 @@ impl RingBuffer {
         self.frames.back().map(|f| f.pts)
     }
 
-    /// Grow `max_duration` to `min_duration` if it's larger than the current
-    /// value. Never shrinks — a smaller request keeps whatever history is
-    /// already buffered rather than discarding it.
+    /// Grow `max_duration` to `min_duration` if that is larger. Never shrinks,
+    /// so a smaller request does not discard buffered history.
     pub fn grow_to(&mut self, min_duration: Duration) {
         if min_duration > self.max_duration {
             self.max_duration = min_duration;
@@ -125,8 +125,8 @@ impl RingBufferManager {
     /// Creates a [`RingBuffer`] sized to hold `duration_secs` of footage and
     /// attaches an appsink branch to the camera's live GStreamer tee. If the
     /// camera is already being buffered, its capacity is grown to
-    /// `duration_secs` instead — never shrunk, so a smaller `duration_secs`
-    /// from some other caller can't discard another caller's history.
+    /// `duration_secs` instead. It is never shrunk, so one caller's smaller
+    /// `duration_secs` cannot discard history another caller needs.
     pub fn start(
         &self,
         camera_id: Uuid,
@@ -194,13 +194,13 @@ impl RingBufferManager {
     /// Extract frames around `event_pts` from the ring buffer and mux them into
     /// an MP4 file in `output_dir`.
     ///
-    /// Extends the pre-event window by 5 seconds to ensure at least one IDR
-    /// frame is captured, then trims the result to start on the first keyframe
-    /// at or before `event_pts - pre_secs`. The output clip therefore spans
-    /// `[first_keyframe_before_start, event_pts + post_secs]`.
+    /// The pre-event window is widened by `EXTRACT_CLIP_KEYFRAME_SEARCH_SECS`
+    /// (5 s) to catch a keyframe, and the result is trimmed to start on the
+    /// first keyframe in that widened window. The clip ends at
+    /// `event_pts + post_secs`.
     ///
-    /// The GStreamer muxer runs in `spawn_blocking` — safe to `.await` from
-    /// async code.
+    /// The GStreamer muxer runs in `spawn_blocking`, so this is safe to
+    /// `.await` from async code.
     pub async fn extract_clip(
         &self,
         camera_id: Uuid,
@@ -274,9 +274,8 @@ fn align_to_keyframe(mut frames: Vec<TimestampedFrame>) -> Vec<TimestampedFrame>
             frames.drain(..idx);
             frames
         }
-        // No keyframe anywhere in the window — nothing here can be muxed
-        // into a valid clip, so the caller's empty check must catch this,
-        // not the muxer downstream.
+        // Without a keyframe nothing can be muxed into a valid clip, so
+        // return empty and let the caller's empty check report it.
         None => Vec::new(),
     }
 }
@@ -549,9 +548,8 @@ mod tests {
         assert!(aligned[0].is_keyframe);
     }
 
-    // align_to_keyframe on a stream with no keyframes returns empty — those
-    // frames can never be muxed into a valid clip, so the caller's
-    // is_empty() check must catch this rather than the muxer downstream.
+    // align_to_keyframe on a stream with no keyframes returns empty, so the
+    // caller's is_empty() check catches it before the muxer.
     #[test]
     fn align_to_keyframe_no_keyframe_returns_empty() {
         let frames = vec![frame(0), frame(1), frame(2)];

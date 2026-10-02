@@ -9,20 +9,20 @@ use crate::relay_bridge::{self, RelayBridgeHandle};
 
 // -- RelayQuality --
 
-/// Which of a camera's two persistent pipelines a relay mount is bridged
-/// from. A camera typically supports only two concurrent RTSP sessions —
-/// spoken for by the main (live/recording) pipeline and the optional
-/// sub-stream pipeline (see `sub_stream.rs`) — so both relay qualities tap
-/// one of those two pipelines' tees rather than opening connections of
-/// their own. Neither pipeline needs to already be recording — starting a
-/// relay brings up whichever pipeline it needs on demand.
+/// Which of a camera's two persistent pipelines a relay mount is bridged from.
+///
+/// Cameras typically allow only two concurrent RTSP sessions, used by the main
+/// (live/recording) pipeline and the optional sub-stream pipeline (see
+/// `sub_stream.rs`). Relays therefore tap one of those pipelines' tees instead
+/// of opening their own connections. Starting a relay brings up the pipeline
+/// it needs on demand; recording does not have to be active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelayQuality {
-    /// Full resolution — same connection recording uses. Intended for
+    /// Full resolution, on the same connection recording uses. Meant for
     /// full-screen live view.
     Main,
-    /// The camera's dedicated low-resolution sub-stream, when configured.
-    /// Intended for tile/grid live view.
+    /// The camera's low-resolution sub-stream, when configured. Meant for
+    /// tile/grid live view.
     Sub,
 }
 
@@ -54,9 +54,9 @@ struct RelayEntry {
 /// Each camera can be served at up to two mounts:
 /// `rtsp://{bind_host}:{bind_port}/{camera_id}` (main) and
 /// `.../{camera_id}/sub` (sub). Both are bridged from a pipeline's tee (see
-/// `relay_bridge.rs`), started on demand by `MediaManager::start_relay` if
-/// not already running — the relay never opens its own connection to the
-/// camera, and never requires recording to be active.
+/// `relay_bridge.rs`), which `MediaManager::start_relay` starts on demand if
+/// needed. The relay never opens its own connection to the camera and never
+/// requires recording to be active.
 ///
 /// A dedicated GLib main loop runs on a background thread to drive I/O for
 /// the RTSP server without interfering with GStreamer's own main context.
@@ -226,10 +226,9 @@ impl RelayServer {
 /// ("H264", "H265", "JPEG", "AV1"). Runs the GStreamer probe on a
 /// `spawn_blocking` thread so it does not block the async runtime.
 ///
-/// Used only for one-time codec detection (then cached to the camera's DB
-/// row) — a short-lived probe connection, not a persistent one, so it
-/// doesn't compete with the two persistent sessions (main, sub) a camera's
-/// connection budget is otherwise spent on.
+/// Used only for one-time codec detection, with the result cached on the
+/// camera's DB row. The connection is short-lived, so it does not hold one of
+/// the camera's session slots used by the main and sub pipelines.
 pub async fn probe_codec(url: &str) -> Result<String, VmsError> {
     let url = url.to_owned();
     tokio::task::spawn_blocking(move || probe_codec_blocking(&url))

@@ -22,7 +22,7 @@ use crate::thumbnail_branch::{self, ThumbnailHandle};
 
 // -- Config --
 
-/// Configuration for the Media Manager.
+/// Configuration for [`MediaManager`].
 pub struct MediaConfig {
     /// Directory where MP4 chunk files are written.
     pub recording_dir: PathBuf,
@@ -61,19 +61,17 @@ struct CameraHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     /// Join handle for the bus-monitor / reconnect task.
     task: tokio::task::JoinHandle<()>,
-    /// Shared with the monitor task — needed here too so
-    /// `start_recording`/`stop_recording` can attach/detach the recording
-    /// branch against the same `ChunkNaming` state the monitor refreshes on
-    /// reconnect. See `camera_stream::ChunkNaming`.
+    /// Shared with the monitor task, so `start_recording`/`stop_recording`
+    /// use the same `ChunkNaming` state the monitor refreshes on reconnect.
     naming: Arc<ChunkNaming>,
 }
 
-/// A camera's optional sub-stream pipeline — `rtspsrc -> [depay|parse] -> tee`,
-/// no recording branch. See `sub_stream.rs`.
+/// A camera's optional sub-stream pipeline (`rtspsrc -> [depay|parse] -> tee`,
+/// no recording branch). See `sub_stream.rs`.
 struct SubStreamHandle {
     pipeline: gstreamer::Pipeline,
-    /// The RTSP source URL this sub-stream was started with — needed if a
-    /// sub-quality relay later needs to probe the codec.
+    /// The RTSP source URL this sub-stream was started with, used when a
+    /// sub-quality relay has to probe the codec.
     sub_rtsp_url: String,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
@@ -101,14 +99,13 @@ fn thumbnails_wanted(enabled: Option<bool>, recording: bool) -> bool {
     enabled.unwrap_or(false) && recording
 }
 
-/// Remove leftover `*.faststart.tmp` files from a previous process
-/// lifetime. `remux_faststart` always writes to a fresh tmp path per
-/// attempt and renames it into place on success, so any tmp file still
-/// present at startup is a dead partial write — most commonly from a
-/// remux that was still running when the process was hard-killed. Runs
-/// once at `MediaManager::new()`, non-recursively (recordings are stored
-/// flat in `recording_dir`); best-effort, since a leftover file is
-/// harmless clutter, not a correctness problem.
+/// Remove `*.faststart.tmp` files left by a previous process.
+///
+/// `remux_faststart` writes to a tmp path and renames it on success, so a tmp
+/// file present at startup is a partial write, usually from a remux that was
+/// running when the process was killed. Runs once in `MediaManager::new()`,
+/// non-recursively since recordings are stored flat. Best-effort: a leftover
+/// file is only clutter.
 fn cleanup_stale_faststart_tmp_files(recording_dir: &Path) {
     let entries = match std::fs::read_dir(recording_dir) {
         Ok(entries) => entries,
@@ -137,27 +134,26 @@ fn cleanup_stale_faststart_tmp_files(recording_dir: &Path) {
 
 /// Manages per-camera GStreamer pipelines.
 ///
-/// Each started camera gets one **live** pipeline:
-/// `rtspsrc -> rtph264depay -> h264parse -> tee`
+/// Each started camera gets one live pipeline:
+/// `rtspsrc -> [depay] -> [parse] -> tee`, with the codec elements picked from
+/// the SDP.
 ///
-/// Recording is not part of that pipeline by default — it is an
-/// attach/detach branch (`queue -> splitmuxsink`) on the tee, started
-/// explicitly via [`start_recording`](Self::start_recording) and stopped via
-/// [`stop_recording`](Self::stop_recording), the same way the relay, ring
-/// buffer, motion detection, and thumbnail capture all tap the same tee.
-/// Connecting a relay (or otherwise going live) never implies recording.
+/// Recording is a `queue -> splitmuxsink` branch on the tee, attached by
+/// [`start_recording`](Self::start_recording) and removed by
+/// [`stop_recording`](Self::stop_recording). The relay, ring buffer, motion
+/// detection and thumbnail capture tap the same tee. Going live never implies
+/// recording.
 ///
-/// A background tokio task monitors the GStreamer bus for errors and EOS events
-/// and automatically reconnects with exponential backoff (2 s -> 60 s).
+/// A background tokio task watches the GStreamer bus for errors and EOS and
+/// reconnects with exponential backoff (2 s to 60 s).
 pub struct MediaManager {
     config: MediaConfig,
     cameras: Mutex<HashMap<Uuid, CameraHandle>>,
     /// Held for the whole of `start_live`, so two concurrent callers can't
     /// each find the camera missing and build a second pipeline for it.
     live_start: Mutex<()>,
-    /// Optional per-camera sub-stream pipeline — exists only while the
-    /// camera has a configured sub-stream and something needs it (motion
-    /// detection by default; a future sub-quality relay tap will share it).
+    /// Per-camera sub-stream pipeline. Exists only while the camera has a
+    /// configured sub-stream and a sub relay or analytics branch uses it.
     sub_streams: Mutex<HashMap<Uuid, SubStreamHandle>>,
     relay: Arc<RelayServer>,
     /// Sender used to publish `Event`s (motion, scene-change, tamper,
@@ -168,17 +164,14 @@ pub struct MediaManager {
     /// opens/closes each chunk, for whichever task actually has DB access
     /// to turn them into `recordings` rows.
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
-    /// Fires the camera's ID every time its main pipeline reaches `Playing`
-    /// — a fresh [`start_live`](Self::start_live) *and* every successful
-    /// reconnect inside the monitor task. Lets whichever task actually has
-    /// DB access reconcile persisted recording intent against reality the
-    /// moment a pipeline comes back, not just at daemon boot — this crate
-    /// has no `vms-db` dependency, so it can only announce the event, not
-    /// act on it.
+    /// Sends the camera's ID each time its main pipeline reaches `Playing`,
+    /// both on [`start_live`](Self::start_live) and on every successful
+    /// reconnect. The task with DB access uses it to re-apply persisted
+    /// recording intent; this crate has no `vms-db` dependency.
     pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     motion: Mutex<HashMap<Uuid, MotionHandle>>,
     /// Each camera's `motion_detection_enabled`. A camera missing here counts
-    /// as enabled, matching the column default.
+    /// as disabled (see `motion_wanted`).
     motion_enabled: Mutex<HashMap<Uuid, bool>>,
     /// Cameras a pipeline needs motion events from, which keeps motion
     /// running even when the camera's own switch is off.
@@ -192,15 +185,14 @@ pub struct MediaManager {
 impl MediaManager {
     /// Create a new `MediaManager` and initialise GStreamer.
     ///
-    /// `gstreamer::init()` is idempotent — safe to call multiple times.
+    /// `gstreamer::init()` is idempotent, so this is safe to call more than
+    /// once.
     ///
-    /// `event_tx` is where motion/scene-change/tamper events get sent —
-    /// the same channel `vms-sources` adapters publish onto, bridged to the
-    /// `EventBus` in `main.rs`. `chunk_event_tx` is the equivalent channel
-    /// for recording-chunk lifecycle bookkeeping. `pipeline_live_tx` is the
-    /// equivalent for "a camera's pipeline just came up" — see the field
-    /// doc comment. All three keep this crate free of a `vms-db`/
-    /// `vms-engine` dependency.
+    /// `event_tx` receives motion, scene-change and tamper events; it is the
+    /// same channel `vms-sources` adapters publish onto, bridged to the
+    /// `EventBus` in `main.rs`. `chunk_event_tx` carries recording-chunk
+    /// lifecycle events and `pipeline_live_tx` announces pipelines coming up.
+    /// The channels keep this crate free of `vms-db`/`vms-engine` dependencies.
     pub fn new(
         config: MediaConfig,
         event_tx: mpsc::UnboundedSender<Event>,
@@ -229,8 +221,8 @@ impl MediaManager {
     }
 
     /// Start the camera's main live pipeline (`rtspsrc -> tee`, no
-    /// recording). No-op if it is already running. Does **not** start
-    /// recording, see [`start_recording`](Self::start_recording).
+    /// recording). No-op if it is already running. Use
+    /// [`start_recording`](Self::start_recording) to record.
     ///
     /// `sub_rtsp_url` is the camera's low-resolution sub stream, if it has
     /// one (credentials already in the URL, same as `rtsp_url`). It is only
@@ -311,10 +303,9 @@ impl MediaManager {
             (h.pipeline.clone(), h.naming.clone())
         };
 
-        // Give the video codec a chance to wire into `tee` first — attaching
-        // the recording branch before that finishes lets `splitmuxsink` link
-        // in ahead of it, which can permanently fail the video link. See
-        // `camera_stream::wait_for_codec_wired`.
+        // Wait for the codec elements to link into the tee first. If the
+        // recording branch attaches earlier, `splitmuxsink` can link ahead
+        // of them and the video link fails for good.
         camera_stream::wait_for_codec_wired(&pipeline, camera_id).await?;
 
         camera_stream::attach_recording_branch(
@@ -331,10 +322,9 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Stop recording for a camera — detaches the recording branch from the
-    /// tee, leaving the live pipeline (and relay/motion/thumbnails/ring
-    /// buffer) running untouched. No-op if not recording, or if the camera
-    /// is not even live.
+    /// Stop recording for a camera by detaching the recording branch. The
+    /// live pipeline and its other branches keep running. No-op if the
+    /// camera is not recording or not live.
     pub async fn stop_recording(&self, camera_id: Uuid) -> Result<(), VmsError> {
         let Some((pipeline, naming)) = self
             .cameras
@@ -361,28 +351,21 @@ impl MediaManager {
             .unwrap_or(false)
     }
 
-    /// Start an RTSP relay mount for a camera, bridged from whichever
-    /// pipeline `quality` selects — the main pipeline for
-    /// [`RelayQuality::Main`], the sub-stream pipeline for
-    /// [`RelayQuality::Sub`]. Neither pipeline needs to already be running —
-    /// live view never implies recording, so this starts whichever pipeline
-    /// `quality` needs on demand (no-op if already up), same as
-    /// [`start_live`](Self::start_live)/[`start_recording`](Self::start_recording)
-    /// would. Relaying itself never opens a second connection to the camera
-    /// beyond that one live pipeline.
+    /// Start an RTSP relay mount for a camera, bridged from the main pipeline
+    /// for [`RelayQuality::Main`] or the sub-stream pipeline for
+    /// [`RelayQuality::Sub`]. The needed pipeline is started on demand if it
+    /// is not running. The relay itself never opens another connection to
+    /// the camera.
     ///
-    /// `rtsp_url`/`sub_rtsp_url` are only used if the relevant pipeline needs
-    /// starting — ignored (may be empty/`None`) if it's already running.
-    /// `RelayQuality::Sub` requires `sub_rtsp_url` to be `Some` the first
-    /// time it's requested for a camera.
+    /// `rtsp_url`/`sub_rtsp_url` are only used to start a pipeline that is
+    /// not running yet. `RelayQuality::Sub` needs `sub_rtsp_url` the first
+    /// time it is requested for a camera.
     ///
-    /// When `cached_codec` is `Some`, the probe step is skipped (instant
-    /// start). When `None`, a brief separate connection probes the relevant
-    /// stream's codec — takes up to 10 s on a first start. Returns the
-    /// codec in use (cached or freshly detected) so the caller can persist
-    /// it to the DB for future daemon restarts. Main and sub streams are
-    /// assumed to share one encoding, same as the camera's single cached
-    /// `codec` DB column — real cameras use the same encoder for both.
+    /// With `cached_codec` set, the codec probe is skipped. Otherwise a short
+    /// separate connection probes the stream, which can take up to 10 s.
+    /// Returns the codec in use so the caller can persist it. Main and sub
+    /// streams are assumed to share one encoding, matching the camera's
+    /// single `codec` DB column.
     pub async fn start_relay(
         &self,
         camera_id: Uuid,
@@ -470,17 +453,14 @@ impl MediaManager {
         self.relay.stop_relay(camera_id, quality, &pipeline);
     }
 
-    /// Stop the live pipeline for a camera — its recording branch if one is
-    /// attached, its sub-stream pipeline if one is running, motion
-    /// detection, thumbnail capture, and any relay mounts bridged from
-    /// either pipeline.
+    /// Stop the live pipeline for a camera, along with its recording branch,
+    /// sub-stream pipeline, analytics branches and relay mounts.
     ///
-    /// Order matters: motion detection and both relay qualities are
-    /// detached first (while both pipelines are still `Playing`, so their
-    /// blocking-pad-probe detaches can complete cleanly), then the
-    /// sub-stream pipeline is torn down, then the main one — the recording
-    /// branch dies with it, no separate detach needed since the whole
-    /// pipeline is going to `Null` anyway.
+    /// Analytics and relays are detached first, while both pipelines are
+    /// still `Playing`, so their blocking pad probes can fire. Then the
+    /// sub-stream pipeline is stopped, then the main one. The recording
+    /// branch needs no separate detach because the whole pipeline goes to
+    /// `Null`.
     pub async fn stop_live(&self, camera_id: Uuid) -> Result<(), VmsError> {
         self.stop_motion_detection(camera_id).await;
         self.stop_thumbnail_capture(camera_id).await;
@@ -498,9 +478,8 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Stop all live pipelines, all sub-stream pipelines, all
-    /// motion-detection and thumbnail-capture branches, and all relay
-    /// mounts, wait for monitor/analyzer tasks to exit.
+    /// Stop all pipelines, analytics branches and relay mounts, and wait for
+    /// the monitor and analyzer tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
         let motion_handles: Vec<MotionHandle> = {
             let mut motion = self.motion.lock().unwrap();
@@ -548,9 +527,8 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Start the camera's sub-stream pipeline if not already running, and
-    /// return a clone of its `Pipeline` (for the caller to attach a branch
-    /// to). No-op — just returns the existing pipeline — if already running.
+    /// Start the camera's sub-stream pipeline if it is not running, and
+    /// return its `Pipeline` so the caller can attach a branch.
     fn start_sub_stream(
         &self,
         camera_id: Uuid,
@@ -862,14 +840,14 @@ impl MediaManager {
                 })?
                 .pipeline
                 .clone()
-        }; // lock dropped here — GStreamer call runs without holding the mutex
+        }; // lock dropped here so the GStreamer call runs without the mutex
         ring_buffer_branch::attach(&pipeline, camera_id, ring_buffer)
     }
 
     /// Detach the ring-buffer branch from a running camera pipeline.
     ///
     /// No-op if the camera is not running or has no ring-buffer branch.
-    /// Cleanup is asynchronous — see [`ring_buffer_branch::detach`].
+    /// Cleanup is asynchronous; see [`ring_buffer_branch::detach`].
     pub fn detach_ring_buffer(&self, camera_id: Uuid) -> Result<(), VmsError> {
         let pipeline = {
             let cameras = self.cameras.lock().unwrap();
@@ -896,9 +874,8 @@ impl MediaManager {
             .and_then(|h| h.naming.codec())
     }
 
-    /// Return `true` if a camera's live pipeline is currently running
-    /// (independent of whether it's also recording — see
-    /// [`is_recording`](Self::is_recording)).
+    /// Return `true` if a camera's live pipeline is running, whether or not
+    /// it is recording (see [`is_recording`](Self::is_recording)).
     pub fn is_running(&self, camera_id: Uuid) -> bool {
         self.cameras.lock().unwrap().contains_key(&camera_id)
     }
@@ -920,11 +897,10 @@ impl MediaManager {
 
     /// Capture a single still frame from a running camera and write it to `output_dir`.
     ///
-    /// Taps the camera's live GStreamer tee — no second RTSP connection is opened.
-    /// A temporary decode branch (`decodebin -> videoconvert -> jpegenc/pngenc -> appsink`)
-    /// is attached to the tee, one decoded frame is captured, then the branch is
-    /// detached. The wait is bounded by the camera's keyframe interval (typically
-    /// under 2 seconds for surveillance cameras).
+    /// Taps the camera's live tee, so no second RTSP connection is opened. A
+    /// temporary `decodebin -> videoconvert -> jpegenc/pngenc -> appsink` branch
+    /// captures one frame and is then detached. The wait depends on the
+    /// camera's keyframe interval and times out after 5 s.
     ///
     /// Returns the path of the written file on success.
     pub async fn capture_snapshot(
@@ -977,8 +953,8 @@ impl MediaManager {
 ///
 /// `decodebin` handles codec detection automatically (H.264, H.265, MJPEG, AV1).
 /// The `pad-added` callback links its decoded video src pad to `videoconvert`.
-/// The appsink callback sends the encoded frame bytes over a sync channel; this
-/// thread waits on the channel with a 5 s timeout (one GOP interval on most cameras).
+/// The appsink callback sends the encoded frame bytes over a sync channel, and
+/// this thread waits up to 5 s, which covers one GOP on most cameras.
 fn snapshot_from_tee(
     pipeline: &gstreamer::Pipeline,
     camera_id: Uuid,
@@ -1121,7 +1097,7 @@ fn snapshot_from_tee(
         .link(&queue_sink)
         .map_err(|e| VmsError::Media(format!("link tee->snapshot queue: {e}")))?;
 
-    // Wait for one decoded+encoded frame (bounded by camera's keyframe interval)
+    // Decoding can only start at a keyframe, so this waits up to one GOP.
     let frame_data = rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .map_err(|_| {
