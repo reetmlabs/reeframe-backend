@@ -10,9 +10,9 @@ use crate::dispatcher::ActionContext;
 
 /// Send a PTZ movement command to a camera.
 ///
-/// **Not yet implemented.** ONVIF device control will be implemented in a future release.
-/// Returns [`NodeOutput::failure`] with a clear diagnostic so pipelines that
-/// include PTZ nodes degrade gracefully rather than panicking.
+/// Not implemented: ONVIF device control is not available.
+/// Returns [`NodeOutput::failure`] with a diagnostic, so pipelines that
+/// include PTZ nodes fail the node instead of panicking.
 pub async fn execute(
     node_id: NodeId,
     cfg: &PtzMoveConfig,

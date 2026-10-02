@@ -21,9 +21,9 @@ use crate::handlers::{
 /// Resources available to action handlers at runtime.
 #[derive(Clone)]
 pub struct ActionContext {
-    /// Live camera pipeline manager — used by `snapshot`, `start_recording`, `stop_recording`.
+    /// Live camera pipeline manager, used by `snapshot`, `start_recording`, `stop_recording`.
     pub media: Option<Arc<MediaManager>>,
-    /// Ring buffer manager — used by `extract_clip`.
+    /// Ring buffer manager, used by `extract_clip`.
     pub ring_buffer: Option<Arc<RingBufferManager>>,
     /// Directory where action output files (clips, snapshots) are written.
     pub recording_dir: PathBuf,
@@ -33,10 +33,9 @@ pub struct ActionContext {
     /// config specifies `key_ref = "default"`. Other key refs are resolved
     /// from `/etc/reeframe/keys/{name}` at runtime.
     pub encryption_key: Option<[u8; 32]>,
-    /// Map of camera_id -> RTSP URL for all cameras in the DB.
+    /// Map of camera_id -> RTSP URL for the cameras whose live pipeline is running.
     ///
-    /// Populated by the executor before each pipeline run from `CameraRepo::list()`.
-    /// Used by `start_recording` to start a camera that is not currently running.
+    /// Populated by the executor before each pipeline run and used by `start_recording`.
     pub camera_rtsp_urls: HashMap<Uuid, String>,
 }
 
@@ -56,9 +55,8 @@ impl Default for ActionContext {
 
 /// Dispatches `Action` and `DeviceControl` pipeline nodes to their handlers.
 ///
-/// Handlers that are not yet implemented return [`NodeOutput::failure`] with a
-/// clear "not yet implemented" message so in-progress pipelines degrade
-/// gracefully rather than panicking.
+/// Unimplemented handlers return [`NodeOutput::failure`] with a
+/// "not yet implemented" message instead of panicking.
 pub struct ActionDispatcher;
 
 impl ActionDispatcher {

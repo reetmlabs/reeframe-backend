@@ -14,10 +14,10 @@ use crate::dispatcher::ActionContext;
 
 /// Compress the upstream artifact using the configured algorithm.
 ///
-/// Uses streaming I/O — the input file is never fully loaded into memory.
+/// Uses streaming I/O, so the input file is never fully loaded into memory.
 /// Intended for non-video artifacts (JSON logs, CSV exports, text files).
-/// Video files are already entropy-coded by their codec; applying these
-/// algorithms yields no size reduction — use `transcode` for video instead.
+/// Video is already entropy-coded by its codec and won't shrink further; use
+/// `transcode` for video instead.
 ///
 /// Output: `{stem}.{ext}` in `recording_dir` where `ext` is `zst`, `gz`, or `lz4`.
 pub async fn execute(
@@ -140,7 +140,6 @@ mod tests {
         let input = dir.join("compress_test_input.txt");
         let output = dir.join("compress_test_input.txt.zst");
 
-        // Highly compressible input
         let mut f = std::fs::File::create(&input).unwrap();
         f.write_all(&b"hello world ".repeat(1000)).unwrap();
         drop(f);
