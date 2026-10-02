@@ -22,19 +22,18 @@ use crate::{time_helpers, EventBus, PipelineExecutor, PipelineRegistry};
 /// Evaluates pipeline triggers and dispatches pipeline runs.
 ///
 /// Each trigger type is handled differently:
-/// - `Manual`   — fired via [`fire_manual`] from the REST API handler.
-/// - `Event`    — fired by the EventBus subscription loop ([`start_event_listener`]).
-/// - `System`   — fired via the same EventBus loop on the system topic.
-/// - `Schedule` — fired by the cron / interval scheduler.
-/// - `Stat`     — fired when a metric event crosses a threshold.
+/// - `Manual`: fired via [`fire_manual`] from the REST API handler.
+/// - `Event`: fired by the EventBus subscription loop ([`start_event_listener`]).
+/// - `System`: fired via the same EventBus loop on the system topic.
+/// - `Schedule`: fired by the cron / interval scheduler.
+/// - `Stat`: fired by the stat monitor when a metric meets its threshold.
 pub struct TriggerEvaluator {
     registry: Arc<PipelineRegistry>,
     event_bus: Arc<EventBus>,
     executor: Option<Arc<PipelineExecutor>>,
-    /// `None` only in the test-only constructor — production always has one,
-    /// used to persist [`build_event_context`]/filter-eval failures so a bad
-    /// filter is visible via the trigger's own API representation instead of
-    /// only a `tracing::warn!` line.
+    /// Persists filter-evaluation failures so a bad filter shows up in the
+    /// trigger's API representation, not only in the logs. `None` only in the
+    /// test-only constructor.
     pipeline_repo: Option<PipelineRepo>,
     /// Holds the cron scheduler after `start_schedulers` is called.
     cron_scheduler: Mutex<Option<JobScheduler>>,
@@ -69,7 +68,7 @@ impl TriggerEvaluator {
         })
     }
 
-    /// Test-only constructor — no executor, `fire_pipeline` logs and returns.
+    /// Test-only constructor with no executor; `fire_pipeline` only logs.
     #[cfg(test)]
     pub(crate) fn new_without_executor(
         registry: Arc<PipelineRegistry>,
@@ -97,8 +96,8 @@ impl TriggerEvaluator {
     /// dispatches it to [`fire_pipeline`].
     ///
     /// # Errors
-    /// - [`VmsError::PipelineNotFound`] — pipeline is not in the registry.
-    /// - [`VmsError::NotFound`] — pipeline is disabled or has no enabled manual trigger.
+    /// - [`VmsError::PipelineNotFound`]: pipeline is not in the registry.
+    /// - [`VmsError::NotFound`]: pipeline is disabled or has no enabled manual trigger.
     pub fn fire_manual(
         &self,
         pipeline_id: Uuid,
@@ -134,8 +133,7 @@ impl TriggerEvaluator {
 
     /// Abort all running interval tasks and shut down the cron scheduler.
     ///
-    /// Safe to call when no schedulers are running — both operations are no-ops
-    /// in that case. Called at the top of [`start_schedulers`] to replace the
+    /// Safe to call when no schedulers are running. Called at the top of [`start_schedulers`] to replace the
     /// current task set on reload, and by the daemon shutdown sequence.
     pub async fn stop_schedulers(&self) {
         let handles: Vec<_> = self.interval_tasks.lock().unwrap().drain(..).collect();
@@ -172,7 +170,7 @@ impl TriggerEvaluator {
     ///   a warning.
     ///
     /// Aborts any previously running interval tasks and shuts down the previous
-    /// cron scheduler before registering new ones — safe to call on reload.
+    /// cron scheduler before registering new ones, so it is safe to call on reload.
     pub async fn start_schedulers(self: Arc<Self>) -> Result<(), VmsError> {
         self.stop_schedulers().await;
         let snapshot = self.registry.snapshot();
@@ -282,18 +280,16 @@ impl TriggerEvaluator {
     ///
     /// One task is always spawned for `TopicKey::System`. Additional tasks are
     /// spawned for each unique `Camera` and `Source` topic needed. The topics
-    /// are derived from the registry snapshot taken at call time — call again
+    /// are derived from the registry snapshot taken at call time, so call again
     /// after a registry reload to pick up new cameras / sources.
     ///
-    /// Safe to call from a non-async context (only spawns, does not await).
+    /// Only spawns and does not await, but must be called inside a Tokio runtime.
     pub fn start_event_listener(self: Arc<Self>) {
         let snapshot = self.registry.snapshot();
 
         let mut camera_ids: HashSet<Uuid> = HashSet::new();
         let mut source_ids: HashSet<Uuid> = HashSet::new();
 
-        // What topics do we need? Those scoped to  a camera or source trigger.
-        // or no scoped applied and it is applied to all cameras/sources the pipeline touches.
         for pipeline in snapshot.pipelines.values() {
             if !pipeline.enabled {
                 continue;
@@ -303,9 +299,8 @@ impl TriggerEvaluator {
                     continue;
                 }
                 if let TriggerConfig::Event { .. } = &trigger.config {
-                    // If the trigger is scoped to a specific source or camera subscribe
-                    // only to that topic. Otherwise subscribe to every resource the
-                    // pipeline touches.
+                    // A trigger scoped to a source or camera subscribes only to that
+                    // topic. Otherwise it subscribes to every resource the pipeline touches.
                     if let Some(src_id) = trigger.source_id {
                         source_ids.insert(src_id);
                     } else if let Some(cam_id) = trigger.camera_id {
@@ -319,7 +314,7 @@ impl TriggerEvaluator {
                         }
                     }
                 }
-                // System triggers always arrive on TopicKey::System — handled below.
+                // System triggers always arrive on TopicKey::System, handled below.
             }
         }
 
@@ -398,8 +393,8 @@ impl TriggerEvaluator {
 
     /// Evaluate pipeline triggers for `event` arriving on `topic`.
     ///
-    /// Uses the pre-built trigger index for O(1) dispatch — only pipelines with
-    /// a matching `(topic, trigger_type)` entry are examined.
+    /// Uses the pre-built trigger index, so only pipelines with a matching
+    /// `(topic, trigger_type)` entry are examined.
     async fn evaluate_event(&self, topic: &TopicKey, event: &Event) {
         let snapshot = self.registry.snapshot();
 
@@ -522,15 +517,14 @@ impl TriggerEvaluator {
     /// Called by the Stat Monitor with the latest reading for `metric`.
     ///
     /// Scans all enabled pipelines for `Stat` triggers whose metric, path, and
-    /// camera scope match the supplied sample.  For each matching trigger:
+    /// camera scope match the supplied sample. For each matching trigger:
     ///
     /// 1. If the condition (`operator(actual, threshold)`) is **false** the
     ///    sustained clock is reset so the next rising edge starts fresh.
     /// 2. If the condition is **true** and `sustained_secs > 0`, the trigger
     ///    waits until it has been continuously true for that many seconds.
-    /// 3. Once sustained, the trigger is gated by `cooldown_secs` — it will
-    ///    not fire again until at least that many seconds have elapsed since the
-    ///    last firing.
+    /// 3. Once sustained, the trigger does not fire again until `cooldown_secs`
+    ///    have elapsed since its last firing.
     ///
     /// `path` applies only to disk metrics (e.g. `"/var/lib/vms"`).
     /// `camera_id` applies only to per-feed metrics (`FeedBitrateKbps`,
@@ -603,10 +597,8 @@ impl TriggerEvaluator {
                 let key = (pipeline.id, trigger.id);
 
                 if operator.evaluate(actual, *threshold) {
-                    // Logged only on the rising/falling edge, not every poll
-                    // — this runs continuously for the daemon's lifetime, so
-                    // logging every evaluation would flood the timeline
-                    // rather than inform it.
+                    // Logged only on the rising/falling edge, because this runs
+                    // on every poll and would flood the log otherwise.
                     if !self.stat_sustained.contains_key(&key) {
                         tracing::info!(
                             pipeline_id = %pipeline.id, trigger_id = %trigger.id, actual,
@@ -642,7 +634,7 @@ impl TriggerEvaluator {
                         }
                     }
                 } else if self.stat_sustained.remove(&key).is_some() {
-                    // Condition no longer met — reset sustained clock so the
+                    // Condition no longer met: reset the sustained clock so the
                     // next rising edge requires a fresh sustained period.
                     tracing::info!(
                         pipeline_id = %pipeline.id, trigger_id = %trigger.id, actual,
@@ -681,7 +673,7 @@ impl TriggerEvaluator {
     /// Dispatch a pipeline run for the given trigger context.
     ///
     /// Looks up the pipeline in the registry and spawns an async task that
-    /// calls [`PipelineExecutor::execute`].  If no executor is wired (test
+    /// calls [`PipelineExecutor::execute`]. If no executor is wired (test
     /// builds) the firing is only logged.
     pub(crate) fn fire_pipeline(&self, ctx: TriggerContext) {
         let Some(executor) = self.executor.clone() else {
@@ -712,8 +704,7 @@ impl TriggerEvaluator {
         );
 
         tokio::spawn(async move {
-            // execute() already logs its own run-scoped outcome (with
-            // run_id) — no need for a second, less-correlated echo here.
+            // execute() logs its own outcome with the run_id.
             let _ = executor.execute(ctx, pipeline).await;
         });
     }
@@ -723,9 +714,9 @@ impl TriggerEvaluator {
 
 /// Build an evalexpr context from `event` for filter expression evaluation.
 ///
-/// The event's payload fields are exposed as `event.<key>`.  String, float,
-/// and boolean values are mapped; nested objects and arrays are silently
-/// skipped.  The `event.type` variable is always set to `event.event_type`.
+/// The event's top-level payload fields are exposed as `event.<key>`. Strings,
+/// numbers and booleans are mapped; nested objects, arrays and nulls are
+/// skipped. `event.type` and `event.topic` are always set from the event.
 ///
 /// Example expression: `event.confidence > 0.85 && event.label == "person"`
 fn build_event_context(event: &Event) -> HashMapContext {
@@ -801,9 +792,8 @@ mod tests {
         assert_eq!(result, Ok(true));
     }
 
-    // A filter referencing event.topic must resolve, not error out with
-    // VariableIdentifierNotFound (regression: topic was never added to the
-    // eval context).
+    // A filter referencing event.topic must resolve instead of failing with
+    // VariableIdentifierNotFound.
     #[test]
     fn event_context_filter_matches_on_topic() {
         let event = make_event("object_detected", json!({"label": "person"}));
@@ -885,7 +875,7 @@ mod tests {
         let event_bus = EventBus::new(16);
         let ev = TriggerEvaluator::new_without_executor(registry, event_bus);
 
-        // No panic; stat_cooldowns should have an entry after firing.
+        // Firing records a cooldown entry.
         ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 90.0);
         assert_eq!(ev.stat_cooldowns.len(), 1);
     }
@@ -909,14 +899,13 @@ mod tests {
     fn stat_trigger_waits_for_sustained_duration() {
         use vms_core::StatMetric;
         let pipeline_id = Uuid::new_v4();
-        // sustained_secs = 30 — won't fire on the first call.
         let pipeline = make_stat_pipeline(pipeline_id, StatMetric::RamUsagePercent, 70.0, 30, 0);
         let registry = PipelineRegistry::new_test(vec![pipeline]);
         let event_bus = EventBus::new(16);
         let ev = TriggerEvaluator::new_without_executor(registry, event_bus);
 
         ev.evaluate_stat(&StatMetric::RamUsagePercent, None, None, 85.0);
-        // Condition is met, but not yet sustained for 30s — no firing.
+        // Condition is met but not yet sustained for 30s, so no firing.
         assert!(ev.stat_cooldowns.is_empty());
         // The sustained clock should have started.
         assert_eq!(ev.stat_sustained.len(), 1);
@@ -932,16 +921,16 @@ mod tests {
         let event_bus = EventBus::new(16);
         let ev = TriggerEvaluator::new_without_executor(registry, event_bus);
 
-        // Rising edge — sustained clock starts.
+        // Rising edge: sustained clock starts.
         ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 90.0);
         assert_eq!(ev.stat_sustained.len(), 1);
 
-        // Falling edge — sustained clock clears.
+        // Falling edge: sustained clock clears.
         ev.evaluate_stat(&StatMetric::CpuUsagePercent, None, None, 50.0);
         assert!(ev.stat_sustained.is_empty());
     }
 
-    // signal_to_event_type round-trips for every variant.
+    // signal_to_event_type returns a non-empty string for every variant.
     #[test]
     fn signal_event_type_mapping_is_exhaustive() {
         use SystemSignal::*;

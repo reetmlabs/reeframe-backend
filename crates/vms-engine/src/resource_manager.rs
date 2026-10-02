@@ -16,18 +16,17 @@ use vms_sources::SourceManager;
 use crate::pipeline_registry::RegistrySnapshot;
 use crate::PipelineRegistry;
 
-/// Ref-counted lifecycle coordinator for every shared resource the engine manages.
-///
-/// Applies the *Minimum Activation Principle*: a resource is started when its
-/// ref count goes 0 -> 1 and stopped when it drops back 1 -> 0. This prevents
-/// duplicate GStreamer pipelines or connection pools when multiple VMS pipelines
-/// reference the same camera or destination.
 /// Fallback ring-buffer duration for a `RingBuffer` resource started outside
-/// of `sync` (so `ring_buffer_secs` has nothing recorded for that camera
-/// yet) — in normal operation every acquire is preceded by a `sync` call
-/// that populates the real per-camera requirement.
+/// of `sync`, when `ring_buffer_secs` has nothing recorded for that camera.
+/// Normally every acquire follows a `sync` call that records the real
+/// per-camera requirement.
 const DEFAULT_RING_BUFFER_SECS: u32 = 30;
 
+/// Ref-counted lifecycle coordinator for every shared resource the engine manages.
+///
+/// A resource is started when its ref count goes 0 -> 1 and stopped when it
+/// drops back 1 -> 0, so multiple VMS pipelines referencing the same camera or
+/// destination share one GStreamer pipeline or connection pool.
 pub struct ResourceManager {
     entries: DashMap<ResourceId, ResourceEntry>,
     /// Per-resource watch channel used to park concurrent `acquire` callers while
@@ -75,7 +74,7 @@ impl ResourceManager {
 
     /// Return a snapshot of every tracked resource entry.
     ///
-    /// Intended for diagnostics and the status API — not for hot paths.
+    /// Intended for diagnostics and the status API, not for hot paths.
     pub fn all(&self) -> Vec<(ResourceId, ResourceEntry)> {
         self.entries
             .iter()
@@ -90,10 +89,9 @@ impl ResourceManager {
     /// Called once at daemon startup after the pipeline registry is loaded.
     /// Ensures every camera's live pipeline and source adapter needed by an
     /// enabled pipeline is running before the trigger evaluator begins
-    /// firing. This does not resume recording — a camera that was recording
-    /// before shutdown only comes back live; recording resumes once its
-    /// pipeline's `StartRecording` action fires again (e.g. the trigger
-    /// re-evaluates true) or an operator restarts it explicitly.
+    /// firing. This only brings cameras back live; recording is resumed
+    /// separately by `StartRecording` actions and by
+    /// [`crate::reconcile_recording_intent`].
     pub async fn recover(&self, registry: &PipelineRegistry) -> Result<(), VmsError> {
         let snapshot = registry.snapshot();
         let empty = RegistrySnapshot {
@@ -112,12 +110,11 @@ impl ResourceManager {
     // -- Hot reload --
 
     /// Reconcile ref-counts against a registry change, acquiring or releasing
-    /// only the delta between `old` and `new` — a camera already running for a
-    /// pipeline untouched by the change is neither stopped nor restarted.
+    /// only the delta between `old` and `new`, so a camera already running for
+    /// a pipeline untouched by the change is neither stopped nor restarted.
     ///
-    /// Every acquire/release below is logged-and-continued rather than
-    /// `?`-propagated: one stale/unreachable resource must not block every
-    /// other resource in the same batch from being reconciled.
+    /// Acquire/release failures are logged and skipped so one unreachable
+    /// resource does not block the rest of the batch.
     pub async fn sync(&self, old: &RegistrySnapshot, new: &RegistrySnapshot) {
         let ring_buffer_secs = ring_buffer_durations(new);
         for (&camera_id, &secs) in &ring_buffer_secs {
@@ -141,8 +138,7 @@ impl ResourceManager {
         // depends on (that camera's CameraPipeline), then acquire the other
         // way around, so a resource can never start before, or outlive,
         // the resource it attaches to. HashSet iteration order alone can't
-        // guarantee this, since it has no notion of one resource depending
-        // on another.
+        // guarantee this.
         for id in ids.iter().rev() {
             let before = before.get(id).copied().unwrap_or(0);
             let after = after.get(id).copied().unwrap_or(0);
@@ -168,11 +164,9 @@ impl ResourceManager {
             }
         }
 
-        // A camera's ring buffer ref count doesn't change when an already-
-        // referencing pipeline just needs a *larger* window than before
-        // (e.g. `post_event_secs` edited upward) — the delta loop above
-        // never re-acquires it in that case, so grow any already-running
-        // buffer here regardless of ref-count movement.
+        // When a pipeline that already references a ring buffer needs a
+        // larger window (e.g. `post_event_secs` raised), the ref count doesn't
+        // change and the delta loop above skips it, so grow running buffers here.
         for (camera_id, secs) in ring_buffer_secs {
             let id = ResourceId::RingBuffer(camera_id);
             let already_running = matches!(
@@ -211,8 +205,8 @@ impl ResourceManager {
             let mut entry = self.entries.entry(id.clone()).or_default();
             match entry.state.clone() {
                 ResourceState::Starting => {
-                    // Another task is starting this resource — subscribe to its watch
-                    // and wait. Both DashMaps use independent shards; no deadlock.
+                    // Another task is starting this resource, so wait on its watch.
+                    // Both DashMaps use independent shards, so this can't deadlock.
                     entry.ref_count += 1;
                     let rx = self
                         .state_watches
@@ -226,7 +220,7 @@ impl ResourceManager {
                     Action::Ready
                 }
                 _ => {
-                    // Stopped, Stopping, or Error — we are responsible for starting.
+                    // Stopped, Stopping, or Error: this caller starts it.
                     entry.ref_count += 1;
                     entry.state = ResourceState::Starting;
                     let (tx, _) = tokio::sync::watch::channel(ResourceState::Starting);
@@ -267,7 +261,7 @@ impl ResourceManager {
     }
 
     /// Decrement the ref count for `id`. Stops the resource if the count reaches 0.
-    /// Idempotent — returns `Ok(())` if the resource was never acquired.
+    /// Returns `Ok(())` if the resource was never acquired.
     pub async fn release(&self, id: ResourceId) -> Result<(), VmsError> {
         let should_stop = {
             let Some(mut entry) = self.entries.get_mut(&id) else {
@@ -356,8 +350,8 @@ impl ResourceManager {
     }
 
     /// Lifts the hard gate set by [`Self::disable_source`] and restarts the
-    /// resource if it's still referenced by an enabled pipeline. A no-op if
-    /// nothing currently references it — it starts on the next `acquire` instead.
+    /// resource if it's still referenced by an enabled pipeline. If nothing
+    /// references it, it starts on the next `acquire` instead.
     pub async fn enable_source(&self, source_id: Uuid) -> Result<(), VmsError> {
         let id = ResourceId::Source(source_id);
         let still_referenced = self
@@ -413,11 +407,9 @@ impl ResourceManager {
         }
     }
 
-    /// Acquire `ResourceId::CameraPipeline` for `cam_id` — brings up the
-    /// camera's **live** pipeline only (no recording). Continuous recording
-    /// is a separate, explicit concern handled by the `StartRecording`/
-    /// `StopRecording` actions (see `vms-actions`), not implied by a camera
-    /// merely being referenced by an enabled pipeline.
+    /// Starts the camera's **live** pipeline for `ResourceId::CameraPipeline`.
+    /// Recording is started separately by the `StartRecording`/`StopRecording`
+    /// actions (see `vms-actions`); being referenced by a pipeline doesn't imply it.
     async fn start_live_camera(&self, cam_id: Uuid) -> Result<(), VmsError> {
         let Some((cam, password)) = self.cameras.get_decrypted(cam_id).await? else {
             return Err(VmsError::CameraNotFound(cam_id));
@@ -489,7 +481,7 @@ fn resource_counts(snapshot: &RegistrySnapshot) -> HashMap<ResourceId, usize> {
 }
 
 /// Per-camera ring buffer size required by the currently enabled pipelines
-/// in `snapshot` — the max of `PipelineCameraRef::ring_buffer_secs` (already
+/// in `snapshot`: the max of `PipelineCameraRef::ring_buffer_secs` (already
 /// capped, see `derive_camera_refs`) across every pipeline referencing that
 /// camera. Cameras with no `needs_ring_buffer` reference are absent.
 fn ring_buffer_durations(snapshot: &RegistrySnapshot) -> HashMap<Uuid, u32> {

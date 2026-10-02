@@ -1,33 +1,29 @@
-//! Precomputed daily recording coverage — the aggregation this crate's
-//! `StatMonitor` runs periodically so the API can serve `O(days)` summaries
-//! instead of the frontend re-bucketing raw chunks on every request.
+//! Precomputed daily recording coverage. `StatMonitor` runs this
+//! periodically so the API can serve per-day summaries without the frontend
+//! re-bucketing raw chunks on every request.
 //!
-//! [`compute_day_coverage`] is a direct Rust port of the Qt frontend's
+//! [`compute_day_coverage`] ports the Qt frontend's
 //! `RecordingModel::sessions()`/`dailySummaries()` merge loop
-//! (`ReeframeFrontend/src/models/RecordingModel.cpp`) — same 5-second gap
-//! tolerance, same "an open chunk always ends a session," same "unknown
-//! size poisons the total" rule, same "an open session contributes zero
-//! coverage" rule. It's given chunks already scoped to one UTC calendar day
-//! (via `RecordingRepo::list_starting_in_range_for_camera`), so the FE's
-//! "a new day always forces a new session" rule falls out for free — there's
-//! no cross-day chunk in the input to force a split against.
+//! (`ReeframeFrontend/src/models/RecordingModel.cpp`): same 5-second gap
+//! tolerance, an open chunk always ends a session, an unknown size makes the
+//! total unknown, and an open session contributes zero coverage. Input chunks
+//! are already scoped to one calendar day (via
+//! `RecordingRepo::list_starting_in_range_for_camera`), so the frontend's
+//! "a new day starts a new session" rule holds without extra handling.
 //!
-//! One deliberate deviation from the frontend: day boundaries here are each
-//! camera's own configured timezone (`Camera::timezone`, falling back to
-//! `[recordings] timezone`, falling back to UTC), not the viewing device's
-//! local timezone — a server serves many viewers who may be in different
-//! zones, but a recording is tied to where its camera physically is, not
-//! to whoever happens to be looking at it right now.
+//! Unlike the frontend, day boundaries follow the camera's configured
+//! timezone (`Camera::timezone`, then `[recordings] timezone`, then UTC)
+//! instead of the viewer's local timezone, since viewers may be in different
+//! zones and a recording belongs to where its camera is.
 
 use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
 
 use vms_db::entities::recording;
 
-/// Chunks whose start-to-start gap is at or under this are treated as one
-/// continuous session — matches `RecordingsPanel`'s `sessions(5)` call on
-/// the frontend exactly, so precomputed and on-demand values agree on
-/// ordinary chunk-rotation boundaries.
+/// A chunk starting at most this many seconds after the running session's
+/// end joins that session. Matches the frontend's `RecordingsPanel`
+/// `sessions(5)` call so precomputed and on-demand values agree.
 const GAP_TOLERANCE_SECS: i64 = 5;
 
 #[derive(Serialize)]
@@ -41,9 +37,8 @@ pub struct SessionRange {
 }
 
 pub struct DailyCoverageResult {
-    /// Sum of merged session spans — an in-progress session contributes 0
-    /// until it closes (matches the frontend's `totalCoverageSecs`, not a
-    /// live `now() - start` estimate).
+    /// Sum of merged session spans. An in-progress session contributes 0
+    /// until it closes, matching the frontend's `totalCoverageSecs`.
     pub coverage_seconds: i64,
     pub session_ranges: serde_json::Value,
     /// Raw chunk count for the day (sessions merge chunks; this doesn't).
@@ -52,7 +47,7 @@ pub struct DailyCoverageResult {
     pub total_size_bytes: Option<i64>,
 }
 
-/// Merge `chunks` (already scoped to one calendar day, oldest first — see
+/// Merge `chunks` (already scoped to one calendar day, oldest first; see
 /// [`vms_db::repos::RecordingRepo::list_starting_in_range_for_camera`])
 /// into sessions and summarize them for that day.
 pub fn compute_day_coverage(chunks: &[recording::Model]) -> DailyCoverageResult {
@@ -86,9 +81,8 @@ pub fn compute_day_coverage(chunks: &[recording::Model]) -> DailyCoverageResult 
 
     for chunk in &chunks[1..] {
         // An open chunk (still being written) always ends the running
-        // session — nothing can legitimately follow it yet. Otherwise,
-        // contiguous if the gap since the running session's end is within
-        // tolerance (a negative gap, i.e. overlap, still counts).
+        // session. Otherwise the chunk is contiguous if the gap since the
+        // session's end is within tolerance; overlap (a negative gap) counts.
         let contiguous = session_end
             .is_some_and(|end| (chunk.start_time - end).num_seconds() <= GAP_TOLERANCE_SECS);
 
@@ -180,7 +174,7 @@ mod tests {
 
     #[test]
     fn adjacent_chunks_merge_into_one_session() {
-        // Back-to-back, zero gap — well within the 5s tolerance.
+        // Back-to-back, zero gap.
         let chunks = vec![
             chunk(at(0), Some(at(600)), Some(1000)),
             chunk(at(600), Some(at(1200)), Some(2000)),
@@ -223,8 +217,8 @@ mod tests {
 
     #[test]
     fn open_chunk_mid_stream_still_forces_a_new_session_after_it() {
-        // A closed chunk following an open one can't be "contiguous" with
-        // it — the open chunk has no end to measure the gap from.
+        // A closed chunk following an open one can't be contiguous with it:
+        // the open chunk has no end to measure the gap from.
         let chunks = vec![
             chunk(at(0), None, Some(1000)),
             chunk(at(600), Some(at(1200)), Some(1000)),

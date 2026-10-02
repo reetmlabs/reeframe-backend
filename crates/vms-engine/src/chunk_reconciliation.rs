@@ -1,20 +1,16 @@
 //! Startup reconciliation for `recordings` rows left with `end_time IS
-//! NULL` by a previous process lifetime. Two distinct bugs can produce such
-//! a row: a hard kill mid-chunk (the file itself is genuinely corrupt — no
-//! readable `moov` atom), or the now-fixed clean-shutdown DB-write race (the
-//! file finalized fine, only the bookkeeping was lost). This sweep can't
-//! tell which bug produced a given row, and doesn't need to — it probes the
-//! file itself and either heals the row (file is valid) or discards it
-//! (file is missing/corrupt), regardless of cause.
+//! NULL` by a previous process. Such a row comes either from a hard kill
+//! mid-chunk (the file has no readable `moov` atom) or from a file that was
+//! finalized while its DB update was lost. The sweep probes each file and
+//! heals the row if the file is valid, or discards it if the file is missing
+//! or corrupt.
 
 use gstreamer_pbutils::prelude::*;
 use vms_db::RecordingRepo;
 
-/// Runs once at daemon startup, before any camera in this process opens a
-/// fresh chunk of its own — every row this finds is unconditionally left
-/// over from a previous process lifetime, never a chunk currently being
-/// written. Best-effort throughout: a probe or DB failure is logged and
-/// skipped, never fatal to startup.
+/// Runs once at daemon startup, before any camera opens a new chunk, so every
+/// open row it finds belongs to a previous process. A probe or DB failure is
+/// logged and skipped, never fatal to startup.
 pub async fn reconcile_orphaned_chunks(recording_repo: &RecordingRepo) {
     let open_rows = match recording_repo.list_open_chunks().await {
         Ok(rows) => rows,
@@ -74,9 +70,8 @@ pub async fn reconcile_orphaned_chunks(recording_repo: &RecordingRepo) {
 }
 
 enum ChunkProbe {
-    // `sea_orm::prelude::DateTimeWithTimeZone` is a type alias for exactly
-    // this — spelled out here rather than adding a real (non-dev) `sea-orm`
-    // dependency just for one alias.
+    // Same type as `sea_orm::prelude::DateTimeWithTimeZone`, spelled out to
+    // avoid a non-dev `sea-orm` dependency for one alias.
     Valid {
         end_time: chrono::DateTime<chrono::FixedOffset>,
         size_bytes: i64,
@@ -84,13 +79,10 @@ enum ChunkProbe {
     Invalid,
 }
 
-/// Runs on a blocking thread — `Discoverer` does synchronous I/O and
-/// decoding, and can take real wall-clock time on a large file. A missing
-/// file, or one `Discoverer` can't find a readable video stream in, is
-/// treated as a hard-kill casualty; anything else is healable, using the
-/// file's own mtime/size as the backfilled `end_time`/`size_bytes` — the
-/// process that actually closed it is long gone, so this is the best
-/// available substitute for the real close instant.
+/// Must run on a blocking thread: `Discoverer` does synchronous I/O and
+/// decoding, which can take a while on a large file. A missing file, or one
+/// without a readable video stream, is `Invalid`. Otherwise the file's mtime
+/// and size stand in for the unknown real `end_time` and `size_bytes`.
 fn probe_chunk_file(path: &str) -> ChunkProbe {
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -98,8 +90,8 @@ fn probe_chunk_file(path: &str) -> ChunkProbe {
     };
 
     // `file_path` in the DB is relative to the daemon's working directory
-    // (e.g. `./recordings/...`), but `g_filename_to_uri` (and thus a bare
-    // `file://` string) requires an absolute path — canonicalize first.
+    // (e.g. `./recordings/...`), but `g_filename_to_uri` (and any `file://`
+    // URI) requires an absolute path, so canonicalize first.
     let uri = match std::fs::canonicalize(path)
         .ok()
         .and_then(|abs| gstreamer::glib::filename_to_uri(abs, None).ok())
@@ -191,10 +183,9 @@ mod tests {
         }
     }
 
-    /// Regression test: `recordings.file_path` is relative to the daemon's
-    /// working directory (e.g. `./recordings/...`), not absolute. A bare
-    /// `file://<relative path>` string is not a valid URI, which used to
-    /// make `Discoverer` fail on every real chunk and mark it corrupt.
+    /// `recordings.file_path` is relative to the daemon's working directory
+    /// (e.g. `./recordings/...`). A `file://<relative path>` string is not a
+    /// valid URI, and `Discoverer` would reject every real chunk as corrupt.
     #[test]
     fn relative_path_valid_mp4_is_healed() {
         gstreamer::init().unwrap();

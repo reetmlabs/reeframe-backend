@@ -1,23 +1,19 @@
 //! Reconciles persisted recording intent (`cameras.desired_recording`)
-//! against reality. `MediaManager::is_recording` alone can't survive a
-//! restart, and `ResourceManager::recover()` only re-acquires pipelines for
-//! cameras referenced by an enabled automation pipeline — a manually-started
-//! recording is invisible to both. This is the piece
-//! that resumes it anyway: called both from `MediaManager`'s
-//! `pipeline_live_tx` notification (event-driven, fires the moment a
-//! pipeline comes up or reconnects) and from a periodic sweep, as a
-//! best-effort safety net for whatever the event misses.
+//! against what is actually recording. `MediaManager::is_recording` does not
+//! survive a restart, and `ResourceManager::recover()` only re-acquires
+//! cameras referenced by an enabled automation pipeline, so a manually started
+//! recording would otherwise stay stopped. Called from `MediaManager`'s
+//! `pipeline_live_tx` notification (when a pipeline comes up or reconnects)
+//! and from a periodic sweep that catches anything the event misses.
 
 use uuid::Uuid;
 use vms_db::CameraRepo;
 use vms_media::MediaManager;
 
-/// If `camera_id` wants to be recording and isn't, resolve its RTSP URL(s)
-/// and attach recording. No-op if it's already recording, disabled (mirrors
-/// the gate in `POST /cameras/{id}/recording/start`), doesn't want to be
-/// recording, or no longer exists. Failures are logged, never propagated —
-/// this is always a best-effort reconciliation pass, never a request a
-/// caller is blocked on.
+/// Starts recording on `camera_id` if it wants to be recording and isn't.
+/// No-op if it is already recording, disabled (same gate as
+/// `POST /cameras/{id}/recording/start`), doesn't want to record, or no
+/// longer exists. Failures are logged and never returned to the caller.
 pub async fn reconcile_recording_intent(
     camera_repo: &CameraRepo,
     media_manager: &MediaManager,

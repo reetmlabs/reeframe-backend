@@ -1,5 +1,5 @@
-// vms-engine — event bus, pipeline registry, trigger evaluator, scheduler,
-//              pipeline executor, resource manager, and stat monitor.
+// vms-engine: event bus, pipeline registry, trigger evaluator, scheduler,
+// pipeline executor, resource manager, and stat monitor.
 
 pub mod chunk_reconciliation;
 pub mod coverage;

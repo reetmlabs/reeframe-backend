@@ -6,7 +6,7 @@ use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, TopicKey, TriggerConfig, TriggerType, VmsError};
 use vms_db::PipelineRepo;
 
-/// Atomic snapshot of the pipeline registry — pipeline map plus trigger index.
+/// Atomic snapshot of the pipeline registry: pipeline map plus trigger index.
 ///
 /// Both fields are rebuilt together on every [`PipelineRegistry::reload`] and
 /// stored in a single `Arc` so readers always see a consistent pair.
@@ -15,8 +15,8 @@ pub struct RegistrySnapshot {
     pub pipelines: HashMap<Uuid, Arc<CompiledPipeline>>,
     /// Pre-built index for O(1) event dispatch.
     ///
-    /// Key: `(topic, trigger_type)` — the topic the event arrived on and the
-    /// kind of trigger it should fire.  Value: list of `(pipeline_id, trigger_id)`
+    /// Key: `(topic, trigger_type)`, the topic the event arrived on and the
+    /// kind of trigger it should fire. Value: list of `(pipeline_id, trigger_id)`
     /// pairs that must be evaluated when a matching event arrives.
     pub trigger_index: HashMap<(TopicKey, TriggerType), Vec<(Uuid, Uuid)>>,
 }
@@ -43,8 +43,8 @@ impl PipelineRegistry {
         })
     }
 
-    /// Construct a registry pre-loaded with `pipelines`. Only for unit tests —
-    /// avoids a live database connection.  `load`/`reload` are no-ops.
+    /// Construct a registry pre-loaded with `pipelines`, for unit tests that
+    /// have no database. `load`/`reload` are no-ops.
     #[cfg(test)]
     pub fn new_test(pipelines: Vec<CompiledPipeline>) -> Arc<Self> {
         let map: HashMap<Uuid, Arc<CompiledPipeline>> =
@@ -68,7 +68,7 @@ impl PipelineRegistry {
     /// Re-fetch all enabled pipelines from DB and atomically swap in a fresh snapshot.
     ///
     /// Pipelines that fail DAG validation or deserialization are logged at WARN and
-    /// skipped — the reload always succeeds as long as the DB query itself succeeds.
+    /// skipped, so the reload succeeds as long as the DB query itself succeeds.
     /// Callers (API mutation handlers) should invoke this after any change to a
     /// pipeline, its nodes, edges, or triggers.
     ///
@@ -181,7 +181,7 @@ fn build_trigger_index(
                         .or_default()
                         .push((pipeline.id, trigger.id));
                 }
-                // Schedule, Manual, Stat — not dispatched via the event bus.
+                // Schedule, Manual, Stat: not dispatched via the event bus.
                 _ => {}
             }
         }

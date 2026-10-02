@@ -16,8 +16,7 @@ pub const DEFAULT_CAPACITY: usize = 512;
 /// created lazily on the first [`subscribe`](EventBus::subscribe) call for
 /// a given key.
 ///
-/// All clones of `Arc<EventBus>` share the same registry — there is exactly
-/// one bus per daemon process.
+/// The daemon creates one bus and shares it through `Arc` clones.
 pub struct EventBus {
     channels: DashMap<TopicKey, broadcast::Sender<Event>>,
     capacity: usize,
@@ -39,11 +38,10 @@ impl EventBus {
         })
     }
 
-    /// Same as [`new`](EventBus::new), but records every publish onto
-    /// `metrics` (`event_bus_published_total`, by topic kind). Kept as a
-    /// separate constructor rather than an added `new` parameter so the
-    /// existing dozen `EventBus::new(capacity)` test call sites across this
-    /// crate don't need to thread a `Metrics` handle through.
+    /// Same as [`new`](EventBus::new), but counts every delivered publish in
+    /// `metrics` (`event_bus_published_total`, by topic kind). A separate
+    /// constructor keeps tests that call `EventBus::new(capacity)` free of a
+    /// `Metrics` handle.
     pub fn new_with_metrics(capacity: usize, metrics: Arc<Metrics>) -> Arc<Self> {
         Arc::new(Self {
             channels: DashMap::new(),
@@ -55,7 +53,7 @@ impl EventBus {
     /// Subscribe to a topic, returning a live [`broadcast::Receiver<Event>`].
     ///
     /// If no channel exists for `key` yet, one is created now (lazy init).
-    /// The receiver only delivers events published **after** this call —
+    /// The receiver only delivers events published **after** this call;
     /// there is no history replay.
     ///
     /// Multiple callers subscribing to the same key each get an independent
@@ -73,11 +71,11 @@ impl EventBus {
     /// Publish `event` to every active subscriber on `key`.
     ///
     /// If no channel exists for `key` (nobody has called [`subscribe`] yet)
-    /// the event is dropped silently — there is nobody to receive it.
+    /// the event is dropped silently.
     ///
-    /// If the channel exists but all receivers have been dropped,
-    /// [`broadcast::Sender::send`] returns `Err` and the event is dropped.
-    /// This is logged at TRACE and not treated as an error.
+    /// If the channel exists but all receivers have been dropped, the event is
+    /// dropped and the dead channel is removed from the map. This is logged at
+    /// TRACE and not treated as an error.
     ///
     /// [`subscribe`]: EventBus::subscribe
     pub fn publish(&self, key: &TopicKey, event: Event) {
@@ -101,9 +99,9 @@ impl EventBus {
     }
 }
 
-/// Maps a [`TopicKey`] to its *kind* — a small fixed vocabulary safe to use
-/// as a Prometheus label, as opposed to [`TopicKey::topic_string`] which
-/// embeds a raw UUID for `Camera`/`Source` and would blow up cardinality.
+/// Maps a [`TopicKey`] to its *kind*, a small fixed vocabulary safe to use as
+/// a Prometheus label. [`TopicKey::topic_string`] embeds a UUID for
+/// `Camera`/`Source` and would blow up label cardinality.
 fn topic_kind(key: &TopicKey) -> &'static str {
     match key {
         TopicKey::Camera(_) => "camera",
@@ -126,7 +124,7 @@ mod tests {
         Event::new(key, "test_event", json!({"x": 1}))
     }
 
-    // A single subscriber receives the event that was published after it subscribed.
+    // A subscriber receives an event published after it subscribed.
     #[tokio::test]
     async fn single_subscriber_receives_published_event() {
         let bus = EventBus::new(16);
@@ -139,8 +137,8 @@ mod tests {
         assert_eq!(got.event_type, "test_event");
     }
 
-    // Two subscribers on the same topic both receive the same event independently.
-    // This proves broadcast semantics: the event is not consumed by the first reader.
+    // Two subscribers on the same topic both receive the same event; the first
+    // reader does not consume it.
     #[tokio::test]
     async fn two_subscribers_both_receive_same_event() {
         let bus = EventBus::new(16);
@@ -154,8 +152,8 @@ mod tests {
         assert_eq!(rx2.recv().await.unwrap().event_type, "test_event");
     }
 
-    // Events published to Camera(A) are invisible to a subscriber on Camera(B)
-    // and on System. Topics are completely isolated.
+    // Events published to Camera(A) are not seen by subscribers on Camera(B)
+    // or System.
     #[tokio::test]
     async fn different_topics_do_not_cross_pollute() {
         let bus = EventBus::new(16);
@@ -183,12 +181,12 @@ mod tests {
     async fn lagged_receiver_reports_lag_then_recovers() {
         use tokio::sync::broadcast::error::RecvError;
 
-        let bus = EventBus::new(2); // tiny buffer — overflows after 2 unread events
+        let bus = EventBus::new(2); // overflows after 2 unread events
         let key = TopicKey::Stat;
 
         let mut rx = bus.subscribe(&key);
 
-        // Publish 4 events without consuming — buffer overflows by 2
+        // Publish 4 events without consuming, overflowing the buffer by 2
         for _ in 0..4 {
             bus.publish(&key, make_event(&key));
         }
@@ -223,9 +221,8 @@ mod tests {
         );
     }
 
-    // Publishing to a topic that has no subscribers is a silent noop.
-    // Crucially, it must NOT create a channel entry in the map — only
-    // subscribe() creates channels.
+    // Publishing to a topic with no subscribers is a silent no-op and must not
+    // create a channel entry; only subscribe() creates channels.
     #[tokio::test]
     async fn publish_before_subscribe_is_noop_and_creates_no_channel() {
         let bus = EventBus::new(16);
