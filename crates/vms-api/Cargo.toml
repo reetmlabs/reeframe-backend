@@ -2,7 +2,7 @@
 name    = "vms-api"
 version = "0.2.0"
 edition = "2021"
-license = "BSD-3-Clause"
+license = "Apache-2.0"
 
 [dependencies]
 vms-core   = { path = "../vms-core" }

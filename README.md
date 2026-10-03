@@ -3,7 +3,7 @@
 A lightweight, self-hosted video management system (VMS) backend in Rust. It records and relays IP cameras, and runs your own automation on what they see, without per-camera licensing.
 
 [![CI](https://github.com/reetmlabs/reeframe-backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/reetmlabs/reeframe-backend/actions/workflows/ci.yml)
-[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20amd64%20%C2%B7%20arm64-lightgrey.svg)](#platforms)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
@@ -18,7 +18,7 @@ This is the backend of Reeframe. The web UI and the optional multi-site Coordina
 - Automation is built in. A pipeline like "on motion, cut a clip starting 10 s before the event and send it to Telegram" needs no glue code.
 - Events come in from Home Assistant, MQTT and webhooks, among others, and results go out to S3, SFTP, email, Slack, Telegram or a webhook.
 - Recording survives trouble: cameras reconnect with backoff and a circuit breaker, unfinished chunks are repaired after a crash, and recordings resume after a restart.
-- It's BSD-3-Clause, with no per-camera or per-channel fees.
+- It's Apache-2.0, with no per-camera or per-channel fees.
 
 ### Resource usage
 
@@ -173,4 +173,4 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[BSD-3-Clause](LICENSE).
+[Apache-2.0](LICENSE). If you redistribute Reeframe or build on it, keep the [NOTICE](NOTICE) file with it, as the license requires.
