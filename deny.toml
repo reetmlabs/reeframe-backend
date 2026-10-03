@@ -1,5 +1,5 @@
 # Dependency license policy, checked in CI with `cargo deny check licenses`.
-# Only permissive licenses compatible with BSD-3-Clause are allowed.
+# Only permissive licenses compatible with Apache-2.0 are allowed.
 
 [graph]
 all-features = true

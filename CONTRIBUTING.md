@@ -40,4 +40,4 @@ Open an issue with what you expected, what happened, and the relevant daemon log
 
 ## License
 
-By contributing you agree that your contributions are licensed under the project's [BSD-3-Clause license](LICENSE).
+By contributing you agree that your contributions are licensed under the project's [Apache-2.0 license](LICENSE).
