@@ -84,6 +84,7 @@ RUN mkdir -p /var/lib/reeframe/recordings \
     && chown -R reeframe:reeframe /var/lib/reeframe
 
 COPY --from=builder /build/target/release/vms-daemon /usr/local/bin/vms-daemon
+COPY LICENSE NOTICE /usr/share/doc/reeframe-backend/
 
 USER reeframe
 

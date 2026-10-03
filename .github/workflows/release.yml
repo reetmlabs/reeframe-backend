@@ -96,6 +96,7 @@ jobs:
 
           install -m 0755 artifacts/vms-daemon         "$STAGING/bin/vms-daemon"
           install -m 0644 dist/reeframe.service           "$STAGING/systemd/reeframe.service"
+          install -m 0644 LICENSE NOTICE                  "$STAGING/"
 
           # Minimal install instructions inside the archive
           cat > "$STAGING/README.txt" <<EOF
@@ -122,7 +123,8 @@ jobs:
           mkdir -p \
             "$PKG/DEBIAN" \
             "$PKG/usr/local/bin" \
-            "$PKG/etc/systemd/system"
+            "$PKG/etc/systemd/system" \
+            "$PKG/usr/share/doc/reeframe-backend"
 
           # Maintainer scripts
           install -m 0755 dist/debian/postinst "$PKG/DEBIAN/postinst"
@@ -137,6 +139,7 @@ jobs:
           # Payload files
           install -m 0755 artifacts/vms-daemon  "$PKG/usr/local/bin/vms-daemon"
           install -m 0644 dist/reeframe.service   "$PKG/etc/systemd/system/reeframe.service"
+          install -m 0644 LICENSE NOTICE          "$PKG/usr/share/doc/reeframe-backend/"
 
           dpkg-deb --build --root-owner-group "$PKG"
 
