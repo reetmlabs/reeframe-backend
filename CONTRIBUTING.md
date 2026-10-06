@@ -2,6 +2,14 @@
 
 Thanks for helping. Bug reports, fixes and small focused features are all welcome.
 
+## Contributor License Agreement
+
+Every contributor signs the [Contributor License Agreement](CLA.md) once.
+The CLA Assistant bot asks for it on your first pull request, and the pull
+request can't be merged until it's signed. You keep the copyright to your
+work. The CLA lets the project use your contribution under the Apache
+License 2.0 and under other licenses in the future.
+
 ## Setup
 
 Install the build dependencies listed in the README, then:
@@ -40,4 +48,4 @@ Open an issue with what you expected, what happened, and the relevant daemon log
 
 ## License
 
-By contributing you agree that your contributions are licensed under the project's [Apache-2.0 license](LICENSE).
+By contributing you agree that your contributions are licensed under the project's [Apache-2.0 license](LICENSE), under the terms of the [CLA](CLA.md).
