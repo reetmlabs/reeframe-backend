@@ -835,3 +835,39 @@ fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>
     }
     base_url.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_level_applies_when_rust_log_is_unset() {
+        assert_eq!(log_directive(None, "debug"), "debug");
+    }
+
+    #[test]
+    fn rust_log_overrides_log_level() {
+        assert_eq!(log_directive(Some("warn".into()), "debug"), "warn");
+    }
+
+    #[test]
+    fn empty_rust_log_counts_as_unset() {
+        assert_eq!(log_directive(Some(String::new()), "debug"), "debug");
+    }
+
+    #[test]
+    fn valid_directive_is_kept() {
+        let (filter, error) = parse_log_filter("warn,vms_media=debug");
+
+        assert!(error.is_none());
+        assert_eq!(filter.to_string(), "vms_media=debug,warn");
+    }
+
+    #[test]
+    fn invalid_directive_falls_back_to_info() {
+        let (filter, error) = parse_log_filter("info,vms_media=loud");
+
+        assert!(error.is_some());
+        assert_eq!(filter.to_string(), "info");
+    }
+}
