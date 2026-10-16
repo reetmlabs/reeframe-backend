@@ -40,7 +40,7 @@ case "$1" in
 # VMS_MEDIA__RECORDING_DIR=/var/lib/reeframe/recordings
 # VMS_API__BIND=0.0.0.0:8080
 # VMS_RTSP__BIND=0.0.0.0:8554
-# RUST_LOG=info
+# VMS_LOG_LEVEL=info
 EOF
             chmod 0600 /etc/reeframe/env
         fi
