@@ -63,12 +63,20 @@ struct RelayEntry {
 pub struct RelayServer {
     mounts: gstreamer_rtsp_server::RTSPMountPoints,
     bind: String,
+    public_host: Option<String>,
+    public_port: Option<u16>,
     relays: Mutex<HashMap<(Uuid, RelayQuality), RelayEntry>>,
     _loop_thread: std::thread::JoinHandle<()>,
 }
 
 impl RelayServer {
-    pub fn new(bind: &str) -> Result<Self, VmsError> {
+    /// `public_host`/`public_port` override the host and port advertised in
+    /// relay URLs, for when the bind address isn't what clients reach (Docker).
+    pub fn new(
+        bind: &str,
+        public_host: Option<String>,
+        public_port: Option<u16>,
+    ) -> Result<Self, VmsError> {
         let main_context = glib::MainContext::new();
         let main_loop = glib::MainLoop::new(Some(&main_context), false);
 
@@ -96,6 +104,8 @@ impl RelayServer {
         Ok(Self {
             mounts,
             bind: bind.to_owned(),
+            public_host,
+            public_port,
             relays: Mutex::new(HashMap::new()),
             _loop_thread: loop_thread,
         })
@@ -177,9 +187,6 @@ impl RelayServer {
     }
 
     /// Return the relay URL for a camera/quality if currently registered.
-    ///
-    /// When the bind host is `0.0.0.0` or `::`, the machine's primary outbound IP
-    /// is substituted so that the returned URL is routable by clients on the LAN.
     pub fn relay_url(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
         if !self
             .relays
@@ -189,15 +196,15 @@ impl RelayServer {
         {
             return None;
         }
-        let (host, port) = split_bind(&self.bind)?;
-        let effective_host = if host == "0.0.0.0" || host == "::" {
-            primary_ip().unwrap_or(host)
-        } else {
-            host
-        };
+        let (host, port) = advertised_host_port(
+            &self.bind,
+            self.public_host.as_deref(),
+            self.public_port,
+            primary_ip,
+        )?;
         Some(format!(
             "rtsp://{}:{}{}",
-            effective_host,
+            host,
             port,
             relay_path(camera_id, quality)
         ))
@@ -305,6 +312,25 @@ fn split_bind(bind: &str) -> Option<(String, String)> {
     Some((host, port))
 }
 
+/// Resolve the host and port clients should use. A configured public host or
+/// port wins; otherwise a wildcard bind host (`0.0.0.0`/`::`) is replaced by
+/// `detect_ip()` so the URL is routable on the LAN.
+fn advertised_host_port(
+    bind: &str,
+    public_host: Option<&str>,
+    public_port: Option<u16>,
+    detect_ip: impl FnOnce() -> Option<String>,
+) -> Option<(String, String)> {
+    let (bind_host, bind_port) = split_bind(bind)?;
+    let host = match public_host.filter(|h| !h.is_empty()) {
+        Some(h) => h.to_owned(),
+        None if bind_host == "0.0.0.0" || bind_host == "::" => detect_ip().unwrap_or(bind_host),
+        None => bind_host,
+    };
+    let port = public_port.map_or(bind_port, |p| p.to_string());
+    Some((host, port))
+}
+
 /// Detect the machine's primary outbound IP by "connecting" a UDP socket to a
 /// public address (no packets are actually sent). Returns the local address the
 /// OS selected, which is the IP that LAN clients should use to reach this host.
@@ -314,4 +340,45 @@ fn primary_ip() -> Option<String> {
     sock.connect("8.8.8.8:80").ok()?;
     let addr = sock.local_addr().ok()?;
     Some(addr.ip().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detected() -> Option<String> {
+        Some("192.168.1.5".into())
+    }
+
+    #[test]
+    fn wildcard_bind_uses_detected_ip() {
+        assert_eq!(
+            advertised_host_port("0.0.0.0:8554", None, None, detected),
+            Some(("192.168.1.5".into(), "8554".into()))
+        );
+    }
+
+    #[test]
+    fn specific_bind_host_is_kept() {
+        assert_eq!(
+            advertised_host_port("10.0.0.2:8554", None, None, detected),
+            Some(("10.0.0.2".into(), "8554".into()))
+        );
+    }
+
+    #[test]
+    fn public_host_and_port_override_bind() {
+        assert_eq!(
+            advertised_host_port("0.0.0.0:8554", Some("nvr.lan"), Some(18554), detected),
+            Some(("nvr.lan".into(), "18554".into()))
+        );
+    }
+
+    #[test]
+    fn empty_public_host_falls_back() {
+        assert_eq!(
+            advertised_host_port("0.0.0.0:8554", Some(""), None, detected),
+            Some(("192.168.1.5".into(), "8554".into()))
+        );
+    }
 }

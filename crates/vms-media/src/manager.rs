@@ -30,6 +30,10 @@ pub struct MediaConfig {
     pub chunk_duration_secs: u64,
     /// Address and port for the RTSP relay server (e.g. "0.0.0.0:8554").
     pub rtsp_bind: String,
+    /// Host advertised in relay URLs instead of the detected one.
+    pub rtsp_public_host: Option<String>,
+    /// Port advertised in relay URLs instead of the bind port.
+    pub rtsp_public_port: Option<u16>,
     /// Minimum spacing between timeline thumbnail captures, in seconds
     /// (default: 30).
     pub thumbnail_interval_secs: u64,
@@ -41,6 +45,8 @@ impl Default for MediaConfig {
             recording_dir: PathBuf::from("/var/lib/reeframe/recordings"),
             chunk_duration_secs: 300,
             rtsp_bind: "0.0.0.0:8554".into(),
+            rtsp_public_host: None,
+            rtsp_public_port: None,
             thumbnail_interval_secs: 30,
         }
     }
@@ -202,7 +208,11 @@ impl MediaManager {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
         cleanup_stale_faststart_tmp_files(&config.recording_dir);
-        let relay = Arc::new(RelayServer::new(&config.rtsp_bind)?);
+        let relay = Arc::new(RelayServer::new(
+            &config.rtsp_bind,
+            config.rtsp_public_host.clone(),
+            config.rtsp_public_port,
+        )?);
         Ok(Self {
             config,
             cameras: Mutex::new(HashMap::new()),
