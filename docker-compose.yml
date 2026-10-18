@@ -11,7 +11,6 @@ services:
       # Optional overrides (Dockerfile defaults are used if not set)
       VMS_DATABASE__URL: sqlite:///var/lib/reeframe/reeframe.db?mode=rwc
       VMS_MEDIA__RECORDING_DIR: /var/lib/reeframe/recordings
-      RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - reeframe-data:/var/lib/reeframe
     restart: unless-stopped

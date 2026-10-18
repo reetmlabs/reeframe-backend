@@ -166,9 +166,8 @@ pub struct AppConfig {
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
     pub encryption_key: String,
-    /// Log level setting (trace | debug | info | warn | error). The daemon's
-    /// active log filter comes from the RUST_LOG env var, because tracing is
-    /// set up before this config is loaded.
+    /// Stderr log filter, as a level (trace | debug | info | warn | error) or
+    /// any `EnvFilter` directive. A non-empty RUST_LOG overrides it.
     pub log_level: String,
 }
 

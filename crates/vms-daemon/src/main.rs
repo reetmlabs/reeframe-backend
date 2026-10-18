@@ -14,7 +14,10 @@ use salvo::server::Server;
 use salvo::Listener;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{
+    filter::ParseError, fmt, layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter,
+    Layer, Registry,
+};
 use vms_api::{
     auth::LocalJwtAuthProvider, coordinator_auth::CoordinatorJwksAuthProvider,
     routes::build_router, state::AppState,
@@ -46,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // -- Observability --
-    let _otel_guard = init_tracing();
+    let (_otel_guard, log_filter_handle) = init_tracing();
 
     // -- Config --
     // `mut` because dynamic settings resolution patches in DB-stored
@@ -110,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!(error = %e, "Failed to resolve dynamic settings");
             anyhow::anyhow!(e)
         })?;
+    apply_log_level(&log_filter_handle, &cfg.log_level);
     tracing::info!(
         retention_days = cfg.recordings.retention_days,
         retention_disk_threshold_percent = cfg.recordings.retention_disk_threshold_percent,
@@ -640,10 +644,13 @@ async fn main() -> anyhow::Result<()> {
 /// OTLP export of spans and log events when `OTEL_EXPORTER_OTLP_ENDPOINT`
 /// or `OTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT` is set.
 ///
+/// The stderr filter starts at `RUST_LOG` (or `info`) and is swapped for the
+/// configured `log_level` through the returned handle once settings resolve.
+///
 /// Returns a guard that must live as long as `main`. Dropping it, including
 /// on an early `?` return, flushes pending OTLP batches and shuts the
 /// exporters down.
-fn init_tracing() -> OtelGuard {
+fn init_tracing() -> (OtelGuard, LogFilterHandle) {
     let otlp_enabled = [
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -658,17 +665,20 @@ fn init_tracing() -> OtelGuard {
         .with_current_span(true)
         .with_span_list(true);
 
+    let (startup_filter, _) = parse_log_filter(&log_directive(rust_log_env(), DEFAULT_LOG_FILTER));
+    let (log_filter, log_filter_handle) = reload::Layer::new(startup_filter);
+
     if !otlp_enabled {
         tracing_subscriber::registry()
-            .with(EnvFilter::from_default_env())
+            .with(log_filter)
             .with(fmt_layer)
             .init();
-        return OtelGuard::Disabled;
+        return (OtelGuard::Disabled, log_filter_handle);
     }
 
     // Keeps the OTLP HTTP client's own spans and logs out of the export,
     // otherwise each export call would generate more data to export. Only
-    // the OTel layers use this filter; stderr output follows RUST_LOG.
+    // the OTel layers use this filter; stderr output follows the log filter.
     let otel_noise_filter = || {
         EnvFilter::new("info")
             .add_directive("hyper=off".parse().expect("valid directive"))
@@ -703,15 +713,54 @@ fn init_tracing() -> OtelGuard {
         OpenTelemetryTracingBridge::new(&logger_provider).with_filter(otel_noise_filter());
 
     tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
+        .with(log_filter)
         .with(fmt_layer)
         .with(otel_trace_layer)
         .with(otel_log_layer)
         .init();
 
-    OtelGuard::Enabled {
+    let guard = OtelGuard::Enabled {
         tracer_provider,
         logger_provider,
+    };
+    (guard, log_filter_handle)
+}
+
+type LogFilterHandle = reload::Handle<EnvFilter, Registry>;
+
+const DEFAULT_LOG_FILTER: &str = "info";
+
+/// `RUST_LOG`, treating an empty value as unset.
+fn rust_log_env() -> Option<String> {
+    std::env::var("RUST_LOG").ok().filter(|v| !v.is_empty())
+}
+
+/// A non-empty `RUST_LOG` overrides the configured `log_level`.
+fn log_directive(rust_log: Option<String>, log_level: &str) -> String {
+    rust_log
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| log_level.to_string())
+}
+
+/// Parses an `EnvFilter` directive, falling back to `info` if it is invalid.
+fn parse_log_filter(directive: &str) -> (EnvFilter, Option<ParseError>) {
+    match EnvFilter::try_new(directive) {
+        Ok(filter) => (filter, None),
+        Err(e) => (EnvFilter::new(DEFAULT_LOG_FILTER), Some(e)),
+    }
+}
+
+/// Swaps the stderr filter for the resolved `log_level`, unless `RUST_LOG`
+/// overrides it.
+fn apply_log_level(handle: &LogFilterHandle, log_level: &str) {
+    let directive = log_directive(rust_log_env(), log_level);
+    let (filter, parse_error) = parse_log_filter(&directive);
+    if let Err(e) = handle.reload(filter) {
+        tracing::warn!(error = %e, "Failed to apply log filter");
+        return;
+    }
+    if let Some(e) = parse_error {
+        tracing::warn!(directive, error = %e, "Invalid log filter, using \"info\" instead");
     }
 }
 
@@ -785,4 +834,40 @@ fn build_rtsp_url(base_url: &str, username: Option<&str>, password: Option<&str>
         }
     }
     base_url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_level_applies_when_rust_log_is_unset() {
+        assert_eq!(log_directive(None, "debug"), "debug");
+    }
+
+    #[test]
+    fn rust_log_overrides_log_level() {
+        assert_eq!(log_directive(Some("warn".into()), "debug"), "warn");
+    }
+
+    #[test]
+    fn empty_rust_log_counts_as_unset() {
+        assert_eq!(log_directive(Some(String::new()), "debug"), "debug");
+    }
+
+    #[test]
+    fn valid_directive_is_kept() {
+        let (filter, error) = parse_log_filter("warn,vms_media=debug");
+
+        assert!(error.is_none());
+        assert_eq!(filter.to_string(), "vms_media=debug,warn");
+    }
+
+    #[test]
+    fn invalid_directive_falls_back_to_info() {
+        let (filter, error) = parse_log_filter("info,vms_media=loud");
+
+        assert!(error.is_some());
+        assert_eq!(filter.to_string(), "info");
+    }
 }

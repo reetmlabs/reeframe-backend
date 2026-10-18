@@ -27,7 +27,7 @@ RestartSec=5s
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Structured JSON logs go to stderr; journald captures them automatically.
-# Adjust verbosity with RUST_LOG= in /etc/reeframe/env.
+# Adjust verbosity with VMS_LOG_LEVEL= in /etc/reeframe/env. RUST_LOG= overrides it.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=reeframe

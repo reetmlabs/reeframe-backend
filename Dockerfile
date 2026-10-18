@@ -93,8 +93,7 @@ USER reeframe
 ENV VMS_DATABASE__URL="sqlite:///var/lib/reeframe/reeframe.db?mode=rwc" \
     VMS_MEDIA__RECORDING_DIR="/var/lib/reeframe/recordings" \
     VMS_API__BIND="0.0.0.0:8080" \
-    VMS_RTSP__BIND="0.0.0.0:8554" \
-    RUST_LOG="info"
+    VMS_RTSP__BIND="0.0.0.0:8554"
 
 # /var/lib/reeframe holds both the SQLite database and the recordings directory.
 # Mount a named volume here so data survives container restarts.
