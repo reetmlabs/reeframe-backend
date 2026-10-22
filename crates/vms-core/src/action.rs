@@ -480,3 +480,25 @@ pub struct TransportConfig {
     /// [`NodeOutput::text`]: crate::node::NodeOutput::text
     pub message_template: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_clip_config_with_use_manual_range_still_loads() {
+        let stored = serde_json::json!({
+            "action_type": "extract_clip",
+            "pre_event_secs": 20,
+            "post_event_secs": 30,
+            "format": "mp4",
+            "camera_id": null,
+            "use_manual_range": true,
+        });
+        let ActionConfig::ExtractClip(cfg) = serde_json::from_value(stored).unwrap() else {
+            panic!("expected an extract_clip config");
+        };
+        assert_eq!(cfg.pre_event_secs, 20);
+        assert_eq!(cfg.post_event_secs, 30);
+    }
+}
