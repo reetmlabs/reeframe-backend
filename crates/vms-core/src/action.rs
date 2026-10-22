@@ -202,13 +202,6 @@ pub struct ExtractClipConfig {
     ///
     /// [`TriggerContext`]: crate::trigger::TriggerContext
     pub camera_id: Option<Uuid>,
-    /// When `true`, use explicit `start`/`end` timestamps from
-    /// [`TriggerContext::manual_params`] instead of deriving them from the
-    /// event timestamp.  Used for manual "export a specific range" pipelines.
-    ///
-    /// [`TriggerContext::manual_params`]: crate::trigger::TriggerContext::manual_params
-    #[serde(default)]
-    pub use_manual_range: bool,
 }
 
 /// Configuration for the `snapshot` action.
