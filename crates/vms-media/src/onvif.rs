@@ -256,7 +256,7 @@ struct ProfileInfo {
 }
 
 /// The highest-resolution profile is "main" and the next one, if any, is
-/// "sub": a high-res stream for recording and a lower-res one for the sub relay
+/// "sub": a high-res stream for recording and a lower-res one for the sub restream
 /// and analytics. Profiles without a resolution sort last, so a main profile
 /// is always picked.
 fn pick_main_and_sub(mut profiles: Vec<ProfileInfo>) -> Option<(ProfileInfo, Option<ProfileInfo>)> {

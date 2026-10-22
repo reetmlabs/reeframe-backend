@@ -1,6 +1,6 @@
 # Reeframe Backend
 
-A lightweight, self-hosted video management system (VMS) backend in Rust. It records and relays IP cameras, and runs your own automation on what they see, without per-camera licensing.
+A lightweight, self-hosted video management system (VMS) backend in Rust. It records and restreams IP cameras, and runs your own automation on what they see, without per-camera licensing.
 
 [![CI](https://github.com/reetmlabs/reeframe-backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/reetmlabs/reeframe-backend/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -14,7 +14,7 @@ This is the backend of Reeframe. The web UI and the optional multi-site Coordina
 
 - It's one Rust daemon with no Python, Node or GPU dependencies, built for amd64 and arm64.
 - Recording and live view copy the camera's stream without decoding it. The sub stream, motion detection, thumbnails and pre-event buffers only start when a camera setting or an automation pipeline asks for them.
-- Each camera is opened once. Recording, the RTSP relay, pre-event clips, snapshots and analytics all share its main and sub streams.
+- Each camera is opened once. Recording, the RTSP restream, pre-event clips, snapshots and analytics all share its main and sub streams.
 - Automation is built in. A pipeline like "on motion, cut a clip starting 10 s before the event and send it to Telegram" needs no glue code.
 - Events come in from Home Assistant, MQTT and webhooks, among others, and results go out to S3, SFTP, email, Slack, Telegram or a webhook.
 - Recording survives trouble: cameras reconnect with backoff and a circuit breaker, unfinished chunks are repaired after a crash, and recordings resume after a restart.
@@ -22,7 +22,7 @@ This is the backend of Reeframe. The web UI and the optional multi-site Coordina
 
 ### Resource usage
 
-Measured on an Intel i7-10750H with cameras streaming 1080p H.264 at 4 Mbps plus a 360p sub stream. Live view is one viewer per camera on the sub relay. CPU is the share of one core; memory is the daemon's resident size.
+Measured on an Intel i7-10750H with cameras streaming 1080p H.264 at 4 Mbps plus a 360p sub stream. Live view is one viewer per camera on the sub restream. CPU is the share of one core; memory is the daemon's resident size.
 
 | Mode | 1 camera | Each extra camera |
 |---|---|---|
@@ -68,7 +68,7 @@ Pipelines reload without a restart, and each camera only runs what its enabled p
 
 - RTSP cameras with main and sub streams, ONVIF discovery, and credentials encrypted at rest (AES-256-GCM)
 - Chunked MP4 recording with retention by age and by disk usage, and daily coverage summaries per camera time zone
-- Built-in RTSP relay for live view, serving the sub stream by default
+- Built-in RTSP restream for live view, serving the sub stream by default
 - In-memory pre-event buffer for clips that start before the event
 - Optional motion, scene-change and tamper detection, and optional scrub-preview thumbnails
 - Playback and export over HTTP
@@ -90,7 +90,7 @@ docker compose up -d --build
 
 Keep both keys. The encryption key protects stored camera credentials, and changing it makes them unreadable.
 
-The API listens on `:8080` and the RTSP relay on `:8554`. Create the first admin, then log in:
+The API listens on `:8080` and the RTSP restream on `:8554`. Create the first admin, then log in:
 
 ```bash
 curl -X POST localhost:8080/auth/setup -H 'content-type: application/json' \
@@ -107,11 +107,11 @@ CAM=$(curl -s -X POST localhost:8080/cameras -H "authorization: Bearer $TOKEN" \
   -d '{"name":"Front door","rtsp_url":"rtsp://192.168.1.10/stream1","sub_rtsp_url":"rtsp://192.168.1.10/stream2","username":"admin","password":"camera-password"}' \
   | jq -r .id)
 curl -X POST localhost:8080/cameras/$CAM/recording/start -H "authorization: Bearer $TOKEN"
-curl -X POST localhost:8080/cameras/$CAM/relay/start -H "authorization: Bearer $TOKEN"
-# {"quality":"sub","relay_url":"rtsp://<host>:8554/<camera>/sub"}
+curl -X POST localhost:8080/cameras/$CAM/restream/start -H "authorization: Bearer $TOKEN"
+# {"quality":"sub","restream_url":"rtsp://<host>:8554/<camera>/sub"}
 ```
 
-In Docker, set `VMS_RTSP__PUBLIC_HOST` to the Docker host's address so `relay_url` is playable from another machine. Otherwise it contains the container's address.
+In Docker, set `VMS_RTSP__PUBLIC_HOST` to the Docker host's address so `restream_url` is playable from another machine. Otherwise it contains the container's address.
 
 For scripts and other services, mint a long-lived API key with `vms-daemon token generate`.
 
@@ -143,7 +143,7 @@ Everything else has a default: the database (SQLite unless you point it at MySQL
 
 ## Security
 
-The defaults assume a trusted local network. The API is plain HTTP, and the RTSP relay on port 8554 has no authentication, so anyone who can reach it and knows a camera's ID can watch that camera. To use Reeframe from outside your network, put the API behind a TLS reverse proxy or a VPN, and keep port 8554 local. [SECURITY.md](SECURITY.md) has the full list and explains how to report a vulnerability.
+The defaults assume a trusted local network. The API is plain HTTP, and the RTSP restream on port 8554 has no authentication, so anyone who can reach it and knows a camera's ID can watch that camera. To use Reeframe from outside your network, put the API behind a TLS reverse proxy or a VPN, and keep port 8554 local. [SECURITY.md](SECURITY.md) has the full list and explains how to report a vulnerability.
 
 ## Architecture
 
@@ -152,7 +152,7 @@ The defaults assume a trusted local network. The API is plain HTTP, and the RTSP
 | `vms-daemon` | The binary: configuration, startup, token CLI |
 | `vms-api` | REST API (Salvo) and authentication |
 | `vms-engine` | Pipeline executor, trigger evaluation, resource manager, monitoring |
-| `vms-media` | GStreamer pipelines: ingest, recording, relay, pre-event buffer, analytics, export |
+| `vms-media` | GStreamer pipelines: ingest, recording, restream, pre-event buffer, analytics, export |
 | `vms-actions` | Pipeline action handlers |
 | `vms-transports` | Delivery adapters |
 | `vms-sources` | External event sources |

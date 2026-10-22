@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn every_relay_codec_has_a_software_decoder_candidate() {
+    fn every_restream_codec_has_a_software_decoder_candidate() {
         for caps in ["video/x-h264", "video/x-h265", "image/jpeg", "video/x-av1"] {
             assert!(!decoder_candidates(caps).is_empty(), "{caps}");
         }

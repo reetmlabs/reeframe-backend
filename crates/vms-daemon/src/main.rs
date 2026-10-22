@@ -218,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
     // vms-engine. `chunk_event_tx` carries recording-chunk lifecycle events;
     // `vms-media` has no DB access, so a consumer task turns them into
     // `RecordingRepo` calls.
-    tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP relay server");
+    tracing::info!(bind = %cfg.rtsp.bind, "Starting RTSP restream server");
     let (media_event_tx, mut media_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (chunk_event_tx, mut chunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (pipeline_live_tx, mut pipeline_live_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -241,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!(e)
         })?,
     );
-    tracing::info!("Media manager and RTSP relay server ready");
+    tracing::info!("Media manager and RTSP restream server ready");
 
     // -- Recording-chunk indexing bridge --
     // Turns each `RecordingChunkEvent` into a `recordings` row: insert on
@@ -400,12 +400,12 @@ async fn main() -> anyhow::Result<()> {
         })?;
     tracing::info!("Resource manager ready");
 
-    // -- Auto-start relays for cameras that have a cached codec --
-    // These start instantly (no probe needed). A relay feeds from its
+    // -- Auto-start restreams for cameras that have a cached codec --
+    // These start instantly (no probe needed). A restream feeds from its
     // camera pipeline's tee and could bring that pipeline up itself, but at
-    // boot we only pre-warm relays for cameras whose pipeline
+    // boot we only pre-warm restreams for cameras whose pipeline
     // `resource_manager.recover()` already started. Other cameras start
-    // their relay on demand when a client first requests it.
+    // their restream on demand when a client first requests it.
     {
         let all_cameras = camera_repo.list().await.unwrap_or_default();
         let cached: Vec<_> = all_cameras
@@ -416,7 +416,7 @@ async fn main() -> anyhow::Result<()> {
         if !cached.is_empty() {
             tracing::info!(
                 count = cached.len(),
-                "Auto-starting relays for cameras with cached codec"
+                "Auto-starting restreams for cameras with cached codec"
             );
             for cam in cached {
                 let id = cam.id;
@@ -425,12 +425,12 @@ async fn main() -> anyhow::Result<()> {
                 if !media_manager.is_running(id) {
                     tracing::debug!(
                         camera_id = %id,
-                        "Skipping relay auto-start, camera pipeline is not running"
+                        "Skipping restream auto-start, camera pipeline is not running"
                     );
                     continue;
                 }
 
-                // The pipeline is already running, so `start_relay` won't
+                // The pipeline is already running, so `start_restream` won't
                 // use these URLs. They are still built properly in case
                 // that guard ever changes.
                 let Some((decrypted, password)) =
@@ -448,10 +448,10 @@ async fn main() -> anyhow::Result<()> {
                 });
 
                 // Start only the stream live view will request, so a camera
-                // viewed through its sub stream doesn't hold its main relay.
+                // viewed through its sub stream doesn't hold its main restream.
                 let quality = vms_api::routes::live_view_quality(&decrypted, None);
                 match media_manager
-                    .start_relay(
+                    .start_restream(
                         id,
                         quality,
                         &rtsp_url,
@@ -461,13 +461,13 @@ async fn main() -> anyhow::Result<()> {
                     .await
                 {
                     Ok(_) => {
-                        tracing::info!(camera_id = %id, codec, ?quality, "Live view relay auto-started")
+                        tracing::info!(camera_id = %id, codec, ?quality, "Live view restream auto-started")
                     }
                     Err(e) => tracing::warn!(
                         camera_id = %id,
                         error = %e,
                         ?quality,
-                        "Failed to auto-start live view relay",
+                        "Failed to auto-start live view restream",
                     ),
                 }
             }

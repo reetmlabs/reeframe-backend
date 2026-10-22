@@ -107,9 +107,9 @@ fn protected_routes() -> Router {
                                 .push(Router::with_path("stop").post(cameras::stop_recording)),
                         )
                         .push(
-                            Router::with_path("relay")
-                                .push(Router::with_path("start").post(cameras::start_relay))
-                                .push(Router::with_path("stop").post(cameras::stop_relay)),
+                            Router::with_path("restream")
+                                .push(Router::with_path("start").post(cameras::start_restream))
+                                .push(Router::with_path("stop").post(cameras::stop_restream)),
                         )
                         .push(
                             Router::with_path("recordings")

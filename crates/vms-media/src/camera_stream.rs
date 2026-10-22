@@ -151,7 +151,7 @@ impl ChunkNaming {
 /// ```
 ///
 /// Every consumer attaches to the `tee` as an independent branch: recording
-/// ([`attach_recording_branch`]), the RTSP relay (`relay_bridge::attach`),
+/// ([`attach_recording_branch`]), the RTSP restream (`restream_bridge::attach`),
 /// motion detection (`motion_branch::attach`), thumbnail capture
 /// (`thumbnail_branch::attach`) and the ring buffer
 /// (`ring_buffer_branch::attach`). None of them requires recording.
@@ -170,7 +170,7 @@ pub(crate) fn build_camera_stream(
         .build()
         .map_err(|e| VmsError::Media(format!("rtspsrc: {e}")))?;
 
-    // -- Tee (recording, relay, ring buffer and analytics all tap this) --
+    // -- Tee (recording, restream, ring buffer and analytics all tap this) --
     // `allow-not-linked`: every consumer attaches at runtime, so the tee must
     // tolerate having none. Otherwise its first buffer fails with
     // `not-linked` and the pipeline reconnects.

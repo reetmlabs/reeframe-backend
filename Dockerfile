@@ -55,7 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgstreamer1.0-0 \
         libgstreamer-plugins-base1.0-0 \
         libgstreamer-plugins-bad1.0-0 \
-        # Built-in RTSP relay server
+        # Built-in RTSP restream server
         libgstrtspserver-1.0-0 \
         # Plugin sets required for RTSP receive + MP4 recording
         # good:  rtspsrc, rtph26{4,5}depay, rtpjpegdepay, splitmuxsink, mp4mux
@@ -99,7 +99,7 @@ ENV VMS_DATABASE__URL="sqlite:///var/lib/reeframe/reeframe.db?mode=rwc" \
 # Mount a named volume here so data survives container restarts.
 VOLUME ["/var/lib/reeframe"]
 
-# 8080: REST API. 8554: RTSP relay for live view.
+# 8080: REST API. 8554: RTSP restream for live view.
 EXPOSE 8080 8554
 
 ENTRYPOINT ["/usr/local/bin/vms-daemon"]

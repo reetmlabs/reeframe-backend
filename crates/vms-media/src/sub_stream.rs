@@ -3,7 +3,7 @@
 //! Uses the same codec detection and reconnect monitor as the main pipeline in
 //! `camera_stream.rs`, without a recording branch, so nothing here is written
 //! to disk. It exists only when a camera has a `sub_rtsp_url`. Its `tee` feeds
-//! the sub-quality relay and, by default, motion detection, so all those
+//! the sub-quality restream and, by default, motion detection, so all those
 //! consumers share one low-resolution camera connection.
 
 use gstreamer::prelude::*;

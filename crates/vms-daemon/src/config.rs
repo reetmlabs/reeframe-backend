@@ -87,14 +87,14 @@ impl Default for ApiConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RtspConfig {
-    /// Address and port the RTSP relay server binds to.
+    /// Address and port the RTSP restream server binds to.
     /// Each camera is served at rtsp://{host}:{port}/{camera_id}.
     /// Set via config file or VMS_RTSP__BIND env var.
     pub bind: String,
-    /// Host advertised in relay URLs, for when clients can't reach the bind
+    /// Host advertised in restream URLs, for when clients can't reach the bind
     /// address (e.g. Docker). Set via VMS_RTSP__PUBLIC_HOST.
     pub public_host: Option<String>,
-    /// Port advertised in relay URLs, when it differs from the bind port.
+    /// Port advertised in restream URLs, when it differs from the bind port.
     /// Set via VMS_RTSP__PUBLIC_PORT.
     pub public_port: Option<u16>,
 }
