@@ -228,6 +228,8 @@ async fn main() -> anyhow::Result<()> {
                 recording_dir: cfg.media.recording_dir.clone(),
                 chunk_duration_secs: cfg.media.chunk_duration_secs,
                 rtsp_bind: cfg.rtsp.bind.clone(),
+                rtsp_public_host: cfg.rtsp.public_host.clone(),
+                rtsp_public_port: cfg.rtsp.public_port,
                 thumbnail_interval_secs: cfg.media.thumbnail_interval_secs,
             },
             media_event_tx.clone(),

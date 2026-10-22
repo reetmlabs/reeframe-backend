@@ -48,6 +48,8 @@ Generate each with `openssl rand -base64 32`.
 | `recordings.timezone` | `UTC` | IANA time zone for daily coverage summaries, for cameras without their own |
 | `api.bind` | `0.0.0.0:8080` | REST API address |
 | `rtsp.bind` | `0.0.0.0:8554` | RTSP relay address |
+| `rtsp.public_host` | unset | Host put in `relay_url`. Unset, a `0.0.0.0` bind advertises the machine's outbound IP, which in Docker is the container's address. Set it to the host's LAN address or name. |
+| `rtsp.public_port` | unset | Port put in `relay_url`, when the published port differs from the bind port |
 | `auth.mode` | `local` | `local` issues and checks its own tokens. `oidc` also accepts tokens issued by a Reeframe Coordinator. |
 | `auth.access_token_ttl_secs` | `900` | 15 minutes |
 | `auth.refresh_token_ttl_secs` | `2592000` | 30 days |

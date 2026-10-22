@@ -91,12 +91,20 @@ pub struct RtspConfig {
     /// Each camera is served at rtsp://{host}:{port}/{camera_id}.
     /// Set via config file or VMS_RTSP__BIND env var.
     pub bind: String,
+    /// Host advertised in relay URLs, for when clients can't reach the bind
+    /// address (e.g. Docker). Set via VMS_RTSP__PUBLIC_HOST.
+    pub public_host: Option<String>,
+    /// Port advertised in relay URLs, when it differs from the bind port.
+    /// Set via VMS_RTSP__PUBLIC_PORT.
+    pub public_port: Option<u16>,
 }
 
 impl Default for RtspConfig {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0:8554".into(),
+            public_host: None,
+            public_port: None,
         }
     }
 }
@@ -212,6 +220,8 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_RECORDINGS__RETENTION_DISK_THRESHOLD_PERCENT` | `recordings.retention_disk_threshold_percent` |
 /// | `VMS_API__BIND`            | `api.bind`                  |
 /// | `VMS_RTSP__BIND`           | `rtsp.bind`                 |
+/// | `VMS_RTSP__PUBLIC_HOST`    | `rtsp.public_host`          |
+/// | `VMS_RTSP__PUBLIC_PORT`    | `rtsp.public_port`          |
 /// | `VMS_AUTH__MODE`           | `auth.mode`                 |
 /// | `VMS_AUTH__JWT_SECRET`     | `auth.jwt_secret`           |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
