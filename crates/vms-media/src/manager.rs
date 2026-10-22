@@ -14,7 +14,7 @@ use vms_core::{RecordingChunkEvent, VmsError};
 use crate::camera_stream;
 use crate::camera_stream::{build_camera_stream, spawn_monitor, ChunkNaming};
 use crate::motion_branch::{self, MotionHandle};
-use crate::relay::{RelayQuality, RelayServer};
+use crate::restream::{RestreamServer, StreamQuality};
 use crate::ring_buffer::RingBuffer;
 use crate::ring_buffer_branch;
 use crate::sub_stream::{build_sub_stream, spawn_sub_monitor};
@@ -28,11 +28,11 @@ pub struct MediaConfig {
     pub recording_dir: PathBuf,
     /// Duration of each recording chunk in seconds (default: 300 = 5 minutes).
     pub chunk_duration_secs: u64,
-    /// Address and port for the RTSP relay server (e.g. "0.0.0.0:8554").
+    /// Address and port for the RTSP restream server (e.g. "0.0.0.0:8554").
     pub rtsp_bind: String,
-    /// Host advertised in relay URLs instead of the detected one.
+    /// Host advertised in restream URLs instead of the detected one.
     pub rtsp_public_host: Option<String>,
-    /// Port advertised in relay URLs instead of the bind port.
+    /// Port advertised in restream URLs instead of the bind port.
     pub rtsp_public_port: Option<u16>,
     /// Minimum spacing between timeline thumbnail captures, in seconds
     /// (default: 30).
@@ -60,7 +60,7 @@ struct CameraHandle {
     pipeline: gstreamer::Pipeline,
     /// The RTSP source URL this camera was started with.
     rtsp_url: String,
-    /// The camera's sub stream, opened only once analytics or a sub relay
+    /// The camera's sub stream, opened only once analytics or a sub restream
     /// need it.
     sub_rtsp_url: Option<String>,
     /// Send `()` to ask the monitor task to shut down cleanly.
@@ -77,7 +77,7 @@ struct CameraHandle {
 struct SubStreamHandle {
     pipeline: gstreamer::Pipeline,
     /// The RTSP source URL this sub-stream was started with, used when a
-    /// sub-quality relay has to probe the codec.
+    /// sub-quality restream has to probe the codec.
     sub_rtsp_url: String,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
@@ -146,7 +146,7 @@ fn cleanup_stale_faststart_tmp_files(recording_dir: &Path) {
 ///
 /// Recording is a `queue -> splitmuxsink` branch on the tee, attached by
 /// [`start_recording`](Self::start_recording) and removed by
-/// [`stop_recording`](Self::stop_recording). The relay, ring buffer, motion
+/// [`stop_recording`](Self::stop_recording). The restream, ring buffer, motion
 /// detection and thumbnail capture tap the same tee. Going live never implies
 /// recording.
 ///
@@ -159,9 +159,9 @@ pub struct MediaManager {
     /// each find the camera missing and build a second pipeline for it.
     live_start: Mutex<()>,
     /// Per-camera sub-stream pipeline. Exists only while the camera has a
-    /// configured sub-stream and a sub relay or analytics branch uses it.
+    /// configured sub-stream and a sub restream or analytics branch uses it.
     sub_streams: Mutex<HashMap<Uuid, SubStreamHandle>>,
-    relay: Arc<RelayServer>,
+    restream: Arc<RestreamServer>,
     /// Sender used to publish `Event`s (motion, scene-change, tamper,
     /// signal-loss) produced by [`motion_branch`] onto the daemon's
     /// event-bus bridge.
@@ -208,7 +208,7 @@ impl MediaManager {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
         cleanup_stale_faststart_tmp_files(&config.recording_dir);
-        let relay = Arc::new(RelayServer::new(
+        let restream = Arc::new(RestreamServer::new(
             &config.rtsp_bind,
             config.rtsp_public_host.clone(),
             config.rtsp_public_port,
@@ -218,7 +218,7 @@ impl MediaManager {
             cameras: Mutex::new(HashMap::new()),
             live_start: Mutex::new(()),
             sub_streams: Mutex::new(HashMap::new()),
-            relay,
+            restream,
             event_tx,
             chunk_event_tx,
             pipeline_live_tx,
@@ -236,7 +236,7 @@ impl MediaManager {
     ///
     /// `sub_rtsp_url` is the camera's low-resolution sub stream, if it has
     /// one (credentials already in the URL, same as `rtsp_url`). It is only
-    /// opened when motion detection, thumbnails or a sub relay need it, so a
+    /// opened when motion detection, thumbnails or a sub restream need it, so a
     /// camera that just records holds a single connection. Analytics fall
     /// back to the main stream when there is no sub stream or it fails to
     /// start.
@@ -361,14 +361,14 @@ impl MediaManager {
             .unwrap_or(false)
     }
 
-    /// Start an RTSP relay mount for a camera, bridged from the main pipeline
-    /// for [`RelayQuality::Main`] or the sub-stream pipeline for
-    /// [`RelayQuality::Sub`]. The needed pipeline is started on demand if it
-    /// is not running. The relay itself never opens another connection to
+    /// Start an RTSP restream mount for a camera, bridged from the main pipeline
+    /// for [`StreamQuality::Main`] or the sub-stream pipeline for
+    /// [`StreamQuality::Sub`]. The needed pipeline is started on demand if it
+    /// is not running. The restream itself never opens another connection to
     /// the camera.
     ///
     /// `rtsp_url`/`sub_rtsp_url` are only used to start a pipeline that is
-    /// not running yet. `RelayQuality::Sub` needs `sub_rtsp_url` the first
+    /// not running yet. `StreamQuality::Sub` needs `sub_rtsp_url` the first
     /// time it is requested for a camera.
     ///
     /// With `cached_codec` set, the codec probe is skipped. Otherwise a short
@@ -376,20 +376,20 @@ impl MediaManager {
     /// Returns the codec in use so the caller can persist it. Main and sub
     /// streams are assumed to share one encoding, matching the camera's
     /// single `codec` DB column.
-    pub async fn start_relay(
+    pub async fn start_restream(
         &self,
         camera_id: Uuid,
-        quality: RelayQuality,
+        quality: StreamQuality,
         rtsp_url: &str,
         sub_rtsp_url: Option<&str>,
         cached_codec: Option<&str>,
     ) -> Result<String, VmsError> {
-        if self.relay.is_relaying(camera_id, quality) {
-            return Ok(self.relay.codec(camera_id, quality).unwrap_or_default());
+        if self.restream.is_restreaming(camera_id, quality) {
+            return Ok(self.restream.codec(camera_id, quality).unwrap_or_default());
         }
 
         let (pipeline, tee_name, probe_url) = match quality {
-            RelayQuality::Main => {
+            StreamQuality::Main => {
                 if !self.is_running(camera_id) {
                     self.start_live(camera_id, rtsp_url, sub_rtsp_url).await?;
                 }
@@ -403,11 +403,11 @@ impl MediaManager {
                     h.rtsp_url.clone(),
                 )
             }
-            RelayQuality::Sub => {
+            StreamQuality::Sub => {
                 if !self.sub_streams.lock().unwrap().contains_key(&camera_id) {
                     let sub_url = sub_rtsp_url.ok_or_else(|| {
                         VmsError::Media(format!(
-                            "camera {camera_id} has no sub-stream configured, cannot start sub relay"
+                            "camera {camera_id} has no sub-stream configured, cannot start sub restream"
                         ))
                     })?;
                     self.start_sub_stream(camera_id, sub_url)?;
@@ -426,31 +426,31 @@ impl MediaManager {
 
         let codec = match cached_codec {
             Some(c) => c.to_owned(),
-            None => crate::relay::probe_codec(&probe_url).await?,
+            None => crate::restream::probe_codec(&probe_url).await?,
         };
 
-        self.relay
-            .start_relay(camera_id, quality, &pipeline, &tee_name, &codec)?;
+        self.restream
+            .start_restream(camera_id, quality, &pipeline, &tee_name, &codec)?;
         self.reconcile_analytics(camera_id).await;
         Ok(codec)
     }
 
-    /// Stop an RTSP relay mount for a camera/quality, then close the sub
-    /// stream if nothing else uses it. No-op if not relaying.
-    pub async fn stop_relay(&self, camera_id: Uuid, quality: RelayQuality) {
-        self.detach_relay(camera_id, quality);
+    /// Stop an RTSP restream mount for a camera/quality, then close the sub
+    /// stream if nothing else uses it. No-op if not restreaming.
+    pub async fn stop_restream(&self, camera_id: Uuid, quality: StreamQuality) {
+        self.detach_restream(camera_id, quality);
         self.reconcile_analytics(camera_id).await;
     }
 
-    fn detach_relay(&self, camera_id: Uuid, quality: RelayQuality) {
+    fn detach_restream(&self, camera_id: Uuid, quality: StreamQuality) {
         let pipeline = match quality {
-            RelayQuality::Main => self
+            StreamQuality::Main => self
                 .cameras
                 .lock()
                 .unwrap()
                 .get(&camera_id)
                 .map(|h| h.pipeline.clone()),
-            RelayQuality::Sub => self
+            StreamQuality::Sub => self
                 .sub_streams
                 .lock()
                 .unwrap()
@@ -460,13 +460,13 @@ impl MediaManager {
         let Some(pipeline) = pipeline else {
             return;
         };
-        self.relay.stop_relay(camera_id, quality, &pipeline);
+        self.restream.stop_restream(camera_id, quality, &pipeline);
     }
 
     /// Stop the live pipeline for a camera, along with its recording branch,
-    /// sub-stream pipeline, analytics branches and relay mounts.
+    /// sub-stream pipeline, analytics branches and restream mounts.
     ///
-    /// Analytics and relays are detached first, while both pipelines are
+    /// Analytics and restreams are detached first, while both pipelines are
     /// still `Playing`, so their blocking pad probes can fire. Then the
     /// sub-stream pipeline is stopped, then the main one. The recording
     /// branch needs no separate detach because the whole pipeline goes to
@@ -474,8 +474,8 @@ impl MediaManager {
     pub async fn stop_live(&self, camera_id: Uuid) -> Result<(), VmsError> {
         self.stop_motion_detection(camera_id).await;
         self.stop_thumbnail_capture(camera_id).await;
-        self.detach_relay(camera_id, RelayQuality::Main);
-        self.detach_relay(camera_id, RelayQuality::Sub);
+        self.detach_restream(camera_id, StreamQuality::Main);
+        self.detach_restream(camera_id, StreamQuality::Sub);
         self.stop_sub_stream(camera_id).await;
 
         let handle = self.cameras.lock().unwrap().remove(&camera_id);
@@ -488,7 +488,7 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Stop all pipelines, analytics branches and relay mounts, and wait for
+    /// Stop all pipelines, analytics branches and restream mounts, and wait for
     /// the monitor and analyzer tasks to exit.
     pub async fn shutdown(&self) -> Result<(), VmsError> {
         let motion_handles: Vec<MotionHandle> = {
@@ -507,12 +507,12 @@ impl MediaManager {
             h.stop().await;
         }
 
-        // Relay mounts must be torn down before the pipelines they're
+        // Restream mounts must be torn down before the pipelines they're
         // bridged from.
         let camera_ids: Vec<Uuid> = self.cameras.lock().unwrap().keys().copied().collect();
         for id in camera_ids {
-            self.detach_relay(id, RelayQuality::Main);
-            self.detach_relay(id, RelayQuality::Sub);
+            self.detach_restream(id, StreamQuality::Main);
+            self.detach_restream(id, StreamQuality::Sub);
         }
 
         let sub_handles: Vec<(Uuid, SubStreamHandle)> = {
@@ -586,7 +586,7 @@ impl MediaManager {
     /// Point a running camera at new stream URLs. The main pipeline
     /// reconnects to its new URL through the normal reconnect path, which
     /// keeps every branch attached. A changed sub stream is closed along
-    /// with its relay and analytics, and reopened by whatever still needs it.
+    /// with its restream and analytics, and reopened by whatever still needs it.
     pub async fn set_stream_urls(
         &self,
         camera_id: Uuid,
@@ -616,7 +616,7 @@ impl MediaManager {
         if sub_changed {
             self.stop_motion_detection(camera_id).await;
             self.stop_thumbnail_capture(camera_id).await;
-            self.detach_relay(camera_id, RelayQuality::Sub);
+            self.detach_restream(camera_id, StreamQuality::Sub);
             self.stop_sub_stream(camera_id).await;
             self.reconcile_analytics(camera_id).await;
         }
@@ -678,10 +678,10 @@ impl MediaManager {
     /// camera has one and closing it once nothing uses it. Does nothing for
     /// a camera with no pipeline running.
     async fn reconcile_analytics(&self, camera_id: Uuid) {
-        // A camera with neither a main pipeline nor a sub relay is idle, and
+        // A camera with neither a main pipeline nor a sub restream is idle, and
         // analytics alone don't keep its sub stream open.
-        let live =
-            self.is_running(camera_id) || self.relay.is_relaying(camera_id, RelayQuality::Sub);
+        let live = self.is_running(camera_id)
+            || self.restream.is_restreaming(camera_id, StreamQuality::Sub);
         let motion = live && self.motion_wanted(camera_id);
         let thumbnails = live && self.thumbnails_wanted(camera_id);
         if !motion {
@@ -735,7 +735,7 @@ impl MediaManager {
         Some((main, main_tee_name(camera_id)))
     }
 
-    /// Whether the sub stream still has a consumer: its relay, or an
+    /// Whether the sub stream still has a consumer: its restream, or an
     /// analytics branch attached to it.
     fn sub_stream_in_use(&self, camera_id: Uuid) -> bool {
         let Some(sub) = self
@@ -747,7 +747,7 @@ impl MediaManager {
         else {
             return false;
         };
-        self.relay.is_relaying(camera_id, RelayQuality::Sub)
+        self.restream.is_restreaming(camera_id, StreamQuality::Sub)
             || self
                 .motion
                 .lock()
@@ -825,9 +825,9 @@ impl MediaManager {
         }
     }
 
-    /// Return the relay URL for a camera/quality if that relay mount is active.
-    pub fn relay_url(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
-        self.relay.relay_url(camera_id, quality)
+    /// Return the restream URL for a camera/quality if that restream mount is active.
+    pub fn restream_url(&self, camera_id: Uuid, quality: StreamQuality) -> Option<String> {
+        self.restream.restream_url(camera_id, quality)
     }
 
     /// Attach a ring-buffer appsink branch to a running camera pipeline.
@@ -869,9 +869,9 @@ impl MediaManager {
         ring_buffer_branch::detach(&pipeline, camera_id)
     }
 
-    /// Return the codec currently in use for a camera/quality's relay, if running.
-    pub fn relay_codec(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
-        self.relay.codec(camera_id, quality)
+    /// Return the codec currently in use for a camera/quality's restream, if running.
+    pub fn restream_codec(&self, camera_id: Uuid, quality: StreamQuality) -> Option<String> {
+        self.restream.codec(camera_id, quality)
     }
 
     /// The codec the camera's main stream negotiated, if its pipeline is

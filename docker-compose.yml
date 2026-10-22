@@ -11,7 +11,7 @@ services:
       # Optional overrides (Dockerfile defaults are used if not set)
       VMS_DATABASE__URL: sqlite:///var/lib/reeframe/reeframe.db?mode=rwc
       VMS_MEDIA__RECORDING_DIR: /var/lib/reeframe/recordings
-      # Relay URLs otherwise carry the container's address, which LAN clients can't reach.
+      # Restream URLs otherwise carry the container's address, which LAN clients can't reach.
       # VMS_RTSP__PUBLIC_HOST: 192.168.1.20
       VMS_RTSP__PUBLIC_PORT: "${VMS_RTSP_PORT:-8554}"
     volumes:

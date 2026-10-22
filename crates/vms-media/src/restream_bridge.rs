@@ -1,8 +1,8 @@
-//! Bridges a running pipeline's tee into an RTSP relay mount without a second
+//! Bridges a running pipeline's tee into an RTSP restream mount without a second
 //! connection to the camera.
 //!
 //! Cameras typically allow two RTSP sessions, already used by the main and
-//! sub-stream pipelines, so a relay cannot open its own `rtspsrc`. This module
+//! sub-stream pipelines, so a restream cannot open its own `rtspsrc`. This module
 //! taps the pipeline's tee (same attach pattern as
 //! [`crate::ring_buffer_branch`] and [`crate::motion_branch`]) and forwards the
 //! buffers into an `appsrc` inside the RTSP media's pipeline, obtained through
@@ -10,7 +10,7 @@
 //!
 //! Shape: `tee -> queue -> appsink` on our side feeds
 //! `appsrc name=src is-live=true format=time -> [parse] -> [pay] -> pay0` on the
-//! relay media's side, built from a launch string. With `set_shared(true)` one
+//! restream media's side, built from a launch string. With `set_shared(true)` one
 //! media pipeline serves every viewer of a mount, so `media-configure` only
 //! fires again after all viewers have left and a new one connects. The
 //! `unprepared` signal tells us when the cached `appsrc` handle is stale.
@@ -24,15 +24,15 @@ use gstreamer_rtsp_server::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-/// Handle to a running relay bridge: the tee tap on the source pipeline and
+/// Handle to a running restream bridge: the tee tap on the source pipeline and
 /// the RTSP mount factory it feeds.
-pub struct RelayBridgeHandle {
+pub struct RestreamBridgeHandle {
     mount_path: String,
     queue_name: String,
     sink_name: String,
 }
 
-/// Launch string for the relay media's pipeline for `codec`, sourced from
+/// Launch string for the restream media's pipeline for `codec`, sourced from
 /// `appsrc name=src`. Returns `None` for unsupported codecs.
 fn appsrc_launch_str(codec: &str) -> Option<String> {
     // No `do-timestamp` here: `attach`'s appsink callback stamps each buffer
@@ -67,11 +67,11 @@ fn appsrc_launch_str(codec: &str) -> Option<String> {
     Some(s.to_owned())
 }
 
-/// Build and immediately tear down a throwaway H264 relay pipeline so
+/// Build and immediately tear down a throwaway H264 restream pipeline so
 /// GStreamer's plugin lookup and caps negotiation are warm before any viewer
 /// connects.
 ///
-/// The first H264 relay pipeline built in a process makes the client report a
+/// The first H264 restream pipeline built in a process makes the client report a
 /// few "corrupt decoded frame" errors for under a second; later pipelines are
 /// clean. Doing it at startup means no real client sees that.
 pub(crate) fn warmup() {
@@ -89,16 +89,16 @@ pub(crate) fn warmup() {
             pipeline.set_state(gstreamer::State::Null).ok();
         }
         Err(e) => {
-            tracing::warn!(error = %e, "relay bridge warmup pipeline failed to build");
+            tracing::warn!(error = %e, "restream bridge warmup pipeline failed to build");
         }
     }
 }
 
-/// Attach a relay bridge for camera `camera_id`: taps `tee_name`'s tee on
+/// Attach a restream bridge for camera `camera_id`: taps `tee_name`'s tee on
 /// `pipeline` and registers a shared `RTSPMediaFactory` at `mount_path` on
 /// `mounts`, fed from that tap.
 ///
-/// `branch_suffix` (e.g. `"relay"` or `"subrelay"`) keeps this branch's
+/// `branch_suffix` (e.g. `"restream"` or `"subrestream"`) keeps this branch's
 /// element names distinct from other taps on the same tee (ring buffer,
 /// motion detection). Safe to call while the pipeline is `Playing`.
 pub fn attach(
@@ -109,7 +109,7 @@ pub fn attach(
     mounts: &gstreamer_rtsp_server::RTSPMountPoints,
     mount_path: &str,
     codec: &str,
-) -> Result<RelayBridgeHandle, VmsError> {
+) -> Result<RestreamBridgeHandle, VmsError> {
     let tee = pipeline.by_name(tee_name).ok_or_else(|| {
         VmsError::Media(format!("tee '{tee_name}' not found for camera {camera_id}"))
     })?;
@@ -124,7 +124,7 @@ pub fn attach(
         .property("max-size-bytes", 0u32)
         .property("max-size-time", 0u64)
         .build()
-        .map_err(|e| VmsError::Media(format!("relay bridge queue: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("restream bridge queue: {e}")))?;
 
     let appsink = gstreamer_app::AppSink::builder()
         .name(&sink_name)
@@ -135,15 +135,15 @@ pub fn attach(
 
     pipeline
         .add_many([&queue, appsink.upcast_ref::<gstreamer::Element>()])
-        .map_err(|e| VmsError::Media(format!("relay bridge add_many: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("restream bridge add_many: {e}")))?;
 
     queue
         .link(&appsink)
-        .map_err(|e| VmsError::Media(format!("link relayqueue->appsink: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link restreamqueue->appsink: {e}")))?;
 
-    // -- Build the relay media factory --
+    // -- Build the restream media factory --
     let launch = appsrc_launch_str(codec)
-        .ok_or_else(|| VmsError::Media(format!("relay bridge: unsupported codec '{codec}'")))?;
+        .ok_or_else(|| VmsError::Media(format!("restream bridge: unsupported codec '{codec}'")))?;
 
     let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
     factory.set_launch(&launch);
@@ -174,14 +174,14 @@ pub fn attach(
     let cam_id = camera_id;
     factory.connect_media_configure(move |_factory, media| {
         let Ok(bin) = media.element().downcast::<gstreamer::Bin>() else {
-            tracing::error!(camera_id = %cam_id, "relay bridge: media element is not a Bin");
+            tracing::error!(camera_id = %cam_id, "restream bridge: media element is not a Bin");
             return;
         };
         let Some(appsrc) = bin
             .by_name("src")
             .and_then(|e| e.downcast::<AppSrc>().ok())
         else {
-            tracing::error!(camera_id = %cam_id, "relay bridge: appsrc 'src' not found in media bin");
+            tracing::error!(camera_id = %cam_id, "restream bridge: appsrc 'src' not found in media bin");
             return;
         };
         appsrc.set_format(gstreamer::Format::Time);
@@ -237,7 +237,7 @@ pub fn attach(
                             buf_mut.set_dts(pts);
                         }
                         if let Err(e) = state.appsrc.push_buffer(owned) {
-                            tracing::warn!(camera_id = %cam_id, error = %e, "relay bridge: push_buffer failed");
+                            tracing::warn!(camera_id = %cam_id, error = %e, "restream bridge: push_buffer failed");
                         }
                     }
                 }
@@ -250,29 +250,29 @@ pub fn attach(
     // Sink first, tee last, so no buffer reaches an element still in `Null`.
     for el in [appsink.upcast_ref::<gstreamer::Element>(), &queue] {
         el.sync_state_with_parent()
-            .map_err(|e| VmsError::Media(format!("sync relay bridge element: {e}")))?;
+            .map_err(|e| VmsError::Media(format!("sync restream bridge element: {e}")))?;
     }
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
         VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
     })?;
     let queue_sink = queue
         .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("relay bridge queue has no sink pad".into()))?;
+        .ok_or_else(|| VmsError::Media("restream bridge queue has no sink pad".into()))?;
     tee_src
         .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee->relayqueue: {e}")))?;
+        .map_err(|e| VmsError::Media(format!("link tee->restreamqueue: {e}")))?;
 
     mounts.add_factory(mount_path, factory);
 
-    tracing::info!(camera_id = %camera_id, mount_path, codec, "Relay bridge attached");
-    Ok(RelayBridgeHandle {
+    tracing::info!(camera_id = %camera_id, mount_path, codec, "Restream bridge attached");
+    Ok(RestreamBridgeHandle {
         mount_path: mount_path.to_owned(),
         queue_name,
         sink_name,
     })
 }
 
-/// Detach a relay bridge.
+/// Detach a restream bridge.
 ///
 /// Removes the mount factory (existing viewers keep their session, new ones
 /// get "not found") and tears down the tee tap with the same blocking pad
@@ -284,7 +284,7 @@ pub fn detach(
     pipeline: &gstreamer::Pipeline,
     mounts: &gstreamer_rtsp_server::RTSPMountPoints,
     camera_id: Uuid,
-    handle: &RelayBridgeHandle,
+    handle: &RestreamBridgeHandle,
 ) -> Result<(), VmsError> {
     mounts.remove_factory(&handle.mount_path);
 
@@ -297,13 +297,13 @@ pub fn detach(
 
     let queue_sink = queue
         .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("relay bridge queue has no sink pad".into()))?;
+        .ok_or_else(|| VmsError::Media("restream bridge queue has no sink pad".into()))?;
     let tee_src = queue_sink
         .peer()
-        .ok_or_else(|| VmsError::Media("relay bridge queue sink has no peer pad".into()))?;
-    let tee = tee_src
-        .parent_element()
-        .ok_or_else(|| VmsError::Media("relay bridge tee src pad has no parent element".into()))?;
+        .ok_or_else(|| VmsError::Media("restream bridge queue sink has no peer pad".into()))?;
+    let tee = tee_src.parent_element().ok_or_else(|| {
+        VmsError::Media("restream bridge tee src pad has no parent element".into())
+    })?;
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
 
@@ -330,7 +330,7 @@ pub fn detach(
     std::thread::spawn(move || {
         let fired = rx.recv_timeout(Duration::from_secs(5)).is_ok();
         if fired {
-            tracing::info!(camera_id = %camera_id, "Relay bridge detached");
+            tracing::info!(camera_id = %camera_id, "Restream bridge detached");
         } else {
             // A BLOCK_DOWNSTREAM probe only fires when a buffer or event
             // crosses the pad, so it never fires if the camera connection is
@@ -341,7 +341,7 @@ pub fn detach(
             // is flowing, so forcing the teardown is safe.
             tracing::warn!(
                 camera_id = %camera_id,
-                "relay bridge detach probe timed out, forcing removal directly",
+                "restream bridge detach probe timed out, forcing removal directly",
             );
             if let Some(id) = probe_id {
                 tee_src_clone.remove_probe(id);

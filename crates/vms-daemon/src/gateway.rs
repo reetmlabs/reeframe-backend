@@ -413,7 +413,7 @@ mod tests {
     /// Stand-in gateway for one connection: like `spawn_flaky_acceptor`,
     /// but it parses the registration message and reports it before
     /// dropping the connection.
-    async fn spawn_relay_once(
+    async fn spawn_gateway_once(
         listener: tokio::net::TcpListener,
     ) -> tokio::sync::mpsc::UnboundedReceiver<RegistrationMessage> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -446,7 +446,7 @@ mod tests {
         let be_id = Uuid::new_v4();
         let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener1.local_addr().unwrap().to_string();
-        let mut registrations1 = spawn_relay_once(listener1).await;
+        let mut registrations1 = spawn_gateway_once(listener1).await;
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let run_handle = tokio::spawn(run_with_backoff(
@@ -468,7 +468,7 @@ mod tests {
 
         // Restore the path on the same address.
         let listener2 = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        let mut registrations2 = spawn_relay_once(listener2).await;
+        let mut registrations2 = spawn_gateway_once(listener2).await;
 
         // The client registers again on its own once the path is back.
         let second = tokio::time::timeout(Duration::from_secs(2), registrations2.recv())

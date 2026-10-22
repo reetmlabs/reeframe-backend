@@ -11,7 +11,7 @@ use crate::dispatcher::ActionContext;
 /// Stop a camera's recording.
 ///
 /// Detaches the recording branch for the resolved camera via
-/// `MediaManager::stop_recording`. The live pipeline (and RTSP relay, motion
+/// `MediaManager::stop_recording`. The live pipeline (and RTSP restream, motion
 /// detection, etc.) keeps running. If the camera is not currently
 /// recording the call is a no-op and the handler returns success.
 pub async fn execute(

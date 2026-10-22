@@ -11,7 +11,7 @@ pub enum RingBufferStorage {
     Disk,
 }
 
-/// Which stream live view relays by default.
+/// Which stream live view restreams by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +33,7 @@ pub struct Model {
     pub rtsp_url: String,
     pub sub_rtsp_url: Option<String>,
     /// RTP encoding name detected via codec probe ("H264", "H265", "JPEG", "AV1").
-    /// Cached to skip re-probing on daemon restart. NULL until first relay start.
+    /// Cached to skip re-probing on daemon restart. NULL until first restream start.
     pub codec: Option<String>,
     pub manufacturer: Option<String>,
     /// Device model string, e.g. "DS-2CD2143G2-I".

@@ -5,7 +5,7 @@ use vms_db::{
     entities::camera::{self, LiveViewStream, RingBufferStorage},
     repos::camera::{CreateCamera, UpdateCamera},
 };
-use vms_media::RelayQuality;
+use vms_media::StreamQuality;
 
 use crate::{
     error::{parse_body, parse_id, ApiError},
@@ -21,7 +21,7 @@ pub struct CameraDto {
     pub name: String,
     pub description: Option<String>,
     pub rtsp_url: String,
-    /// Optional camera sub-stream URL used as the relay source (low-res).
+    /// Optional camera sub-stream URL used as the restream source (low-res).
     pub sub_rtsp_url: Option<String>,
     pub manufacturer: Option<String>,
     pub model: Option<String>,
@@ -46,16 +46,16 @@ pub struct CameraDto {
     pub motion_detection_enabled: bool,
     /// Whether scrub-preview thumbnails are captured while the camera records.
     pub thumbnails_enabled: bool,
-    /// Which stream live view relays by default (`sub` falls back to `main`
+    /// Which stream live view restreams by default (`sub` falls back to `main`
     /// when the camera has no sub stream).
     pub live_view_stream: LiveViewStream,
-    /// Main-quality (full resolution) RTSP relay URL, intended for
-    /// full-screen live view. `null` until that relay is started.
-    pub relay_url: Option<String>,
-    /// Sub-quality (low resolution) RTSP relay URL, intended for tile/grid
-    /// live view. `null` until that relay is started, or if the camera has
+    /// Main-quality (full resolution) RTSP restream URL, intended for
+    /// full-screen live view. `null` until that restream is started.
+    pub main_restream_url: Option<String>,
+    /// Sub-quality (low resolution) RTSP restream URL, intended for tile/grid
+    /// live view. `null` until that restream is started, or if the camera has
     /// no `sub_rtsp_url` configured.
-    pub sub_relay_url: Option<String>,
+    pub sub_restream_url: Option<String>,
     pub created_at: chrono::DateTime<chrono::FixedOffset>,
     pub updated_at: chrono::DateTime<chrono::FixedOffset>,
 }
@@ -65,8 +65,8 @@ impl CameraDto {
         m: camera::Model,
         live: bool,
         recording: bool,
-        relay_url: Option<String>,
-        sub_relay_url: Option<String>,
+        main_restream_url: Option<String>,
+        sub_restream_url: Option<String>,
     ) -> Self {
         Self {
             id: m.id,
@@ -87,8 +87,8 @@ impl CameraDto {
             motion_detection_enabled: m.motion_detection_enabled,
             thumbnails_enabled: m.thumbnails_enabled,
             live_view_stream: m.live_view_stream,
-            relay_url,
-            sub_relay_url,
+            main_restream_url,
+            sub_restream_url,
             created_at: m.created_at,
             updated_at: m.updated_at,
         }
@@ -173,9 +173,9 @@ pub async fn list_cameras(depot: &mut Depot) -> Result<Json<Vec<CameraDto>>, Api
         .map(|m| {
             let live = state.media_manager.is_running(m.id);
             let recording = state.media_manager.is_recording(m.id);
-            let relay_url = state.media_manager.relay_url(m.id, RelayQuality::Main);
-            let sub_relay_url = state.media_manager.relay_url(m.id, RelayQuality::Sub);
-            CameraDto::from_model(m, live, recording, relay_url, sub_relay_url)
+            let main_restream_url = state.media_manager.restream_url(m.id, StreamQuality::Main);
+            let sub_restream_url = state.media_manager.restream_url(m.id, StreamQuality::Sub);
+            CameraDto::from_model(m, live, recording, main_restream_url, sub_restream_url)
         })
         .collect();
     Ok(Json(dtos))
@@ -238,14 +238,14 @@ pub async fn get_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<Cam
         .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
     let live = state.media_manager.is_running(id);
     let recording = state.media_manager.is_recording(id);
-    let relay_url = state.media_manager.relay_url(id, RelayQuality::Main);
-    let sub_relay_url = state.media_manager.relay_url(id, RelayQuality::Sub);
+    let main_restream_url = state.media_manager.restream_url(id, StreamQuality::Main);
+    let sub_restream_url = state.media_manager.restream_url(id, StreamQuality::Sub);
     Ok(Json(CameraDto::from_model(
         camera,
         live,
         recording,
-        relay_url,
-        sub_relay_url,
+        main_restream_url,
+        sub_restream_url,
     )))
 }
 
@@ -308,14 +308,14 @@ pub async fn update_camera(
     }
     let live = state.media_manager.is_running(id);
     let recording = state.media_manager.is_recording(id);
-    let relay_url = state.media_manager.relay_url(id, RelayQuality::Main);
-    let sub_relay_url = state.media_manager.relay_url(id, RelayQuality::Sub);
+    let main_restream_url = state.media_manager.restream_url(id, StreamQuality::Main);
+    let sub_restream_url = state.media_manager.restream_url(id, StreamQuality::Sub);
     Ok(Json(CameraDto::from_model(
         camera,
         live,
         recording,
-        relay_url,
-        sub_relay_url,
+        main_restream_url,
+        sub_restream_url,
     )))
 }
 
@@ -376,9 +376,9 @@ pub async fn start_recording(
 
 /// POST /cameras/{id}/recording/stop
 ///
-/// Detaches only the recording branch. The live pipeline and any active relay
+/// Detaches only the recording branch. The live pipeline and any active restream
 /// or motion detection keep running. Use `DELETE /cameras/{id}` or stop the
-/// relay separately to tear down live view.
+/// restream separately to tear down live view.
 #[handler]
 pub async fn stop_recording(
     req: &mut Request,
@@ -398,33 +398,36 @@ pub async fn stop_recording(
 }
 
 /// Parse the optional `?quality=main|sub` query parameter.
-fn parse_relay_quality(req: &mut Request) -> Result<Option<RelayQuality>, ApiError> {
+fn parse_stream_quality(req: &mut Request) -> Result<Option<StreamQuality>, ApiError> {
     match req.query::<String>("quality").as_deref() {
         None => Ok(None),
-        Some("main") => Ok(Some(RelayQuality::Main)),
-        Some("sub") => Ok(Some(RelayQuality::Sub)),
+        Some("main") => Ok(Some(StreamQuality::Main)),
+        Some("sub") => Ok(Some(StreamQuality::Sub)),
         Some(other) => Err(ApiError::bad_request(format!(
             "invalid quality '{other}', expected 'main' or 'sub'"
         ))),
     }
 }
 
-/// The relay quality live view uses for `camera`. A camera pinned to
+/// The stream quality live view uses for `camera`. A camera pinned to
 /// `main` always gets main. Otherwise `requested` wins, defaulting to sub,
 /// and sub falls back to main when the camera has no sub stream.
-pub fn live_view_quality(camera: &camera::Model, requested: Option<RelayQuality>) -> RelayQuality {
+pub fn live_view_quality(
+    camera: &camera::Model,
+    requested: Option<StreamQuality>,
+) -> StreamQuality {
     if camera.live_view_stream == LiveViewStream::Main {
-        return RelayQuality::Main;
+        return StreamQuality::Main;
     }
-    match requested.unwrap_or(RelayQuality::Sub) {
-        RelayQuality::Sub if camera.sub_rtsp_url.is_none() => RelayQuality::Main,
+    match requested.unwrap_or(StreamQuality::Sub) {
+        StreamQuality::Sub if camera.sub_rtsp_url.is_none() => StreamQuality::Main,
         q => q,
     }
 }
 
-/// POST /cameras/{id}/relay/start?quality=main|sub
+/// POST /cameras/{id}/restream/start?quality=main|sub
 ///
-/// Starts an RTSP relay mount for live view, bridged from the camera's main or
+/// Starts an RTSP restream mount for live view, bridged from the camera's main or
 /// sub-stream pipeline, which is started on demand if needed. Defaults to the
 /// sub stream and falls back to main if there is none; a camera whose
 /// `live_view_stream` is `main` always gets main (see [`live_view_quality`]).
@@ -432,13 +435,13 @@ pub fn live_view_quality(camera: &camera::Model, requested: Option<RelayQuality>
 /// Probes the codec on first use, assuming main and sub share one encoding,
 /// then registers the mount.
 #[handler]
-pub async fn start_relay(
+pub async fn start_restream(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
-    let requested = parse_relay_quality(req)?;
+    let requested = parse_stream_quality(req)?;
 
     let (camera, password) = state
         .camera_repo
@@ -456,7 +459,7 @@ pub async fn start_relay(
     let had_cached_codec = camera.codec.is_some();
     let codec = state
         .media_manager
-        .start_relay(
+        .start_restream(
             id,
             quality,
             &rtsp_url,
@@ -472,33 +475,33 @@ pub async fn start_relay(
         }
     }
 
-    let relay_url = state.media_manager.relay_url(id, quality);
+    let restream_url = state.media_manager.restream_url(id, quality);
     let quality = match quality {
-        RelayQuality::Main => "main",
-        RelayQuality::Sub => "sub",
+        StreamQuality::Main => "main",
+        StreamQuality::Sub => "sub",
     };
     Ok(Json(
-        serde_json::json!({ "relay_url": relay_url, "quality": quality }),
+        serde_json::json!({ "restream_url": restream_url, "quality": quality }),
     ))
 }
 
-/// POST /cameras/{id}/relay/stop?quality=main|sub
+/// POST /cameras/{id}/restream/stop?quality=main|sub
 #[handler]
-pub async fn stop_relay(
+pub async fn stop_restream(
     req: &mut Request,
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), ApiError> {
     let state = depot.obtain::<AppState>().expect("AppState not in depot");
     let id = parse_id(req)?;
-    let requested = parse_relay_quality(req)?;
+    let requested = parse_stream_quality(req)?;
     let camera = state
         .camera_repo
         .get(id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("camera {id} not found")))?;
     let quality = live_view_quality(&camera, requested);
-    state.media_manager.stop_relay(id, quality).await;
+    state.media_manager.stop_restream(id, quality).await;
     res.status_code(StatusCode::NO_CONTENT);
     Ok(())
 }
@@ -539,26 +542,26 @@ mod live_view_quality_tests {
     #[test]
     fn defaults_to_the_sub_stream() {
         let cam = camera(Some("rtsp://cam/sub"), LiveViewStream::Sub);
-        assert_eq!(live_view_quality(&cam, None), RelayQuality::Sub);
+        assert_eq!(live_view_quality(&cam, None), StreamQuality::Sub);
     }
 
     #[test]
     fn falls_back_to_main_without_a_sub_stream() {
         let cam = camera(None, LiveViewStream::Sub);
-        assert_eq!(live_view_quality(&cam, None), RelayQuality::Main);
+        assert_eq!(live_view_quality(&cam, None), StreamQuality::Main);
         assert_eq!(
-            live_view_quality(&cam, Some(RelayQuality::Sub)),
-            RelayQuality::Main
+            live_view_quality(&cam, Some(StreamQuality::Sub)),
+            StreamQuality::Main
         );
     }
 
     #[test]
     fn a_camera_pinned_to_main_always_gets_main() {
         let pinned = camera(Some("rtsp://cam/sub"), LiveViewStream::Main);
-        assert_eq!(live_view_quality(&pinned, None), RelayQuality::Main);
+        assert_eq!(live_view_quality(&pinned, None), StreamQuality::Main);
         assert_eq!(
-            live_view_quality(&pinned, Some(RelayQuality::Sub)),
-            RelayQuality::Main
+            live_view_quality(&pinned, Some(StreamQuality::Sub)),
+            StreamQuality::Main
         );
     }
 
@@ -566,8 +569,8 @@ mod live_view_quality_tests {
     fn an_explicit_main_request_is_honoured() {
         let cam = camera(Some("rtsp://cam/sub"), LiveViewStream::Sub);
         assert_eq!(
-            live_view_quality(&cam, Some(RelayQuality::Main)),
-            RelayQuality::Main
+            live_view_quality(&cam, Some(StreamQuality::Main)),
+            StreamQuality::Main
         );
     }
 }

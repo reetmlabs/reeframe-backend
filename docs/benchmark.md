@@ -23,12 +23,12 @@ The streams are video noise. Noise can't be compressed, so the encoder really se
 
 ## Steps
 
-Each run starts a fresh daemon with an empty database. The daemon's API and RTSP relay listen on ports 28080 and 28554 and the fake cameras on 28556, so a daemon already running on the default ports isn't disturbed.
+Each run starts a fresh daemon with an empty database. The daemon's API and RTSP restream listen on ports 28080 and 28554 and the fake cameras on 28556, so a daemon already running on the default ports isn't disturbed.
 
 **Live view mode** steps through these states and lets each one settle before sampling:
 
 1. Idle, with no cameras.
-2. Live view: the relay started on every camera (the sub stream, by default), with one viewer each. The relay only sends video while someone watches, so without viewers live view would cost almost nothing.
+2. Live view: the restream started on every camera (the sub stream, by default), with one viewer each. The restream only sends video while someone watches, so without viewers live view would cost almost nothing.
 3. Recording started on every camera.
 4. Thumbnails turned on.
 5. Motion detection turned on.
@@ -184,7 +184,7 @@ fi
 
 # Live view only costs anything while someone watches, so attach one viewer per camera.
 for id in "${IDS[@]}"; do
-  url=$(api POST "/cameras/$id/relay/start" | jq -r .relay_url)
+  url=$(api POST "/cameras/$id/restream/start" | jq -r .restream_url)
   gst-launch-1.0 -q rtspsrc location="$url" latency=200 ! fakesink sync=false > /dev/null 2>&1 &
   VIEWERS+=($!)
 done

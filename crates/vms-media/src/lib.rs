@@ -16,7 +16,7 @@
 //! The codec is detected at runtime from the camera's SDP (`encoding-name`
 //! field), so H.264 and H.265 cameras work without configuration.
 //! The `tee` feeds every branch this crate attaches: recording, the RTSP
-//! relay, ring buffer, motion detection and thumbnail capture. Recording is
+//! restream, ring buffer, motion detection and thumbnail capture. Recording is
 //! one of those branches and is not part of the base pipeline.
 //! [`MediaManager::start_live`] brings the pipeline up without writing to
 //! disk, and [`MediaManager::start_recording`] attaches the recording branch
@@ -29,8 +29,8 @@ pub mod manager;
 pub mod motion;
 pub(crate) mod motion_branch;
 pub mod onvif;
-pub mod relay;
-pub(crate) mod relay_bridge;
+pub mod restream;
+pub(crate) mod restream_bridge;
 pub mod ring_buffer;
 pub(crate) mod ring_buffer_branch;
 pub(crate) mod sub_stream;
@@ -40,5 +40,5 @@ pub use export::{export_range, ExportChunk};
 pub use manager::{MediaConfig, MediaManager};
 pub use motion::{MotionAnalyzer, MotionSignal};
 pub use onvif::{discover, resolve_streams, DiscoveredDevice, ResolvedStreams};
-pub use relay::{RelayQuality, RelayServer};
+pub use restream::{RestreamServer, StreamQuality};
 pub use ring_buffer::{RingBuffer, RingBufferManager, TimestampedFrame};

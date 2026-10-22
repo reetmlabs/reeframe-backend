@@ -47,9 +47,9 @@ Generate each with `openssl rand -base64 32`.
 | `recordings.retention_disk_threshold_percent` | `90` | Above this disk usage, delete the oldest recordings first. `0` turns it off. |
 | `recordings.timezone` | `UTC` | IANA time zone for daily coverage summaries, for cameras without their own |
 | `api.bind` | `0.0.0.0:8080` | REST API address |
-| `rtsp.bind` | `0.0.0.0:8554` | RTSP relay address |
-| `rtsp.public_host` | unset | Host put in `relay_url`. Unset, a `0.0.0.0` bind advertises the machine's outbound IP, which in Docker is the container's address. Set it to the host's LAN address or name. |
-| `rtsp.public_port` | unset | Port put in `relay_url`, when the published port differs from the bind port |
+| `rtsp.bind` | `0.0.0.0:8554` | RTSP restream address |
+| `rtsp.public_host` | unset | Host put in `restream_url`. Unset, a `0.0.0.0` bind advertises the machine's outbound IP, which in Docker is the container's address. Set it to the host's LAN address or name. |
+| `rtsp.public_port` | unset | Port put in `restream_url`, when the published port differs from the bind port |
 | `auth.mode` | `local` | `local` issues and checks its own tokens. `oidc` also accepts tokens issued by a Reeframe Coordinator. |
 | `auth.access_token_ttl_secs` | `900` | 15 minutes |
 | `auth.refresh_token_ttl_secs` | `2592000` | 30 days |
@@ -82,7 +82,7 @@ These are fields on the camera itself, set with `POST /cameras` or `PATCH /camer
 |---|---|---|
 | `motion_detection_enabled` | `false` | Run motion, scene-change and tamper detection whenever the camera is live. A pipeline with an event trigger on the camera turns it on regardless. |
 | `thumbnails_enabled` | `false` | Capture scrub-preview thumbnails while the camera records |
-| `live_view_stream` | `sub` | `sub` relays the sub stream, falling back to main when there is none. `main` always relays the main stream. |
+| `live_view_stream` | `sub` | `sub` restreams the sub stream, falling back to main when there is none. `main` always restreams the main stream. |
 | `sub_rtsp_url` | unset | Low-resolution stream used for live view and analytics. Recording always uses `rtsp_url`. |
 
 Changes apply right away to a running camera. Changing `rtsp_url`, `sub_rtsp_url` or the credentials reconnects it.

@@ -5,19 +5,19 @@ use gstreamer_rtsp_server::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-use crate::relay_bridge::{self, RelayBridgeHandle};
+use crate::restream_bridge::{self, RestreamBridgeHandle};
 
-// -- RelayQuality --
+// -- StreamQuality --
 
-/// Which of a camera's two persistent pipelines a relay mount is bridged from.
+/// Which of a camera's two persistent pipelines a restream mount is bridged from.
 ///
 /// Cameras typically allow only two concurrent RTSP sessions, used by the main
 /// (live/recording) pipeline and the optional sub-stream pipeline (see
-/// `sub_stream.rs`). Relays therefore tap one of those pipelines' tees instead
-/// of opening their own connections. Starting a relay brings up the pipeline
+/// `sub_stream.rs`). Restreams therefore tap one of those pipelines' tees instead
+/// of opening their own connections. Starting a restream brings up the pipeline
 /// it needs on demand; recording does not have to be active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RelayQuality {
+pub enum StreamQuality {
     /// Full resolution, on the same connection recording uses. Meant for
     /// full-screen live view.
     Main,
@@ -26,52 +26,52 @@ pub enum RelayQuality {
     Sub,
 }
 
-impl RelayQuality {
+impl StreamQuality {
     fn path_suffix(self) -> &'static str {
         match self {
-            RelayQuality::Main => "",
-            RelayQuality::Sub => "/sub",
+            StreamQuality::Main => "",
+            StreamQuality::Sub => "/sub",
         }
     }
 
     fn branch_suffix(self) -> &'static str {
         match self {
-            RelayQuality::Main => "relay",
-            RelayQuality::Sub => "subrelay",
+            StreamQuality::Main => "restream",
+            StreamQuality::Sub => "subrestream",
         }
     }
 }
 
-// -- RelayServer --
+// -- RestreamServer --
 
-struct RelayEntry {
+struct RestreamEntry {
     codec: String,
-    bridge: RelayBridgeHandle,
+    bridge: RestreamBridgeHandle,
 }
 
-/// Per-camera, per-quality RTSP relay server powered by `gstreamer-rtsp-server`.
+/// Per-camera, per-quality RTSP restream server powered by `gstreamer-rtsp-server`.
 ///
 /// Each camera can be served at up to two mounts:
 /// `rtsp://{bind_host}:{bind_port}/{camera_id}` (main) and
 /// `.../{camera_id}/sub` (sub). Both are bridged from a pipeline's tee (see
-/// `relay_bridge.rs`), which `MediaManager::start_relay` starts on demand if
-/// needed. The relay never opens its own connection to the camera and never
+/// `restream_bridge.rs`), which `MediaManager::start_restream` starts on demand if
+/// needed. The restream never opens its own connection to the camera and never
 /// requires recording to be active.
 ///
 /// A dedicated GLib main loop runs on a background thread to drive I/O for
 /// the RTSP server without interfering with GStreamer's own main context.
-pub struct RelayServer {
+pub struct RestreamServer {
     mounts: gstreamer_rtsp_server::RTSPMountPoints,
     bind: String,
     public_host: Option<String>,
     public_port: Option<u16>,
-    relays: Mutex<HashMap<(Uuid, RelayQuality), RelayEntry>>,
+    restreams: Mutex<HashMap<(Uuid, StreamQuality), RestreamEntry>>,
     _loop_thread: std::thread::JoinHandle<()>,
 }
 
-impl RelayServer {
+impl RestreamServer {
     /// `public_host`/`public_port` override the host and port advertised in
-    /// relay URLs, for when the bind address isn't what clients reach (Docker).
+    /// restream URLs, for when the bind address isn't what clients reach (Docker).
     pub fn new(
         bind: &str,
         public_host: Option<String>,
@@ -97,37 +97,37 @@ impl RelayServer {
 
         let loop_thread = std::thread::spawn(move || main_loop.run());
 
-        relay_bridge::warmup();
+        restream_bridge::warmup();
 
-        tracing::info!(bind, "RTSP relay server listening");
+        tracing::info!(bind, "RTSP restream server listening");
 
         Ok(Self {
             mounts,
             bind: bind.to_owned(),
             public_host,
             public_port,
-            relays: Mutex::new(HashMap::new()),
+            restreams: Mutex::new(HashMap::new()),
             _loop_thread: loop_thread,
         })
     }
 
-    /// Register an RTSP relay mount for a camera, bridged from `tee_name`'s
-    /// tee on `pipeline` (the main pipeline for [`RelayQuality::Main`], the
-    /// sub-stream pipeline for [`RelayQuality::Sub`]). No-op if already
+    /// Register an RTSP restream mount for a camera, bridged from `tee_name`'s
+    /// tee on `pipeline` (the main pipeline for [`StreamQuality::Main`], the
+    /// sub-stream pipeline for [`StreamQuality::Sub`]). No-op if already
     /// registered for this `(camera_id, quality)`.
     ///
     /// `codec` is the RTP encoding name as reported by the camera's SDP
     /// (e.g. "H264", "H265", "JPEG").
-    pub fn start_relay(
+    pub fn start_restream(
         &self,
         camera_id: Uuid,
-        quality: RelayQuality,
+        quality: StreamQuality,
         pipeline: &gstreamer::Pipeline,
         tee_name: &str,
         codec: &str,
     ) -> Result<(), VmsError> {
         if self
-            .relays
+            .restreams
             .lock()
             .unwrap()
             .contains_key(&(camera_id, quality))
@@ -135,8 +135,8 @@ impl RelayServer {
             return Ok(());
         }
 
-        let path = relay_path(camera_id, quality);
-        let bridge = relay_bridge::attach(
+        let path = restream_path(camera_id, quality);
+        let bridge = restream_bridge::attach(
             pipeline,
             tee_name,
             camera_id,
@@ -146,9 +146,9 @@ impl RelayServer {
             codec,
         )?;
 
-        self.relays.lock().unwrap().insert(
+        self.restreams.lock().unwrap().insert(
             (camera_id, quality),
-            RelayEntry {
+            RestreamEntry {
                 codec: codec.to_owned(),
                 bridge,
             },
@@ -158,38 +158,40 @@ impl RelayServer {
             camera_id = %camera_id,
             quality = ?quality,
             codec,
-            relay = %self.relay_url(camera_id, quality).unwrap_or_default(),
-            "Relay registered",
+            restream = %self.restream_url(camera_id, quality).unwrap_or_default(),
+            "Restream registered",
         );
         Ok(())
     }
 
-    /// Remove the relay mount for a camera/quality and detach its tee-tap
+    /// Remove the restream mount for a camera/quality and detach its tee-tap
     /// from `pipeline`. No-op if not registered.
-    pub fn stop_relay(
+    pub fn stop_restream(
         &self,
         camera_id: Uuid,
-        quality: RelayQuality,
+        quality: StreamQuality,
         pipeline: &gstreamer::Pipeline,
     ) {
-        let entry = self.relays.lock().unwrap().remove(&(camera_id, quality));
+        let entry = self.restreams.lock().unwrap().remove(&(camera_id, quality));
         if let Some(entry) = entry {
-            if let Err(e) = relay_bridge::detach(pipeline, &self.mounts, camera_id, &entry.bridge) {
+            if let Err(e) =
+                restream_bridge::detach(pipeline, &self.mounts, camera_id, &entry.bridge)
+            {
                 tracing::warn!(
                     camera_id = %camera_id,
                     quality = ?quality,
                     error = %e,
-                    "Failed to detach relay bridge",
+                    "Failed to detach restream bridge",
                 );
             }
         }
-        tracing::info!(camera_id = %camera_id, quality = ?quality, "Relay removed");
+        tracing::info!(camera_id = %camera_id, quality = ?quality, "Restream removed");
     }
 
-    /// Return the relay URL for a camera/quality if currently registered.
-    pub fn relay_url(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
+    /// Return the restream URL for a camera/quality if currently registered.
+    pub fn restream_url(&self, camera_id: Uuid, quality: StreamQuality) -> Option<String> {
         if !self
-            .relays
+            .restreams
             .lock()
             .unwrap()
             .contains_key(&(camera_id, quality))
@@ -206,20 +208,20 @@ impl RelayServer {
             "rtsp://{}:{}{}",
             host,
             port,
-            relay_path(camera_id, quality)
+            restream_path(camera_id, quality)
         ))
     }
 
-    pub fn is_relaying(&self, camera_id: Uuid, quality: RelayQuality) -> bool {
-        self.relays
+    pub fn is_restreaming(&self, camera_id: Uuid, quality: StreamQuality) -> bool {
+        self.restreams
             .lock()
             .unwrap()
             .contains_key(&(camera_id, quality))
     }
 
-    /// Return the cached codec for a running relay, if any.
-    pub fn codec(&self, camera_id: Uuid, quality: RelayQuality) -> Option<String> {
-        self.relays
+    /// Return the cached codec for a running restream, if any.
+    pub fn codec(&self, camera_id: Uuid, quality: StreamQuality) -> Option<String> {
+        self.restreams
             .lock()
             .unwrap()
             .get(&(camera_id, quality))
@@ -300,7 +302,7 @@ fn probe_codec_blocking(url: &str) -> Result<String, VmsError> {
 
 // -- Helpers --
 
-fn relay_path(camera_id: Uuid, quality: RelayQuality) -> String {
+fn restream_path(camera_id: Uuid, quality: StreamQuality) -> String {
     format!("/{}{}", camera_id.as_simple(), quality.path_suffix())
 }
 
