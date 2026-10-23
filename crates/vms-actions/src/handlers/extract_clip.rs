@@ -21,8 +21,6 @@ use crate::dispatcher::ActionContext;
 ///
 /// - The ring buffer must be running for the target camera. If it is not,
 ///   the handler returns [`NodeOutput::failure`].
-/// - `use_manual_range = true` is not yet supported. When set, it falls back
-///   to the latest-PTS behaviour with a warning in the run log.
 pub async fn execute(
     node_id: NodeId,
     cfg: &ExtractClipConfig,
@@ -41,13 +39,6 @@ pub async fn execute(
     let Some(ring_buffer) = ctx.ring_buffer.as_ref() else {
         return NodeOutput::failure(node_id, "extract_clip: ring buffer manager not configured");
     };
-
-    if cfg.use_manual_range {
-        tracing::warn!(
-            node_id = %node_id,
-            "extract_clip: use_manual_range is not yet supported; falling back to latest-PTS mode"
-        );
-    }
 
     // -- Anchor the extraction window to the latest buffered PTS --
     let event_pts = ring_buffer.latest_pts(camera_id).unwrap_or(Duration::ZERO);
@@ -114,7 +105,6 @@ mod tests {
             post_event_secs: post,
             format: "mp4".into(),
             camera_id: Some(uuid::Uuid::new_v4()),
-            use_manual_range: false,
         }
     }
 

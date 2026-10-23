@@ -919,7 +919,6 @@ mod tests {
             post_event_secs: 5,
             format: "mp4".into(),
             camera_id: None,
-            use_manual_range: false,
         })
     }
 

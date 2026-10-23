@@ -2260,7 +2260,6 @@ mod tests {
             post_event_secs: 5,
             format: "mp4".into(),
             camera_id,
-            use_manual_range: false,
         })
     }
 
@@ -2431,7 +2430,6 @@ mod tests {
             post_event_secs,
             format: "mp4".into(),
             camera_id,
-            use_manual_range: false,
         })
     }
 
