@@ -105,33 +105,52 @@ fn thumbnails_wanted(enabled: Option<bool>, recording: bool) -> bool {
     enabled.unwrap_or(false) && recording
 }
 
-/// Remove `*.faststart.tmp` files left by a previous process.
+/// Suffixes of temp files that are renamed or deleted once their write
+/// finishes, so any still present at startup are partial writes.
+const STALE_TMP_SUFFIXES: [&str; 2] = [".faststart.tmp", ".export_trim.tmp.mp4"];
+
+/// Remove temp files left by a previous process.
 ///
-/// `remux_faststart` writes to a tmp path and renames it on success, so a tmp
-/// file present at startup is a partial write, usually from a remux that was
-/// running when the process was killed. Runs once in `MediaManager::new()`,
-/// non-recursively since recordings are stored flat. Best-effort: a leftover
-/// file is only clutter.
-fn cleanup_stale_faststart_tmp_files(recording_dir: &Path) {
+/// `remux_faststart` and `export_range` write next to the chunk they work on
+/// and clean up on success, so a match here is usually from a process killed
+/// mid-write. Chunks sit either directly in `recording_dir` (older layout) or
+/// in its per-camera folders, so both levels are scanned. Runs once in
+/// `MediaManager::new()`. Best-effort: a leftover file is only clutter.
+fn cleanup_stale_tmp_files(recording_dir: &Path) {
     let entries = match std::fs::read_dir(recording_dir) {
         Ok(entries) => entries,
         Err(e) => {
-            tracing::warn!(error = %e, dir = %recording_dir.display(), "Failed to scan recording dir for stale faststart tmp files");
+            tracing::warn!(error = %e, dir = %recording_dir.display(), "Failed to scan recording dir for stale tmp files");
             return;
         }
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.to_string_lossy().ends_with(".faststart.tmp") {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {
-                    tracing::info!(path = %path.display(), "Removed stale faststart tmp file")
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "Failed to remove stale faststart tmp file")
+        if path.is_dir() {
+            if let Ok(sub) = std::fs::read_dir(&path) {
+                for sub_entry in sub.flatten() {
+                    remove_if_stale_tmp(&sub_entry.path());
                 }
             }
+        } else {
+            remove_if_stale_tmp(&path);
+        }
+    }
+}
+
+fn remove_if_stale_tmp(path: &Path) {
+    let name = path.to_string_lossy();
+    if !STALE_TMP_SUFFIXES
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+    {
+        return;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => tracing::info!(path = %path.display(), "Removed stale tmp file"),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to remove stale tmp file")
         }
     }
 }
@@ -207,7 +226,7 @@ impl MediaManager {
     ) -> Result<Self, VmsError> {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
         std::fs::create_dir_all(&config.recording_dir)?;
-        cleanup_stale_faststart_tmp_files(&config.recording_dir);
+        cleanup_stale_tmp_files(&config.recording_dir);
         let restream = Arc::new(RestreamServer::new(
             &config.rtsp_bind,
             config.rtsp_public_host.clone(),
@@ -1178,7 +1197,7 @@ fn detach_snapshot_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_stale_faststart_tmp_files, motion_wanted, thumbnails_wanted};
+    use super::{cleanup_stale_tmp_files, motion_wanted, thumbnails_wanted};
 
     #[test]
     fn thumbnails_run_only_while_recording_and_only_when_enabled() {
@@ -1224,7 +1243,7 @@ mod tests {
         std::fs::write(&stale, b"").unwrap();
         std::fs::write(&chunk, b"").unwrap();
 
-        cleanup_stale_faststart_tmp_files(&dir.0);
+        cleanup_stale_tmp_files(&dir.0);
 
         assert!(!stale.exists());
         assert!(chunk.exists());
@@ -1232,6 +1251,6 @@ mod tests {
 
     #[test]
     fn missing_dir_does_not_panic() {
-        cleanup_stale_faststart_tmp_files(std::path::Path::new("/nonexistent/does/not/exist"));
+        cleanup_stale_tmp_files(std::path::Path::new("/nonexistent/does/not/exist"));
     }
 }
