@@ -40,7 +40,7 @@ Generate each with `openssl rand -base64 32`.
 | Key | Default | |
 |---|---|---|
 | `database.url` | `sqlite://./reeframe.db?mode=rwc` | SQLite, MySQL (`mysql://user:pass@host/db`) or PostgreSQL (`postgres://user:pass@host/db`). For SQLite, keep `?mode=rwc` so the file is created on first start. |
-| `media.recording_dir` | `/var/lib/reeframe/recordings` | Where MP4 chunks and thumbnails are written |
+| `media.recording_dir` | `/var/lib/reeframe/recordings` | Where MP4 chunks and thumbnails are written. Chunks go in a `cam_<id>` folder per camera, exports in `exports`. |
 | `media.chunk_duration_secs` | `300` | Length of each recording chunk |
 | `media.thumbnail_interval_secs` | `30` | Spacing between thumbnails, for cameras that have them turned on |
 | `recordings.retention_days` | `30` | Delete recordings older than this. `0` keeps them. |

@@ -17,3 +17,11 @@ The `rtsp.*` settings keep their names.
 ### What's new
 
 - `rtsp.public_host` and `rtsp.public_port` set the host and port in restream URLs, so they work from the LAN when the daemon runs in Docker.
+
+### Changed
+
+- New recordings are written to a folder per camera, `{recording_dir}/cam_<id>/`, and exports to `{recording_dir}/exports/`. Recordings made before this release stay where they are and still play back, export and expire as before.
+
+### Fixed
+
+- A faststart remux or export trim that fails no longer leaves its temp file next to the chunk. Temp files left by a crash are now also cleaned up from camera folders at startup.
