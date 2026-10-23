@@ -279,3 +279,32 @@ fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_trim_leaves_no_tmp_file() {
+        let dir = std::env::temp_dir().join(format!("vms-media-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let chunk = dir.join("not_an_mp4.mp4");
+        std::fs::write(&chunk, b"definitely not an mp4").unwrap();
+        let chunk = chunk.to_string_lossy().to_string();
+
+        let result = export_range(
+            &[ExportChunk {
+                file_path: chunk.clone(),
+                trim_start_ns: Some(1_000_000_000),
+                trim_stop_ns: None,
+            }],
+            "H264",
+            &dir.join("out.mp4"),
+        );
+        let tmp_left = Path::new(&format!("{chunk}.export_trim.tmp.mp4")).exists();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(result.is_err());
+        assert!(!tmp_left);
+    }
+}

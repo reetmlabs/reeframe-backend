@@ -1709,3 +1709,56 @@ mod attach_tests {
         assert!(wait_for_codec_wired(&pipeline, camera_id).await.is_err());
     }
 }
+
+#[cfg(test)]
+mod recording_path_tests {
+    use super::*;
+
+    #[test]
+    fn chunks_go_into_the_cameras_folder() {
+        let camera_id = Uuid::new_v4();
+        let base = std::path::Path::new("/rec");
+        let folder = base.join(format!("cam_{}", camera_id.as_simple()));
+
+        let chunk = chunk_location(base, camera_id, "20260101T000000", 7);
+        assert_eq!(
+            chunk,
+            folder
+                .join(format!(
+                    "cam_{}_20260101T000000_chunk00007.mp4",
+                    camera_id.as_simple()
+                ))
+                .to_string_lossy()
+        );
+
+        let pattern = std::path::PathBuf::from(recording_location(base, camera_id));
+        assert_eq!(pattern.parent(), Some(folder.as_path()));
+    }
+
+    #[test]
+    fn building_the_recording_branch_creates_the_cameras_folder() {
+        gstreamer::init().ok();
+        let camera_id = Uuid::new_v4();
+        let naming = ChunkNaming::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let dir = ScratchDir::new();
+
+        build_recording_branch(camera_id, &dir.0, 60, &naming, &tx).unwrap();
+
+        assert!(camera_recording_dir(&dir.0, camera_id).is_dir());
+    }
+
+    #[test]
+    fn failed_faststart_remux_leaves_no_tmp_file() {
+        gstreamer::init().ok();
+        let dir = ScratchDir::new();
+        let chunk = dir.0.join("not_an_mp4.mp4");
+        std::fs::write(&chunk, b"definitely not an mp4").unwrap();
+        let chunk = chunk.to_string_lossy().to_string();
+
+        assert!(remux_faststart(&chunk, "h264parse").is_err());
+
+        assert!(!std::path::Path::new(&format!("{chunk}.faststart.tmp")).exists());
+        assert!(std::path::Path::new(&chunk).exists());
+    }
+}

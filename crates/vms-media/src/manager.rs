@@ -1250,6 +1250,25 @@ mod tests {
     }
 
     #[test]
+    fn removes_tmp_files_from_camera_folders_and_keeps_chunks() {
+        let dir = ScratchDir::new("removes-tmp-in-camera-folder");
+        let cam = dir.0.join("cam_abc");
+        std::fs::create_dir_all(&cam).unwrap();
+        let chunk = cam.join("cam_abc_20260101_chunk00000.mp4");
+        let faststart = cam.join("cam_abc_20260101_chunk00000.mp4.faststart.tmp");
+        let trim = cam.join("cam_abc_20260101_chunk00000.mp4.export_trim.tmp.mp4");
+        for path in [&chunk, &faststart, &trim] {
+            std::fs::write(path, b"").unwrap();
+        }
+
+        cleanup_stale_tmp_files(&dir.0);
+
+        assert!(chunk.exists());
+        assert!(!faststart.exists());
+        assert!(!trim.exists());
+    }
+
+    #[test]
     fn missing_dir_does_not_panic() {
         cleanup_stale_tmp_files(std::path::Path::new("/nonexistent/does/not/exist"));
     }
