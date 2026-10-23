@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use chrono::{DateTime, FixedOffset, Utc};
 use salvo::fs::NamedFile;
 use salvo::prelude::*;
@@ -227,11 +225,7 @@ async fn run_export_job(
         })
         .collect();
 
-    let recording_dir = Path::new(&export_chunks[0].file_path)
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let export_dir = recording_dir.join("exports");
+    let export_dir = state.media_recording_dir.join("exports");
     tokio::fs::create_dir_all(&export_dir)
         .await
         .map_err(|e| format!("create export dir: {e}"))?;
