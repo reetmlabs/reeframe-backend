@@ -1299,32 +1299,39 @@ fn remux_faststart(path: &str, parse_factory: &str) -> Result<(), VmsError> {
         }
     });
 
+    let result = run_faststart_pipeline(&pipeline);
+    pipeline.set_state(gstreamer::State::Null).ok();
+
+    let result = result.and_then(|()| std::fs::rename(&tmp_path, path).map_err(VmsError::from));
+    if result.is_err() {
+        // A partial remux would otherwise sit next to the chunk until restart.
+        std::fs::remove_file(&tmp_path).ok();
+    }
+    result
+}
+
+/// Play the faststart pipeline until EOS, an error, or a 30 s stall.
+fn run_faststart_pipeline(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
     pipeline
         .set_state(gstreamer::State::Playing)
         .map_err(|e| VmsError::Media(format!("faststart pipeline start: {e}")))?;
 
     let bus = pipeline.bus().expect("pipeline bus missing");
-    let result = loop {
+    loop {
         let Some(msg) = bus.timed_pop(gstreamer::ClockTime::from_seconds(30)) else {
-            break Err(VmsError::Media("faststart remux timed out".into()));
+            return Err(VmsError::Media("faststart remux timed out".into()));
         };
         match msg.view() {
-            gstreamer::MessageView::Eos(_) => break Ok(()),
+            gstreamer::MessageView::Eos(_) => return Ok(()),
             gstreamer::MessageView::Error(e) => {
-                break Err(VmsError::Media(format!(
+                return Err(VmsError::Media(format!(
                     "faststart remux error: {}",
                     e.error()
                 )));
             }
             _ => {}
         }
-    };
-
-    pipeline.set_state(gstreamer::State::Null).ok();
-    result?;
-
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    }
 }
 
 /// Wall-clock timestamp prefix for a recording session.

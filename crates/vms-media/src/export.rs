@@ -51,6 +51,8 @@ pub fn export_range(
         for chunk in chunks {
             if chunk.trim_start_ns.is_some() || chunk.trim_stop_ns.is_some() {
                 let tmp_path = format!("{}.export_trim.tmp.mp4", chunk.file_path);
+                // Tracked before trimming so a trim that fails partway is removed too.
+                temp_files.push(PathBuf::from(&tmp_path));
                 trim_single(
                     &chunk.file_path,
                     chunk.trim_start_ns.unwrap_or(0),
@@ -58,7 +60,6 @@ pub fn export_range(
                     parse_factory,
                     &tmp_path,
                 )?;
-                temp_files.push(PathBuf::from(&tmp_path));
                 pieces.push(tmp_path);
             } else {
                 pieces.push(chunk.file_path.clone());
