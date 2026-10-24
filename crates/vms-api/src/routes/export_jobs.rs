@@ -296,3 +296,118 @@ fn export_chunks(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// A scratch dir under the system temp dir, removed on drop.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("vms-export-test-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn chunk_row(file_path: &Path, start: DateTime<FixedOffset>, secs: i64) -> recording::Model {
+        recording::Model {
+            id: Uuid::new_v4(),
+            camera_id: Uuid::new_v4(),
+            file_path: file_path.to_string_lossy().into_owned(),
+            chunk_index: 0,
+            start_time: start,
+            end_time: Some(start + chrono::Duration::seconds(secs)),
+            size_bytes: None,
+            codec: Some("H264".into()),
+            created_at: start,
+        }
+    }
+
+    #[test]
+    fn chunk_inside_the_recording_dir_is_exported_from_its_resolved_path() {
+        let root = ScratchDir::new();
+        let rec_dir = root.0.join("recordings");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let chunk = rec_dir.join("chunk.mp4");
+        std::fs::write(&chunk, b"").unwrap();
+
+        let start = Utc::now().fixed_offset();
+        let from = start + chrono::Duration::seconds(10);
+        let to = start + chrono::Duration::seconds(50);
+        let rows = vec![chunk_row(
+            &rec_dir.join("..").join("recordings").join("chunk.mp4"),
+            start,
+            60,
+        )];
+
+        let chunks = export_chunks(&rec_dir, rows, from, to).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].file_path,
+            std::fs::canonicalize(&chunk).unwrap().to_string_lossy()
+        );
+        assert_eq!(chunks[0].trim_start_ns, Some(10_000_000_000));
+        assert_eq!(chunks[0].trim_stop_ns, Some(50_000_000_000));
+    }
+
+    #[test]
+    fn chunk_outside_the_recording_dir_fails_the_export() {
+        let root = ScratchDir::new();
+        let rec_dir = root.0.join("recordings");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let inside = rec_dir.join("chunk.mp4");
+        let outside = root.0.join("secret.mp4");
+        std::fs::write(&inside, b"").unwrap();
+        std::fs::write(&outside, b"").unwrap();
+
+        let start = Utc::now().fixed_offset();
+        let bad = chunk_row(&outside, start + chrono::Duration::seconds(60), 60);
+        let bad_id = bad.id;
+        let rows = vec![chunk_row(&inside, start, 60), bad];
+
+        let err = export_chunks(
+            &rec_dir,
+            rows,
+            start,
+            start + chrono::Duration::seconds(120),
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(
+            err,
+            format!("recording {bad_id} is outside the recording dir")
+        );
+    }
+
+    #[test]
+    fn missing_chunk_file_fails_the_export() {
+        let root = ScratchDir::new();
+        let start = Utc::now().fixed_offset();
+        let row = chunk_row(&root.0.join("gone.mp4"), start, 60);
+        let id = row.id;
+
+        let err = export_chunks(
+            &root.0,
+            vec![row],
+            start,
+            start + chrono::Duration::seconds(60),
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(err, format!("recording {id} file is missing on disk"));
+    }
+}
