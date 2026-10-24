@@ -377,6 +377,13 @@ fn build_recording_branch(
         .build()
         .map_err(|e| VmsError::Media(format!("queue: {e}")))?;
 
+    let camera_dir = camera_recording_dir(recording_dir, camera_id);
+    std::fs::create_dir_all(&camera_dir).map_err(|e| {
+        VmsError::Media(format!(
+            "create recording dir {}: {e}",
+            camera_dir.display()
+        ))
+    })?;
     let location = recording_location(recording_dir, camera_id);
     let chunk_ns = chunk_duration_secs * 1_000_000_000;
 
@@ -1292,32 +1299,39 @@ fn remux_faststart(path: &str, parse_factory: &str) -> Result<(), VmsError> {
         }
     });
 
+    let result = run_faststart_pipeline(&pipeline);
+    pipeline.set_state(gstreamer::State::Null).ok();
+
+    let result = result.and_then(|()| std::fs::rename(&tmp_path, path).map_err(VmsError::from));
+    if result.is_err() {
+        // A partial remux would otherwise sit next to the chunk until restart.
+        std::fs::remove_file(&tmp_path).ok();
+    }
+    result
+}
+
+/// Play the faststart pipeline until EOS, an error, or a 30 s stall.
+fn run_faststart_pipeline(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
     pipeline
         .set_state(gstreamer::State::Playing)
         .map_err(|e| VmsError::Media(format!("faststart pipeline start: {e}")))?;
 
     let bus = pipeline.bus().expect("pipeline bus missing");
-    let result = loop {
+    loop {
         let Some(msg) = bus.timed_pop(gstreamer::ClockTime::from_seconds(30)) else {
-            break Err(VmsError::Media("faststart remux timed out".into()));
+            return Err(VmsError::Media("faststart remux timed out".into()));
         };
         match msg.view() {
-            gstreamer::MessageView::Eos(_) => break Ok(()),
+            gstreamer::MessageView::Eos(_) => return Ok(()),
             gstreamer::MessageView::Error(e) => {
-                break Err(VmsError::Media(format!(
+                return Err(VmsError::Media(format!(
                     "faststart remux error: {}",
                     e.error()
                 )));
             }
             _ => {}
         }
-    };
-
-    pipeline.set_state(gstreamer::State::Null).ok();
-    result?;
-
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    }
 }
 
 /// Wall-clock timestamp prefix for a recording session.
@@ -1327,14 +1341,20 @@ fn session_timestamp() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string()
 }
 
+/// Per-camera folder under the recording dir that holds that camera's chunks.
+/// Uses the same `cam_<id>` naming as the thumbnail folders.
+fn camera_recording_dir(base_dir: &std::path::Path, camera_id: Uuid) -> std::path::PathBuf {
+    base_dir.join(format!("cam_{}", camera_id.as_simple()))
+}
+
 /// Chunk location pattern for a recording session, used only as the
 /// `location` property's fallback if `format-location-full` returns `None`.
 /// Real per-chunk paths come from [`chunk_location`], called from the naming
 /// signal set up in `build_recording_branch`.
 ///
-/// Example: `/var/recordings/cam_<id>_20260509T143022_chunk%05d.mp4`
+/// Example: `/var/recordings/cam_<id>/cam_<id>_20260509T143022_chunk%05d.mp4`
 pub(crate) fn recording_location(base_dir: &std::path::Path, camera_id: Uuid) -> String {
-    base_dir
+    camera_recording_dir(base_dir, camera_id)
         .join(format!(
             "cam_{}_{}_chunk%05d.mp4",
             camera_id.as_simple(),
@@ -1352,7 +1372,7 @@ fn chunk_location(
     session_ts: &str,
     fragment_id: u32,
 ) -> String {
-    base_dir
+    camera_recording_dir(base_dir, camera_id)
         .join(format!(
             "cam_{}_{}_chunk{:05}.mp4",
             camera_id.as_simple(),
@@ -1364,6 +1384,26 @@ fn chunk_location(
 }
 
 // -- Tests --
+
+/// A scratch dir under the system temp dir, removed on drop.
+#[cfg(test)]
+struct ScratchDir(std::path::PathBuf);
+
+#[cfg(test)]
+impl ScratchDir {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("vms-media-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
 
 #[cfg(test)]
 mod reconnect_policy_tests {
@@ -1543,14 +1583,9 @@ mod recording_branch_avc_bridge_tests {
         let naming = ChunkNaming::new();
         *naming.codec.lock().unwrap() = Some("H264".into());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (_queue, recparse, _splitmux) = build_recording_branch(
-            Uuid::new_v4(),
-            std::path::Path::new("/tmp"),
-            60,
-            &naming,
-            &tx,
-        )
-        .unwrap();
+        let dir = ScratchDir::new();
+        let (_queue, recparse, _splitmux) =
+            build_recording_branch(Uuid::new_v4(), &dir.0, 60, &naming, &tx).unwrap();
         assert!(recparse.is_some(), "H264 must get a converting recparse");
         assert_eq!(recparse.unwrap().factory().unwrap().name(), "h264parse");
     }
@@ -1560,14 +1595,9 @@ mod recording_branch_avc_bridge_tests {
         gstreamer::init().ok();
         let naming = ChunkNaming::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (_queue, recparse, _splitmux) = build_recording_branch(
-            Uuid::new_v4(),
-            std::path::Path::new("/tmp"),
-            60,
-            &naming,
-            &tx,
-        )
-        .unwrap();
+        let dir = ScratchDir::new();
+        let (_queue, recparse, _splitmux) =
+            build_recording_branch(Uuid::new_v4(), &dir.0, 60, &naming, &tx).unwrap();
         assert!(recparse.is_none());
     }
 
@@ -1597,7 +1627,8 @@ mod recording_branch_avc_bridge_tests {
         let naming = ChunkNaming::new();
         *naming.codec.lock().unwrap() = Some("H264".into());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let dir = std::env::temp_dir();
+        let scratch = ScratchDir::new();
+        let dir = scratch.0.clone();
 
         attach_recording_branch(camera_id, &pipeline, &naming, &tx, &dir, 60)
             .expect("recording branch must link even though tee's feed is byte-stream/au");
@@ -1645,7 +1676,8 @@ mod attach_tests {
         let naming = ChunkNaming::new();
         *naming.codec.lock().unwrap() = Some("H264".into());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let dir = std::env::temp_dir();
+        let scratch = ScratchDir::new();
+        let dir = scratch.0.clone();
 
         let results: Vec<_> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..4)
@@ -1675,5 +1707,58 @@ mod attach_tests {
         pipeline.add(&tee).unwrap();
 
         assert!(wait_for_codec_wired(&pipeline, camera_id).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod recording_path_tests {
+    use super::*;
+
+    #[test]
+    fn chunks_go_into_the_cameras_folder() {
+        let camera_id = Uuid::new_v4();
+        let base = std::path::Path::new("/rec");
+        let folder = base.join(format!("cam_{}", camera_id.as_simple()));
+
+        let chunk = chunk_location(base, camera_id, "20260101T000000", 7);
+        assert_eq!(
+            chunk,
+            folder
+                .join(format!(
+                    "cam_{}_20260101T000000_chunk00007.mp4",
+                    camera_id.as_simple()
+                ))
+                .to_string_lossy()
+        );
+
+        let pattern = std::path::PathBuf::from(recording_location(base, camera_id));
+        assert_eq!(pattern.parent(), Some(folder.as_path()));
+    }
+
+    #[test]
+    fn building_the_recording_branch_creates_the_cameras_folder() {
+        gstreamer::init().ok();
+        let camera_id = Uuid::new_v4();
+        let naming = ChunkNaming::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let dir = ScratchDir::new();
+
+        build_recording_branch(camera_id, &dir.0, 60, &naming, &tx).unwrap();
+
+        assert!(camera_recording_dir(&dir.0, camera_id).is_dir());
+    }
+
+    #[test]
+    fn failed_faststart_remux_leaves_no_tmp_file() {
+        gstreamer::init().ok();
+        let dir = ScratchDir::new();
+        let chunk = dir.0.join("not_an_mp4.mp4");
+        std::fs::write(&chunk, b"definitely not an mp4").unwrap();
+        let chunk = chunk.to_string_lossy().to_string();
+
+        assert!(remux_faststart(&chunk, "h264parse").is_err());
+
+        assert!(!std::path::Path::new(&format!("{chunk}.faststart.tmp")).exists());
+        assert!(std::path::Path::new(&chunk).exists());
     }
 }
