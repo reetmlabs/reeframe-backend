@@ -8,7 +8,7 @@ use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, StatMetric, TriggerConfig};
 use vms_db::repos::daily_recording_coverage::UpsertDailyCoverage;
 use vms_db::{CameraRepo, DailyRecordingCoverageRepo, RecordingRepo};
-use vms_media::MediaManager;
+use vms_media::{resolve_recording_file, MediaManager};
 
 use crate::coverage::compute_day_coverage;
 use crate::recording_intent::reconcile_recording_intent;
@@ -290,7 +290,8 @@ impl StatMonitor {
                 Ok(rows) => {
                     for row in rows {
                         purged_days.insert((row.camera_id, row.start_time.date_naive()));
-                        self.delete_recording_row(&recording_repo, row).await;
+                        self.delete_recording_row(&recording_repo, &recording_dir, row)
+                            .await;
                     }
                 }
                 Err(e) => tracing::warn!(
@@ -326,7 +327,8 @@ impl StatMonitor {
                     Ok(rows) if !rows.is_empty() => {
                         for row in rows {
                             purged_days.insert((row.camera_id, row.start_time.date_naive()));
-                            self.delete_recording_row(&recording_repo, row).await;
+                            self.delete_recording_row(&recording_repo, &recording_dir, row)
+                                .await;
                         }
                     }
                     _ => break,
@@ -585,15 +587,32 @@ impl StatMonitor {
     async fn delete_recording_row(
         &self,
         repo: &RecordingRepo,
+        recording_dir: &std::path::Path,
         row: vms_db::entities::recording::Model,
     ) {
-        if let Err(e) = tokio::fs::remove_file(&row.file_path).await {
-            tracing::warn!(
+        // The row goes either way, or the disk pass would pick it again every tick.
+        match resolve_recording_file(recording_dir, std::path::Path::new(&row.file_path)) {
+            Ok(Some(path)) => {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    tracing::warn!(
+                        recording_id = %row.id,
+                        file_path = %row.file_path,
+                        error = %e,
+                        "Retention sweep: failed to delete file on disk, DB row will still be removed",
+                    );
+                }
+            }
+            Ok(None) => tracing::warn!(
+                recording_id = %row.id,
+                file_path = %row.file_path,
+                "Retention sweep: file is outside the recording dir, leaving it and removing only the DB row",
+            ),
+            Err(e) => tracing::warn!(
                 recording_id = %row.id,
                 file_path = %row.file_path,
                 error = %e,
-                "Retention sweep: failed to delete file on disk, DB row will still be removed",
-            );
+                "Retention sweep: file not found on disk, DB row will still be removed",
+            ),
         }
         match repo.delete(row.id).await {
             Ok(()) => tracing::info!(
@@ -723,18 +742,25 @@ impl StatMonitor {
     /// Percentage of disk space used on the filesystem that contains `path`
     /// (0 to 100%).
     ///
-    /// Returns `None` if no mounted filesystem matches `path`.
+    /// `path` may be relative to the working directory. Returns `None` if no
+    /// mounted filesystem matches it.
     pub(crate) fn disk_percent(&self, path: &str) -> Option<f64> {
+        // Mount points are absolute, so a relative path would match none. Canonicalizing
+        // also follows a symlink to the disk it really lives on.
+        let path = std::fs::canonicalize(path)
+            .or_else(|_| std::path::absolute(path))
+            .ok()?;
+
         let mut disks = self.disks.lock().expect("disks mutex poisoned");
         disks.refresh(true);
 
-        // Find the disk whose mount point is a prefix of `path`, preferring
-        // the longest match (most specific mount point wins).
+        // Most specific mount point wins. `Path::starts_with` compares whole
+        // components, so `/mnt/data` doesn't match `/mnt/data2`.
         let best = disks
             .list()
             .iter()
-            .filter(|d| path.starts_with(d.mount_point().to_string_lossy().as_ref()))
-            .max_by_key(|d| d.mount_point().to_string_lossy().len())?;
+            .filter(|d| path.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())?;
 
         let total = best.total_space();
         if total == 0 {
@@ -801,12 +827,39 @@ mod tests {
     }
 
     #[test]
-    fn disk_percent_unknown_path_returns_none() {
+    fn disk_percent_finds_the_disk_for_a_relative_path() {
         let mon = make_monitor();
-        // A relative path can never start with a mount point (all mount points
-        // are absolute), so this is guaranteed to return None on any OS.
-        let pct = mon.disk_percent("relative/path/no/leading/slash");
-        assert!(pct.is_none());
+        assert!(mon.disk_percent(".").is_some());
+        assert!(mon.disk_percent("not/created/yet").is_some());
+    }
+
+    // -- Retention deletes --
+
+    #[tokio::test]
+    async fn retention_deletes_files_inside_and_keeps_files_outside() {
+        use crate::test_support::{open_chunk_at, recording_repo_with_camera, ScratchDir};
+
+        let root = ScratchDir::new();
+        let rec_dir = root.0.join("recordings");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let inside = rec_dir.join("chunk.mp4");
+        let outside = root.0.join("secret.txt");
+        std::fs::write(&inside, b"").unwrap();
+        std::fs::write(&outside, b"").unwrap();
+
+        let (repo, camera_id) = recording_repo_with_camera().await;
+        let inside_row = open_chunk_at(&repo, camera_id, &inside).await;
+        let outside_row = open_chunk_at(&repo, camera_id, &outside).await;
+        let (inside_id, outside_id) = (inside_row.id, outside_row.id);
+
+        let mon = make_monitor();
+        mon.delete_recording_row(&repo, &rec_dir, inside_row).await;
+        mon.delete_recording_row(&repo, &rec_dir, outside_row).await;
+
+        assert!(!inside.exists());
+        assert!(outside.exists());
+        assert!(repo.get(inside_id).await.is_err());
+        assert!(repo.get(outside_id).await.is_err());
     }
 
     // -- Polling helpers --
