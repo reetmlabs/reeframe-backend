@@ -723,18 +723,25 @@ impl StatMonitor {
     /// Percentage of disk space used on the filesystem that contains `path`
     /// (0 to 100%).
     ///
-    /// Returns `None` if no mounted filesystem matches `path`.
+    /// `path` may be relative to the working directory. Returns `None` if no
+    /// mounted filesystem matches it.
     pub(crate) fn disk_percent(&self, path: &str) -> Option<f64> {
+        // Mount points are absolute, so a relative path would match none. Canonicalizing
+        // also follows a symlink to the disk it really lives on.
+        let path = std::fs::canonicalize(path)
+            .or_else(|_| std::path::absolute(path))
+            .ok()?;
+
         let mut disks = self.disks.lock().expect("disks mutex poisoned");
         disks.refresh(true);
 
-        // Find the disk whose mount point is a prefix of `path`, preferring
-        // the longest match (most specific mount point wins).
+        // Most specific mount point wins. `Path::starts_with` compares whole
+        // components, so `/mnt/data` doesn't match `/mnt/data2`.
         let best = disks
             .list()
             .iter()
-            .filter(|d| path.starts_with(d.mount_point().to_string_lossy().as_ref()))
-            .max_by_key(|d| d.mount_point().to_string_lossy().len())?;
+            .filter(|d| path.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())?;
 
         let total = best.total_space();
         if total == 0 {
@@ -798,15 +805,6 @@ mod tests {
             (0.0..=100.0).contains(&pct),
             "disk_percent('/') out of range: {pct}"
         );
-    }
-
-    #[test]
-    fn disk_percent_unknown_path_returns_none() {
-        let mon = make_monitor();
-        // A relative path can never start with a mount point (all mount points
-        // are absolute), so this is guaranteed to return None on any OS.
-        let pct = mon.disk_percent("relative/path/no/leading/slash");
-        assert!(pct.is_none());
     }
 
     // -- Polling helpers --
