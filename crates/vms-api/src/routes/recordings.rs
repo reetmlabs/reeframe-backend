@@ -1,8 +1,11 @@
+use std::path::Path;
+
 use chrono::{DateTime, FixedOffset, Utc};
 use salvo::fs::NamedFile;
 use salvo::prelude::*;
 use serde::Serialize;
 use uuid::Uuid;
+use vms_media::resolve_recording_file;
 
 use crate::{
     error::{parse_id, ApiError},
@@ -214,9 +217,22 @@ pub async fn stream_recording(
     let id = parse_id(req)?;
     let rec = state.recording_repo.get(id).await?;
 
-    let file = NamedFile::open(&rec.file_path).await.map_err(|e| {
+    let not_found = || ApiError::not_found(format!("recording {id} has no file on disk"));
+    let path = match resolve_recording_file(&state.media_recording_dir, Path::new(&rec.file_path)) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            tracing::warn!(recording_id = %id, file_path = %rec.file_path, "Refusing to serve a recording outside the recording dir");
+            return Err(not_found());
+        }
+        Err(e) => {
+            tracing::error!(recording_id = %id, file_path = %rec.file_path, error = %e, "Recording file missing on disk");
+            return Err(not_found());
+        }
+    };
+
+    let file = NamedFile::open(&path).await.map_err(|e| {
         tracing::error!(recording_id = %id, file_path = %rec.file_path, error = %e, "Recording file missing on disk");
-        ApiError::not_found(format!("recording {id} has no file on disk"))
+        not_found()
     })?;
 
     file.send(req.headers(), res).await;
