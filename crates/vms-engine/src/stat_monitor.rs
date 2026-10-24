@@ -8,7 +8,7 @@ use uuid::Uuid;
 use vms_core::{pipeline::CompiledPipeline, StatMetric, TriggerConfig};
 use vms_db::repos::daily_recording_coverage::UpsertDailyCoverage;
 use vms_db::{CameraRepo, DailyRecordingCoverageRepo, RecordingRepo};
-use vms_media::MediaManager;
+use vms_media::{resolve_recording_file, MediaManager};
 
 use crate::coverage::compute_day_coverage;
 use crate::recording_intent::reconcile_recording_intent;
@@ -290,7 +290,8 @@ impl StatMonitor {
                 Ok(rows) => {
                     for row in rows {
                         purged_days.insert((row.camera_id, row.start_time.date_naive()));
-                        self.delete_recording_row(&recording_repo, row).await;
+                        self.delete_recording_row(&recording_repo, &recording_dir, row)
+                            .await;
                     }
                 }
                 Err(e) => tracing::warn!(
@@ -326,7 +327,8 @@ impl StatMonitor {
                     Ok(rows) if !rows.is_empty() => {
                         for row in rows {
                             purged_days.insert((row.camera_id, row.start_time.date_naive()));
-                            self.delete_recording_row(&recording_repo, row).await;
+                            self.delete_recording_row(&recording_repo, &recording_dir, row)
+                                .await;
                         }
                     }
                     _ => break,
@@ -585,15 +587,32 @@ impl StatMonitor {
     async fn delete_recording_row(
         &self,
         repo: &RecordingRepo,
+        recording_dir: &std::path::Path,
         row: vms_db::entities::recording::Model,
     ) {
-        if let Err(e) = tokio::fs::remove_file(&row.file_path).await {
-            tracing::warn!(
+        // The row goes either way, or the disk pass would pick it again every tick.
+        match resolve_recording_file(recording_dir, std::path::Path::new(&row.file_path)) {
+            Ok(Some(path)) => {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    tracing::warn!(
+                        recording_id = %row.id,
+                        file_path = %row.file_path,
+                        error = %e,
+                        "Retention sweep: failed to delete file on disk, DB row will still be removed",
+                    );
+                }
+            }
+            Ok(None) => tracing::warn!(
+                recording_id = %row.id,
+                file_path = %row.file_path,
+                "Retention sweep: file is outside the recording dir, leaving it and removing only the DB row",
+            ),
+            Err(e) => tracing::warn!(
                 recording_id = %row.id,
                 file_path = %row.file_path,
                 error = %e,
-                "Retention sweep: failed to delete file on disk, DB row will still be removed",
-            );
+                "Retention sweep: file not found on disk, DB row will still be removed",
+            ),
         }
         match repo.delete(row.id).await {
             Ok(()) => tracing::info!(

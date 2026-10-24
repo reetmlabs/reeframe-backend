@@ -477,7 +477,7 @@ async fn main() -> anyhow::Result<()> {
     // -- Reconcile orphaned recording chunks from a previous process lifetime --
     // Must run before the resume loop below opens new chunks, so every
     // `end_time IS NULL` row found here is a leftover from a previous run.
-    vms_engine::reconcile_orphaned_chunks(&recording_repo).await;
+    vms_engine::reconcile_orphaned_chunks(&recording_repo, &cfg.media.recording_dir).await;
 
     // -- Resume recordings the operator started manually --
     // Kept out of `resource_manager.recover()`, which only covers cameras

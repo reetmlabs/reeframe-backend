@@ -5,13 +5,18 @@
 //! heals the row if the file is valid, or discards it if the file is missing
 //! or corrupt.
 
+use std::path::Path;
+
 use gstreamer_pbutils::prelude::*;
 use vms_db::RecordingRepo;
+use vms_media::resolve_recording_file;
 
 /// Runs once at daemon startup, before any camera opens a new chunk, so every
 /// open row it finds belongs to a previous process. A probe or DB failure is
 /// logged and skipped, never fatal to startup.
-pub async fn reconcile_orphaned_chunks(recording_repo: &RecordingRepo) {
+///
+/// Rows pointing outside `recording_dir` are dropped without touching the file.
+pub async fn reconcile_orphaned_chunks(recording_repo: &RecordingRepo, recording_dir: &Path) {
     let open_rows = match recording_repo.list_open_chunks().await {
         Ok(rows) => rows,
         Err(e) => {
@@ -30,6 +35,17 @@ pub async fn reconcile_orphaned_chunks(recording_repo: &RecordingRepo) {
     );
 
     for row in open_rows {
+        if let Ok(None) = resolve_recording_file(recording_dir, Path::new(&row.file_path)) {
+            let recording_id = row.id;
+            let file_path = row.file_path.clone();
+            if let Err(e) = recording_repo.delete(row.id).await {
+                tracing::warn!(recording_id = %recording_id, error = %e, "Startup chunk reconciliation: failed to discard chunk row outside the recording dir");
+            } else {
+                tracing::warn!(recording_id = %recording_id, file_path, "Discarded orphaned chunk row outside the recording dir, file left in place");
+            }
+            continue;
+        }
+
         let probe_path = row.file_path.clone();
         let probe = match tokio::task::spawn_blocking(move || probe_chunk_file(&probe_path)).await {
             Ok(probe) => probe,
