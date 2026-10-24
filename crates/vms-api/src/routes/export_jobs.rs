@@ -138,13 +138,26 @@ pub async fn download_export(
         .file_path
         .ok_or_else(|| ApiError::not_found(format!("export job {id} has no file")))?;
 
-    let file = NamedFile::builder(&file_path)
+    let not_found = || ApiError::not_found(format!("export job {id} has no file on disk"));
+    let path = match resolve_recording_file(&state.media_recording_dir, Path::new(&file_path)) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            tracing::warn!(export_job_id = %id, file_path, "Refusing to serve an export file outside the recording dir");
+            return Err(not_found());
+        }
+        Err(e) => {
+            tracing::error!(export_job_id = %id, file_path, error = %e, "Export file missing on disk");
+            return Err(not_found());
+        }
+    };
+
+    let file = NamedFile::builder(&path)
         .attached_name(format!("export_{id}.mp4"))
         .build()
         .await
         .map_err(|e| {
             tracing::error!(export_job_id = %id, file_path, error = %e, "Export file missing on disk");
-            ApiError::not_found(format!("export job {id} has no file on disk"))
+            not_found()
         })?;
 
     file.send(req.headers(), res).await;
