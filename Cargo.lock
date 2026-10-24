@@ -6509,6 +6509,7 @@ dependencies = [
  "gstreamer-pbutils",
  "prometheus",
  "sea-orm",
+ "sea-orm-migration",
  "serde",
  "serde_json",
  "sysinfo",

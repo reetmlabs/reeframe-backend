@@ -10,6 +10,8 @@ pub mod pipeline_registry;
 pub mod recording_intent;
 pub mod resource_manager;
 pub mod stat_monitor;
+#[cfg(test)]
+mod test_support;
 pub mod time_helpers;
 pub mod trigger_evaluator;
 

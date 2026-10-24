@@ -826,6 +826,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn disk_percent_finds_the_disk_for_a_relative_path() {
+        let mon = make_monitor();
+        assert!(mon.disk_percent(".").is_some());
+        assert!(mon.disk_percent("not/created/yet").is_some());
+    }
+
+    // -- Retention deletes --
+
+    #[tokio::test]
+    async fn retention_deletes_files_inside_and_keeps_files_outside() {
+        use crate::test_support::{open_chunk_at, recording_repo_with_camera, ScratchDir};
+
+        let root = ScratchDir::new();
+        let rec_dir = root.0.join("recordings");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let inside = rec_dir.join("chunk.mp4");
+        let outside = root.0.join("secret.txt");
+        std::fs::write(&inside, b"").unwrap();
+        std::fs::write(&outside, b"").unwrap();
+
+        let (repo, camera_id) = recording_repo_with_camera().await;
+        let inside_row = open_chunk_at(&repo, camera_id, &inside).await;
+        let outside_row = open_chunk_at(&repo, camera_id, &outside).await;
+        let (inside_id, outside_id) = (inside_row.id, outside_row.id);
+
+        let mon = make_monitor();
+        mon.delete_recording_row(&repo, &rec_dir, inside_row).await;
+        mon.delete_recording_row(&repo, &rec_dir, outside_row).await;
+
+        assert!(!inside.exists());
+        assert!(outside.exists());
+        assert!(repo.get(inside_id).await.is_err());
+        assert!(repo.get(outside_id).await.is_err());
+    }
+
     // -- Polling helpers --
 
     fn make_disk_pipeline(path: &str) -> vms_core::pipeline::CompiledPipeline {

@@ -150,6 +150,25 @@ mod tests {
         std::env::temp_dir().join(format!("vms-engine-test-{name}-{}", uuid::Uuid::new_v4()))
     }
 
+    #[tokio::test]
+    async fn rows_outside_the_recording_dir_are_dropped_and_their_file_kept() {
+        use crate::test_support::{open_chunk_at, recording_repo_with_camera, ScratchDir};
+
+        let root = ScratchDir::new();
+        let rec_dir = root.0.join("recordings");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let outside = root.0.join("secret.txt");
+        std::fs::write(&outside, b"not an mp4 file").unwrap();
+
+        let (repo, camera_id) = recording_repo_with_camera().await;
+        open_chunk_at(&repo, camera_id, &outside).await;
+
+        super::reconcile_orphaned_chunks(&repo, &rec_dir).await;
+
+        assert!(repo.list_open_chunks().await.unwrap().is_empty());
+        assert!(outside.exists());
+    }
+
     #[test]
     fn missing_file_is_invalid() {
         let path = scratch_path("missing");
