@@ -156,17 +156,19 @@ async fn main() -> anyhow::Result<()> {
             );
             anyhow::anyhow!("missing gateway.be_id for oidc auth mode")
         })?;
-        let provider = CoordinatorJwksAuthProvider::new(
+        let provider = Arc::new(CoordinatorJwksAuthProvider::new(
             jwks_url.clone(),
             std::time::Duration::from_secs(cfg.auth.jwks_refresh_interval_secs),
             be_id,
-        );
-        provider.prefetch().await.map_err(|e| {
-            tracing::error!(jwks_url = %jwks_url, error = %e, "Failed to fetch Coordinator JWKS");
-            anyhow::anyhow!(e)
-        })?;
-        tracing::info!(jwks_url = %jwks_url, "Coordinator JWKS provider ready");
-        Some(Arc::new(provider))
+        ));
+        // The Coordinator may start after this server, so its keys load in
+        // the background instead of holding up startup.
+        tokio::spawn({
+            let provider = provider.clone();
+            async move { provider.load_with_retry().await }
+        });
+        tracing::info!(jwks_url = %jwks_url, "Coordinator tokens accepted once its JWKS loads");
+        Some(provider)
     } else {
         None
     };
