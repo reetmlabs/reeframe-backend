@@ -478,4 +478,96 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    // -- Loading keys at startup --
+
+    /// A `JwksFetcher` that fails a set number of times before returning
+    /// `keys`, recording when each call happened.
+    struct FlakyFetcher {
+        keys: JwkSet,
+        failures_left: AtomicUsize,
+        call_times: Mutex<Vec<tokio::time::Instant>>,
+    }
+
+    impl FlakyFetcher {
+        fn new(keys: JwkSet, failures: usize) -> Arc<Self> {
+            Arc::new(Self {
+                keys,
+                failures_left: AtomicUsize::new(failures),
+                call_times: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JwksFetcher for FlakyFetcher {
+        async fn fetch(&self) -> Result<JwkSet, VmsError> {
+            self.call_times
+                .lock()
+                .unwrap()
+                .push(tokio::time::Instant::now());
+            let failed = self
+                .failures_left
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            if failed {
+                Err(VmsError::Unauthorized("coordinator unreachable".into()))
+            } else {
+                Ok(self.keys.clone())
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn load_with_retry_keeps_trying_until_the_coordinator_answers() {
+        let (signing_key, jwk) = generate_keypair("kid-1");
+        let be_id = Uuid::new_v4();
+        let fetcher = FlakyFetcher::new(JwkSet { keys: vec![jwk] }, 3);
+        let provider = CoordinatorJwksAuthProvider::with_fetcher(
+            fetcher.clone(),
+            Duration::from_secs(300),
+            be_id,
+        );
+        let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4(), be_id));
+
+        provider.load_with_retry().await;
+
+        assert_eq!(fetcher.call_times.lock().unwrap().len(), 4);
+        provider.verify_token(&token).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tokens_are_rejected_without_a_fetch_before_keys_load() {
+        let (signing_key, jwk) = generate_keypair("kid-1");
+        let be_id = Uuid::new_v4();
+        let fetcher = FlakyFetcher::new(JwkSet { keys: vec![jwk] }, 0);
+        let provider = CoordinatorJwksAuthProvider::with_fetcher(
+            fetcher.clone(),
+            Duration::from_secs(300),
+            be_id,
+        );
+        let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4(), be_id));
+
+        let result = provider.verify_token(&token).await;
+
+        assert!(result.is_err());
+        assert!(fetcher.call_times.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn load_with_retry_backs_off_up_to_a_minute() {
+        let (_signing_key, jwk) = generate_keypair("kid-1");
+        let fetcher = FlakyFetcher::new(JwkSet { keys: vec![jwk] }, 7);
+        let provider = CoordinatorJwksAuthProvider::with_fetcher(
+            fetcher.clone(),
+            Duration::from_secs(300),
+            Uuid::new_v4(),
+        );
+
+        provider.load_with_retry().await;
+
+        let times = fetcher.call_times.lock().unwrap();
+        let gaps: Vec<u64> = times.windows(2).map(|w| (w[1] - w[0]).as_secs()).collect();
+        assert_eq!(gaps, vec![2, 4, 8, 16, 32, 60, 60]);
+    }
 }
