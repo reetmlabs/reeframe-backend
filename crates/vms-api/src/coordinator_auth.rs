@@ -93,7 +93,13 @@ impl CoordinatorJwksAuthProvider {
     pub fn new(jwks_url: impl Into<String>, refresh_interval: Duration, be_id: Uuid) -> Self {
         Self::with_fetcher(
             Arc::new(HttpJwksFetcher {
-                client: reqwest::Client::new(),
+                // Bounded so a Coordinator that drops traffic can't stall a
+                // request or the startup retry forever.
+                client: reqwest::Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .build()
+                    // Fails only if the TLS backend can't initialize, as `Client::new` would.
+                    .expect("failed to build Coordinator JWKS HTTP client"),
                 url: jwks_url.into(),
             }),
             refresh_interval,
