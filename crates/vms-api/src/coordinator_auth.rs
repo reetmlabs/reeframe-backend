@@ -523,18 +523,29 @@ mod tests {
     // -- Loading keys at startup --
 
     /// A `JwksFetcher` that fails a set number of times before returning
-    /// `keys`, recording when each call happened.
+    /// `keys`, and fails every call while `unreachable` is set. Records when
+    /// each call happened.
     struct FlakyFetcher {
         keys: JwkSet,
         failures_left: Mutex<usize>,
+        unreachable: Mutex<bool>,
         call_times: Mutex<Vec<tokio::time::Instant>>,
     }
 
     impl FlakyFetcher {
+        fn set_unreachable(&self, unreachable: bool) {
+            *self.unreachable.lock().unwrap() = unreachable;
+        }
+
+        fn calls(&self) -> usize {
+            self.call_times.lock().unwrap().len()
+        }
+
         fn new(keys: JwkSet, failures: usize) -> Arc<Self> {
             Arc::new(Self {
                 keys,
                 failures_left: Mutex::new(failures),
+                unreachable: Mutex::new(false),
                 call_times: Mutex::new(Vec::new()),
             })
         }
@@ -548,7 +559,9 @@ mod tests {
                 .unwrap()
                 .push(tokio::time::Instant::now());
             let mut failures_left = self.failures_left.lock().unwrap();
-            if *failures_left > 0 {
+            if *self.unreachable.lock().unwrap() {
+                Err(VmsError::Unauthorized("coordinator unreachable".into()))
+            } else if *failures_left > 0 {
                 *failures_left -= 1;
                 Err(VmsError::Unauthorized("coordinator unreachable".into()))
             } else {
@@ -608,5 +621,76 @@ mod tests {
         let times = fetcher.call_times.lock().unwrap();
         let gaps: Vec<u64> = times.windows(2).map(|w| (w[1] - w[0]).as_secs()).collect();
         assert_eq!(gaps, vec![2, 4, 8, 16, 32, 60, 60]);
+    }
+
+    // -- Refresh failures after keys are loaded --
+
+    const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+    /// A provider with keys loaded from `kid-1`, a token signed by it, and a
+    /// fetcher that is now unreachable with the cache already stale.
+    async fn stale_provider_with_coordinator_down(
+    ) -> (CoordinatorJwksAuthProvider, Arc<FlakyFetcher>, String, Uuid) {
+        let (signing_key, jwk) = generate_keypair("kid-1");
+        let be_id = Uuid::new_v4();
+        let fetcher = FlakyFetcher::new(JwkSet { keys: vec![jwk] }, 0);
+        let provider =
+            CoordinatorJwksAuthProvider::with_fetcher(fetcher.clone(), REFRESH_INTERVAL, be_id);
+        provider.load_with_retry().await;
+        let token = sign_token(&signing_key, "kid-1", &access_claims(Uuid::new_v4(), be_id));
+
+        fetcher.set_unreachable(true);
+        tokio::time::advance(REFRESH_INTERVAL + Duration::from_secs(1)).await;
+        (provider, fetcher, token, be_id)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_refresh_falls_back_to_the_cached_keys() {
+        let (provider, fetcher, token, _) = stale_provider_with_coordinator_down().await;
+
+        provider.verify_token(&token).await.unwrap();
+
+        assert_eq!(fetcher.calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_refetch_is_tried_for_a_minute_after_a_failed_refresh() {
+        let (provider, fetcher, token, _) = stale_provider_with_coordinator_down().await;
+        provider.verify_token(&token).await.unwrap();
+
+        tokio::time::advance(Duration::from_secs(59)).await;
+        provider.verify_token(&token).await.unwrap();
+        assert_eq!(fetcher.calls(), 2);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        provider.verify_token(&token).await.unwrap();
+        assert_eq!(fetcher.calls(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_kid_is_rejected_without_a_fetch_during_the_pause() {
+        let (provider, fetcher, token, be_id) = stale_provider_with_coordinator_down().await;
+        provider.verify_token(&token).await.unwrap();
+        let (rotated_key, _) = generate_keypair("kid-2");
+        let rotated = sign_token(&rotated_key, "kid-2", &access_claims(Uuid::new_v4(), be_id));
+
+        let result = provider.verify_token(&rotated).await;
+
+        assert!(result.is_err());
+        assert_eq!(fetcher.calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_refresh_ends_the_pause() {
+        let (provider, fetcher, token, _) = stale_provider_with_coordinator_down().await;
+        provider.verify_token(&token).await.unwrap();
+
+        fetcher.set_unreachable(false);
+        tokio::time::advance(Duration::from_secs(61)).await;
+        provider.verify_token(&token).await.unwrap();
+
+        assert_eq!(fetcher.calls(), 3);
+        let cache = provider.cache.read().await;
+        assert!(cache.as_ref().unwrap().retry_after.is_none());
     }
 }
