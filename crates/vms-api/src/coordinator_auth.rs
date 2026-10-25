@@ -485,7 +485,7 @@ mod tests {
     /// `keys`, recording when each call happened.
     struct FlakyFetcher {
         keys: JwkSet,
-        failures_left: AtomicUsize,
+        failures_left: Mutex<usize>,
         call_times: Mutex<Vec<tokio::time::Instant>>,
     }
 
@@ -493,7 +493,7 @@ mod tests {
         fn new(keys: JwkSet, failures: usize) -> Arc<Self> {
             Arc::new(Self {
                 keys,
-                failures_left: AtomicUsize::new(failures),
+                failures_left: Mutex::new(failures),
                 call_times: Mutex::new(Vec::new()),
             })
         }
@@ -506,11 +506,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(tokio::time::Instant::now());
-            let failed = self
-                .failures_left
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok();
-            if failed {
+            let mut failures_left = self.failures_left.lock().unwrap();
+            if *failures_left > 0 {
+                *failures_left -= 1;
                 Err(VmsError::Unauthorized("coordinator unreachable".into()))
             } else {
                 Ok(self.keys.clone())
