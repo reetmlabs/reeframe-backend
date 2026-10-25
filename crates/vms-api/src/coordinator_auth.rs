@@ -14,12 +14,13 @@
 //! claim, so `set_audience` rejects it.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 use uuid::Uuid;
 use vms_core::{AuthClaims, AuthProvider, VmsError};
 
@@ -76,6 +77,8 @@ struct CoordinatorClaims {
 struct Cache {
     keys: JwkSet,
     fetched_at: Instant,
+    /// Set after a failed refresh. No refetch is tried before it.
+    retry_after: Option<Instant>,
 }
 
 /// Verifies JWTs signed by a Coordinator's Ed25519 key, fetched from
@@ -122,6 +125,8 @@ impl CoordinatorJwksAuthProvider {
 
     const RETRY_BASE: Duration = Duration::from_secs(2);
     const RETRY_MAX: Duration = Duration::from_secs(60);
+    /// How long cached keys are used without a refetch after a refresh fails.
+    const REFRESH_FAILURE_PAUSE: Duration = Duration::from_secs(60);
 
     /// Fetches the Coordinator's JWKS until it succeeds, backing off from 2s
     /// to a 60s cap. Never gives up, so a Coordinator that starts after this
@@ -151,12 +156,45 @@ impl CoordinatorJwksAuthProvider {
         *self.cache.write().await = Some(Cache {
             keys,
             fetched_at: Instant::now(),
+            retry_after: None,
         });
         Ok(())
     }
 
+    /// Refetches the loaded key set. If that fails, the cached keys stay in
+    /// place and no refetch is tried for [`Self::REFRESH_FAILURE_PAUSE`], so
+    /// requests during an outage don't each wait on the Coordinator.
+    async fn refresh_loaded(&self) -> Result<(), VmsError> {
+        let paused = self
+            .cache
+            .read()
+            .await
+            .as_ref()
+            .and_then(|c| c.retry_after)
+            .is_some_and(|t| Instant::now() < t);
+        if paused {
+            return Err(VmsError::Unauthorized(
+                "coordinator JWKS refresh paused after a failure".into(),
+            ));
+        }
+
+        let result = self.force_refresh().await;
+        if let Err(e) = &result {
+            tracing::warn!(
+                error = %e,
+                retry_in_secs = Self::REFRESH_FAILURE_PAUSE.as_secs(),
+                "Coordinator JWKS refresh failed, using cached keys",
+            );
+            if let Some(c) = self.cache.write().await.as_mut() {
+                c.retry_after = Some(Instant::now() + Self::REFRESH_FAILURE_PAUSE);
+            }
+        }
+        result
+    }
+
     /// Refetches only if the cache is older than `refresh_interval`. Refresh
-    /// happens lazily during verification; there is no background timer.
+    /// happens lazily during verification; there is no background timer. A
+    /// failed refresh keeps the cached keys, with no limit on their age.
     ///
     /// Until [`Self::load_with_retry`] fills the cache, this fails without
     /// fetching, so requests don't each wait on an unreachable Coordinator.
@@ -173,7 +211,9 @@ impl CoordinatorJwksAuthProvider {
                 Some(_) => {}
             }
         }
-        self.force_refresh().await
+        // A failure is already logged, and the cached keys are still usable.
+        let _ = self.refresh_loaded().await;
+        Ok(())
     }
 
     async fn find_key(&self, kid: &str) -> Option<Jwk> {
@@ -200,8 +240,9 @@ impl AuthProvider for CoordinatorJwksAuthProvider {
         if jwk.is_none() {
             // Not in the cached set, possibly a just-rotated key. Refresh once
             // and check again before rejecting.
-            self.force_refresh().await?;
-            jwk = self.find_key(&kid).await;
+            if self.refresh_loaded().await.is_ok() {
+                jwk = self.find_key(&kid).await;
+            }
         }
         let jwk =
             jwk.ok_or_else(|| VmsError::Unauthorized(format!("unrecognized signing key: {kid}")))?;
