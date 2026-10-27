@@ -35,13 +35,22 @@ impl TransportDispatcher {
         email::invalidate(dest_id);
     }
 
+    /// Delivers `input` to `dest`. `contact_list` holds the email addresses of
+    /// the node's contact list, if it has one; only email destinations accept it.
     pub async fn dispatch(
         node_id: NodeId,
         dest: &destination::Model,
         transport_cfg: Option<&TransportConfig>,
+        contact_list: Option<&[String]>,
         input: &NodeInput,
         progress_tx: Option<&UnboundedSender<TransferProgress>>,
     ) -> NodeOutput {
+        if contact_list.is_some() && dest.dest_type != DestinationType::Email {
+            return NodeOutput::failure(
+                node_id,
+                "contact lists are only supported for email destinations",
+            );
+        }
         match dest.dest_type {
             DestinationType::Local => {
                 local::deliver(node_id, dest, transport_cfg, input, progress_tx).await
@@ -62,7 +71,15 @@ impl TransportDispatcher {
                 webhook::deliver(node_id, dest, transport_cfg, input, progress_tx).await
             }
             DestinationType::Email => {
-                email::deliver(node_id, dest, transport_cfg, input, progress_tx).await
+                email::deliver(
+                    node_id,
+                    dest,
+                    transport_cfg,
+                    contact_list,
+                    input,
+                    progress_tx,
+                )
+                .await
             }
             DestinationType::Slack => {
                 slack::deliver(node_id, dest, transport_cfg, input, progress_tx).await

@@ -532,6 +532,7 @@ pub(crate) async fn execute_node(
                     node.id,
                     &dest,
                     node.transport_config.as_ref(),
+                    None,
                     &input,
                     Some(&progress_tx),
                 )
