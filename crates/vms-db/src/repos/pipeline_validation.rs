@@ -1,7 +1,8 @@
 //! Computes what's wrong with a pipeline's current definition: incomplete or
 //! malformed node config, disconnected nodes, structural DAG violations,
-//! dangling camera references, unresolved source/destination references, and
-//! nodes missing an upstream artifact. This is independent of whether the
+//! dangling camera references, unresolved source/destination references,
+//! contact lists on non-email destinations, and nodes missing an upstream
+//! artifact. This is independent of whether the
 //! pipeline can currently be compiled and run, and is the one place pipeline
 //! validity is computed.
 
@@ -18,6 +19,7 @@ use vms_core::{
 };
 
 use super::pipeline::camera_id_from_action_config;
+use crate::entities::destination::DestinationType;
 
 /// How serious a `ValidationIssue` is. `Error` should block a pipeline from
 /// being enabled; `Warning` should not.
@@ -53,6 +55,9 @@ pub enum ValidationCategory {
     /// least one path the executor could take. It then passes that single clip
     /// through unchanged instead of merging anything.
     MergeSingleSource,
+    /// A transport node has a contact list but its destination isn't email,
+    /// the only transport that delivers to one.
+    UnsupportedContactList,
 }
 
 impl ValidationCategory {
@@ -341,6 +346,30 @@ pub fn check_unresolved_node_references(nodes: &[PipelineNode]) -> Vec<Validatio
                 Some(n.id),
                 "node references a destination that no longer exists or is disabled",
             )
+        })
+        .collect()
+}
+
+/// A transport node with a contact list whose destination isn't email. Takes
+/// each referenced destination's type so it stays a plain synchronous function;
+/// a destination missing from the map is left to the other reference checks.
+pub fn check_contact_list_destinations(
+    nodes: &[PipelineNode],
+    destination_types: &HashMap<Uuid, DestinationType>,
+) -> Vec<ValidationIssue> {
+    nodes
+        .iter()
+        .filter(|n| n.contact_list_id.is_some())
+        .filter_map(|n| {
+            let dest_type = destination_types.get(&n.destination_id?)?;
+            if *dest_type == DestinationType::Email {
+                return None;
+            }
+            Some(ValidationIssue::new(
+                ValidationCategory::UnsupportedContactList,
+                Some(n.id),
+                "contact lists are only supported for email destinations",
+            ))
         })
         .collect()
 }
