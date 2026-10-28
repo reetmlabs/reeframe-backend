@@ -1094,4 +1094,45 @@ mod tests {
         let edges = [edge(root.id, skip.id, CoreEdgeType::Default)];
         assert!(check_artifact_lineage(&[root, skip], &edges).is_empty());
     }
+
+    // -- Contact list destinations --
+
+    fn contact_list_node(dest_id: Uuid) -> PipelineNode {
+        let mut node = base_node(CoreNodeType::Transport);
+        node.destination_id = Some(dest_id);
+        node.contact_list_id = Some(Uuid::new_v4());
+        node
+    }
+
+    #[test]
+    fn contact_list_on_non_email_destination_is_flagged() {
+        let dest = Uuid::new_v4();
+        let node = contact_list_node(dest);
+        let types = HashMap::from([(dest, DestinationType::Webhook)]);
+
+        let issues = check_contact_list_destinations(std::slice::from_ref(&node), &types);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].category,
+            ValidationCategory::UnsupportedContactList
+        );
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, Some(node.id));
+    }
+
+    #[test]
+    fn contact_list_on_email_destination_is_not_flagged() {
+        let dest = Uuid::new_v4();
+        let types = HashMap::from([(dest, DestinationType::Email)]);
+        assert!(check_contact_list_destinations(&[contact_list_node(dest)], &types).is_empty());
+    }
+
+    #[test]
+    fn non_email_destination_without_contact_list_is_not_flagged() {
+        let dest = Uuid::new_v4();
+        let mut node = base_node(CoreNodeType::Transport);
+        node.destination_id = Some(dest);
+        let types = HashMap::from([(dest, DestinationType::Webhook)]);
+        assert!(check_contact_list_destinations(&[node], &types).is_empty());
+    }
 }

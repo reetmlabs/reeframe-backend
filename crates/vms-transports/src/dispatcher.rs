@@ -91,3 +91,38 @@ impl TransportDispatcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vms_core::TriggerContext;
+
+    #[tokio::test]
+    async fn contact_list_on_non_email_destination_fails_without_sending() {
+        let dest: destination::Model = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "name": "hook",
+            "description": null,
+            "dest_type": "webhook",
+            "config": { "url": "http://127.0.0.1:9/never" },
+            "enabled": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        let input = NodeInput {
+            parent_outputs: vec![],
+            trigger_ctx: TriggerContext::for_schedule(Uuid::new_v4(), Uuid::new_v4()),
+        };
+        let emails = vec!["a@example.com".to_string()];
+
+        let out =
+            TransportDispatcher::dispatch(Uuid::new_v4(), &dest, None, Some(&emails), &input, None)
+                .await;
+        assert!(!out.success);
+        assert_eq!(
+            out.error.as_deref(),
+            Some("contact lists are only supported for email destinations")
+        );
+    }
+}

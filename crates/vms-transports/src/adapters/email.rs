@@ -386,3 +386,82 @@ mod body_content_type_tests {
         assert_eq!(body_content_type(None), ContentType::TEXT_PLAIN);
     }
 }
+
+#[cfg(test)]
+mod add_recipients_tests {
+    use lettre::Address;
+
+    use super::*;
+
+    fn from() -> Mailbox {
+        "reeframe@example.com".parse().unwrap()
+    }
+
+    fn build(
+        to: Option<&str>,
+        contact_list: Option<&[String]>,
+    ) -> Result<(Message, String), String> {
+        let builder = Message::builder().from(from()).subject("s");
+        let (builder, summary) = add_recipients(builder, &from(), to, contact_list)?;
+        Ok((builder.body(String::new()).unwrap(), summary))
+    }
+
+    fn envelope_to(message: &Message) -> Vec<String> {
+        message
+            .envelope()
+            .to()
+            .iter()
+            .map(Address::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn contact_list_goes_in_bcc_with_from_in_to() {
+        let list = vec!["a@example.com".to_string(), "b@example.com".to_string()];
+        let (message, summary) = build(Some("ops@example.com"), Some(&list)).unwrap();
+
+        assert_eq!(
+            message.headers().get_raw("To"),
+            Some("reeframe@example.com")
+        );
+        assert_eq!(
+            envelope_to(&message),
+            ["reeframe@example.com", "a@example.com", "b@example.com"]
+        );
+        assert_eq!(summary, "2 contacts (bcc)");
+    }
+
+    #[test]
+    fn invalid_contact_addresses_are_skipped() {
+        let list = vec!["not an address".to_string(), "a@example.com".to_string()];
+        let (message, _) = build(None, Some(&list)).unwrap();
+        assert_eq!(
+            envelope_to(&message),
+            ["reeframe@example.com", "a@example.com"]
+        );
+    }
+
+    #[test]
+    fn contact_list_without_valid_addresses_fails() {
+        let list = vec!["not an address".to_string()];
+        assert_eq!(
+            build(None, Some(&list)).unwrap_err(),
+            "contact list has no valid email addresses"
+        );
+    }
+
+    #[test]
+    fn without_contact_list_sends_to_destination_to() {
+        let (message, summary) = build(Some("a@example.com, b@example.com"), None).unwrap();
+        assert_eq!(envelope_to(&message), ["a@example.com", "b@example.com"]);
+        assert_eq!(summary, "a@example.com, b@example.com");
+    }
+
+    #[test]
+    fn without_contact_list_to_is_required() {
+        assert_eq!(
+            build(None, None).unwrap_err(),
+            "destination config missing \"to\""
+        );
+    }
+}

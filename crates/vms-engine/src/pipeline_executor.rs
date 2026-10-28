@@ -1055,4 +1055,74 @@ mod tests {
             TRANSPORT_MAX_ATTEMPTS
         );
     }
+
+    // -- contact_list_emails --
+
+    async fn contact_list_with(emails: &[Option<&str>]) -> (ContactListRepo, Uuid) {
+        use sea_orm_migration::MigratorTrait;
+        use vms_db::repos::{contact::CreateContact, contact_list::CreateContactList};
+
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        vms_db::Migrator::up(&db, None).await.unwrap();
+        let contacts = vms_db::ContactRepo::new(db.clone());
+        let lists = ContactListRepo::new(db);
+        let list = lists
+            .create(CreateContactList {
+                name: "on call".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        for (i, email) in emails.iter().enumerate() {
+            let contact = contacts
+                .create(CreateContact {
+                    name: format!("contact {i}"),
+                    email: email.map(str::to_string),
+                    phone: None,
+                    telegram_chat_id: None,
+                    extra: serde_json::json!({}),
+                })
+                .await
+                .unwrap();
+            lists.add_member(list.id, contact.id).await.unwrap();
+        }
+        (lists, list.id)
+    }
+
+    #[tokio::test]
+    async fn contact_list_emails_skips_members_without_an_email() {
+        let (repo, list_id) = contact_list_with(&[
+            Some("a@example.com"),
+            None,
+            Some("  "),
+            Some("b@example.com"),
+        ])
+        .await;
+        let mut emails = contact_list_emails(&repo, Uuid::new_v4(), list_id)
+            .await
+            .unwrap();
+        emails.sort();
+        assert_eq!(emails, ["a@example.com", "b@example.com"]);
+    }
+
+    #[tokio::test]
+    async fn contact_list_emails_fails_when_no_member_has_an_email() {
+        let (repo, list_id) = contact_list_with(&[None]).await;
+        let failure = contact_list_emails(&repo, Uuid::new_v4(), list_id)
+            .await
+            .unwrap_err();
+        assert!(!failure.success);
+        assert!(failure
+            .error
+            .unwrap()
+            .contains("has no members with an email"));
+    }
+
+    #[tokio::test]
+    async fn contact_list_emails_fails_for_an_empty_list() {
+        let (repo, list_id) = contact_list_with(&[]).await;
+        assert!(contact_list_emails(&repo, Uuid::new_v4(), list_id)
+            .await
+            .is_err());
+    }
 }
