@@ -15,7 +15,7 @@ use vms_core::{
 };
 use vms_db::{
     entities::{pipeline_run::RunStatus, run_node_result::NodeResultStatus},
-    DestinationRepo, PipelineRunRepo,
+    ContactListRepo, DestinationRepo, PipelineRunRepo,
 };
 use vms_media::{MediaManager, RingBufferManager};
 use vms_transports::TransportDispatcher;
@@ -26,6 +26,13 @@ use crate::metrics::Metrics;
 
 /// Key type for the progress map: `(run_id, node_id)`.
 pub type ProgressKey = (Uuid, NodeId);
+
+/// The repos a Transport node reads when it sends.
+#[derive(Clone)]
+pub struct TransportRepos {
+    pub destinations: DestinationRepo,
+    pub contact_lists: ContactListRepo,
+}
 
 /// Executes a compiled pipeline DAG for a given trigger context.
 ///
@@ -41,7 +48,7 @@ pub type ProgressKey = (Uuid, NodeId);
 #[derive(Clone)]
 pub struct PipelineExecutor {
     repo: PipelineRunRepo,
-    dest_repo: DestinationRepo,
+    transport_repos: TransportRepos,
     media: Arc<MediaManager>,
     ring_buffer: Arc<RingBufferManager>,
     recording_dir: PathBuf,
@@ -57,7 +64,7 @@ pub struct PipelineExecutor {
 impl PipelineExecutor {
     pub fn new(
         repo: PipelineRunRepo,
-        dest_repo: DestinationRepo,
+        transport_repos: TransportRepos,
         media: Arc<MediaManager>,
         ring_buffer: Arc<RingBufferManager>,
         recording_dir: PathBuf,
@@ -66,7 +73,7 @@ impl PipelineExecutor {
     ) -> Arc<Self> {
         Arc::new(Self {
             repo,
-            dest_repo,
+            transport_repos,
             media,
             ring_buffer,
             recording_dir,
@@ -130,7 +137,7 @@ impl PipelineExecutor {
                 run_id,
                 &result_ids,
                 &action_ctx,
-                &self.dest_repo,
+                &self.transport_repos,
                 &self.progress_map,
             )
             .await;
@@ -188,7 +195,7 @@ impl PipelineExecutor {
         run_id: Uuid,
         result_ids: &HashMap<NodeId, Uuid>,
         action_ctx: &ActionContext,
-        dest_repo: &DestinationRepo,
+        transport_repos: &TransportRepos,
         progress_map: &Arc<DashMap<ProgressKey, TransferProgress>>,
     ) -> Result<(), VmsError> {
         let mut remaining: HashMap<NodeId, usize> = dag
@@ -251,7 +258,7 @@ impl PipelineExecutor {
                     .collect();
                 let trigger_ctx = ctx.clone();
                 let action_ctx_clone = action_ctx.clone();
-                let dest_repo_clone = dest_repo.clone();
+                let transport_repos_clone = transport_repos.clone();
                 let progress_map_clone = progress_map.clone();
 
                 join_set.spawn(async move {
@@ -260,7 +267,7 @@ impl PipelineExecutor {
                         &parent_outputs,
                         &trigger_ctx,
                         &action_ctx_clone,
-                        &dest_repo_clone,
+                        &transport_repos_clone,
                         &progress_map_clone,
                     )
                     .await;
@@ -417,14 +424,15 @@ where
 /// result in `metadata["condition_result"]`.
 /// `Fork` passes the first parent output through with this node's ID.
 /// `Action` and `DeviceControl` are dispatched through [`ActionDispatcher`].
-/// `Transport` looks up the destination from `dest_repo` and dispatches to
-/// [`TransportDispatcher`], retrying on failure via [`dispatch_with_retry`].
+/// `Transport` looks up the destination and, if the node has one, its contact
+/// list's addresses, then dispatches to [`TransportDispatcher`], retrying on
+/// failure via [`dispatch_with_retry`].
 pub(crate) async fn execute_node(
     node: &PipelineNode,
     parent_outputs: &[NodeOutput],
     ctx: &TriggerContext,
     action_ctx: &ActionContext,
-    dest_repo: &DestinationRepo,
+    transport_repos: &TransportRepos,
     progress_map: &Arc<DashMap<ProgressKey, TransferProgress>>,
 ) -> NodeOutput {
     match node.node_type {
@@ -495,7 +503,7 @@ pub(crate) async fn execute_node(
             let Some(dest_id) = node.destination_id else {
                 return NodeOutput::failure(node.id, "transport node has no destination_id");
             };
-            let dest = match dest_repo.get_decrypted(dest_id).await {
+            let dest = match transport_repos.destinations.get_decrypted(dest_id).await {
                 Ok(Some(d)) => d,
                 Ok(None) => {
                     return NodeOutput::failure(
@@ -509,6 +517,17 @@ pub(crate) async fn execute_node(
                         format!("transport: destination lookup failed: {e}"),
                     )
                 }
+            };
+            let contact_list = match node.contact_list_id {
+                Some(list_id) => {
+                    match contact_list_emails(&transport_repos.contact_lists, node.id, list_id)
+                        .await
+                    {
+                        Ok(emails) => Some(emails),
+                        Err(failure) => return failure,
+                    }
+                }
+                None => None,
             };
             let input = NodeInput {
                 parent_outputs: parent_outputs.to_vec(),
@@ -532,7 +551,7 @@ pub(crate) async fn execute_node(
                     node.id,
                     &dest,
                     node.transport_config.as_ref(),
-                    None,
+                    contact_list.as_deref(),
                     &input,
                     Some(&progress_tx),
                 )
@@ -540,6 +559,40 @@ pub(crate) async fn execute_node(
             .await
         }
     }
+}
+
+/// The email addresses of `list_id`'s members, read at send time so list edits
+/// apply right away. Members without an email are skipped.
+async fn contact_list_emails(
+    repo: &ContactListRepo,
+    node_id: NodeId,
+    list_id: Uuid,
+) -> Result<Vec<String>, NodeOutput> {
+    let members = repo.list_members(list_id).await.map_err(|e| {
+        NodeOutput::failure(
+            node_id,
+            format!("transport: contact list lookup failed: {e}"),
+        )
+    })?;
+    let mut emails = Vec::with_capacity(members.len());
+    for contact in members {
+        match contact.email.filter(|e| !e.trim().is_empty()) {
+            Some(email) => emails.push(email),
+            None => tracing::warn!(
+                %node_id,
+                contact_id = %contact.id,
+                contact_list_id = %list_id,
+                "Contact has no email, skipping",
+            ),
+        }
+    }
+    if emails.is_empty() {
+        return Err(NodeOutput::failure(
+            node_id,
+            format!("transport: contact list {list_id} has no members with an email"),
+        ));
+    }
+    Ok(emails)
 }
 
 /// Flattens the top-level string/number/bool fields of a JSON object into
@@ -653,9 +706,12 @@ mod tests {
         }
     }
 
-    async fn dest_repo() -> DestinationRepo {
+    async fn transport_repos() -> TransportRepos {
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        DestinationRepo::new(db, vms_db::Crypto::from_key([0u8; 32]))
+        TransportRepos {
+            destinations: DestinationRepo::new(db.clone(), vms_db::Crypto::from_key([0u8; 32])),
+            contact_lists: ContactListRepo::new(db),
+        }
     }
 
     fn progress_map() -> Arc<DashMap<ProgressKey, TransferProgress>> {
@@ -719,7 +775,7 @@ mod tests {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::TriggerRoot);
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["pipeline_id"], pid.to_string());
@@ -733,7 +789,7 @@ mod tests {
             pid,
             serde_json::json!({"confidence": 0.92, "label": "person"}),
         );
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["event.confidence"], 0.92);
@@ -748,7 +804,7 @@ mod tests {
             pid,
             serde_json::json!({"nested": {"a": 1}, "list": [1, 2], "score": 1}),
         );
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert!(out.metadata.get("event.nested").is_none());
@@ -761,7 +817,7 @@ mod tests {
         let pid = Uuid::new_v4();
         let root = node(pid, NodeType::TriggerRoot);
         let ctx = event_ctx(pid, serde_json::json!({"confidence": 0.92}));
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let root_out = execute_node(&root, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
 
         let mut cond = node(pid, NodeType::Condition);
@@ -784,7 +840,7 @@ mod tests {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::TriggerRoot);
         let ctx = manual_ctx(pid, serde_json::json!({"action": "run", "count": 3}));
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["manual.action"], "run");
@@ -796,7 +852,7 @@ mod tests {
         let pid = Uuid::new_v4();
         let root = node(pid, NodeType::TriggerRoot);
         let ctx = manual_ctx(pid, serde_json::json!({"action": "run"}));
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let root_out = execute_node(&root, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
 
         let mut cond = node(pid, NodeType::Condition);
@@ -822,7 +878,7 @@ mod tests {
         let parent = NodeOutput::success(Uuid::new_v4())
             .with_artifact(std::path::PathBuf::from("/tmp/clip.mp4"));
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(
@@ -839,7 +895,7 @@ mod tests {
         let parent = NodeOutput::success(Uuid::new_v4())
             .with_artifact(std::path::PathBuf::from("/tmp/clip.mp4"));
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(!out.success);
         assert_eq!(out.artifact_path, None);
@@ -852,7 +908,7 @@ mod tests {
         let parent =
             NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"key": "value"}));
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["key"], "value");
@@ -867,7 +923,7 @@ mod tests {
         let parent =
             NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.9}));
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["condition_result"], true);
@@ -881,7 +937,7 @@ mod tests {
         let parent =
             NodeOutput::success(Uuid::new_v4()).with_metadata(serde_json::json!({"score": 0.1}));
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(out.success);
         assert_eq!(out.metadata["condition_result"], false);
@@ -893,7 +949,7 @@ mod tests {
         let mut n = node(pid, NodeType::Condition);
         n.condition_expr = Some(">>>".into());
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(!out.success);
         assert!(out
@@ -908,7 +964,7 @@ mod tests {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::Action);
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(!out.success);
         assert!(out
@@ -924,7 +980,7 @@ mod tests {
         let mut n = node(pid, NodeType::Transport);
         n.destination_id = Some(Uuid::new_v4());
         let ctx = schedule_ctx(pid);
-        let dr = dest_repo().await;
+        let dr = transport_repos().await;
         let out = execute_node(&n, &[], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(!out.success);
     }
