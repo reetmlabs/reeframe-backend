@@ -18,10 +18,11 @@
 //! The `tee` feeds every branch this crate attaches: recording, the RTSP
 //! restream, ring buffer, motion detection and thumbnail capture. Recording is
 //! one of those branches and is not part of the base pipeline.
-//! [`MediaManager::start_live`] brings the pipeline up without writing to
+//! [`MediaManager::hold_live`] keeps the pipeline up without writing to
 //! disk, and [`MediaManager::start_recording`] attaches the recording branch
 //! on top, starting the live pipeline first if needed. Live view never
-//! implies recording, and stopping recording never tears down live view.
+//! implies recording, and stopping recording never tears down live view. The
+//! pipeline closes once nothing needs it.
 
 pub(crate) mod camera_stream;
 pub mod export;

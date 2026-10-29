@@ -169,14 +169,26 @@ fn remove_if_stale_tmp(path: &Path) {
 /// detection and thumbnail capture tap the same tee. Going live never implies
 /// recording.
 ///
+/// The main pipeline stays open only while something needs it: recording, the
+/// main restream, a ring buffer, or a hold from [`hold_live`](Self::hold_live).
+/// Once the last of those goes away it closes, so an idle camera doesn't keep
+/// a high-bitrate connection (and one of its few RTSP sessions) open.
+///
 /// A background tokio task watches the GStreamer bus for errors and EOS and
 /// reconnects with exponential backoff (2 s to 60 s).
 pub struct MediaManager {
     config: MediaConfig,
     cameras: Mutex<HashMap<Uuid, CameraHandle>>,
-    /// Held for the whole of `start_live`, so two concurrent callers can't
-    /// each find the camera missing and build a second pipeline for it.
-    live_start: Mutex<()>,
+    /// Per-camera lock held while starting the main pipeline and attaching a
+    /// branch, and while deciding to close it, so a close can't race a start
+    /// that is about to use the pipeline. Per camera because a start can wait
+    /// seconds for the codec.
+    main_locks: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    /// Cameras held open by [`hold_live`](Self::hold_live).
+    held: Mutex<HashSet<Uuid>>,
+    /// Cameras with a ring buffer attached. Tracked here because the branch
+    /// detaches asynchronously, so the pipeline graph can't be asked.
+    ring_buffers: Mutex<HashSet<Uuid>>,
     /// Per-camera sub-stream pipeline. Exists only while the camera has a
     /// configured sub-stream and a sub restream or analytics branch uses it.
     sub_streams: Mutex<HashMap<Uuid, SubStreamHandle>>,
@@ -190,7 +202,7 @@ pub struct MediaManager {
     /// to turn them into `recordings` rows.
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     /// Sends the camera's ID each time its main pipeline reaches `Playing`,
-    /// both on [`start_live`](Self::start_live) and on every successful
+    /// both when the main pipeline starts and on every successful
     /// reconnect. The task with DB access uses it to re-apply persisted
     /// recording intent; this crate has no `vms-db` dependency.
     pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
@@ -235,7 +247,9 @@ impl MediaManager {
         Ok(Self {
             config,
             cameras: Mutex::new(HashMap::new()),
-            live_start: Mutex::new(()),
+            main_locks: Mutex::new(HashMap::new()),
+            held: Mutex::new(HashSet::new()),
+            ring_buffers: Mutex::new(HashSet::new()),
             sub_streams: Mutex::new(HashMap::new()),
             restream,
             event_tx,
@@ -249,8 +263,9 @@ impl MediaManager {
         })
     }
 
-    /// Start the camera's main live pipeline (`rtspsrc -> tee`, no
-    /// recording). No-op if it is already running. Use
+    /// Keep the camera's main live pipeline (`rtspsrc -> tee`, no recording)
+    /// open, starting it if needed, until [`release_live`](Self::release_live).
+    /// For automation pipelines that use the camera. Use
     /// [`start_recording`](Self::start_recording) to record.
     ///
     /// `sub_rtsp_url` is the camera's low-resolution sub stream, if it has
@@ -259,14 +274,46 @@ impl MediaManager {
     /// camera that just records holds a single connection. Analytics fall
     /// back to the main stream when there is no sub stream or it fails to
     /// start.
-    pub async fn start_live(
+    pub async fn hold_live(
+        &self,
+        camera_id: Uuid,
+        rtsp_url: &str,
+        sub_rtsp_url: Option<&str>,
+    ) -> Result<(), VmsError> {
+        let lock = self.main_lock(camera_id);
+        let _guard = lock.lock().await;
+        self.start_main(camera_id, rtsp_url, sub_rtsp_url).await?;
+        self.held.lock().unwrap().insert(camera_id);
+        Ok(())
+    }
+
+    /// Undo [`hold_live`](Self::hold_live), closing the main pipeline if
+    /// nothing else needs it.
+    pub async fn release_live(&self, camera_id: Uuid) {
+        let lock = self.main_lock(camera_id);
+        let _guard = lock.lock().await;
+        self.held.lock().unwrap().remove(&camera_id);
+        self.close_main_if_unused(camera_id).await;
+    }
+
+    fn main_lock(&self, camera_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        self.main_locks
+            .lock()
+            .unwrap()
+            .entry(camera_id)
+            .or_default()
+            .clone()
+    }
+
+    /// Start the main pipeline if it isn't running. The caller holds the
+    /// camera's `main_lock`.
+    async fn start_main(
         &self,
         camera_id: Uuid,
         rtsp_url: &str,
         sub_rtsp_url: Option<&str>,
     ) -> Result<(), VmsError> {
         {
-            let _starting = self.live_start.lock().unwrap();
             if self.cameras.lock().unwrap().contains_key(&camera_id) {
                 return Ok(());
             }
@@ -311,18 +358,17 @@ impl MediaManager {
     }
 
     /// Start recording for a camera: ensures the live pipeline is running
-    /// (starting it via [`start_live`](Self::start_live) if not), then
-    /// attaches the recording branch (`queue -> splitmuxsink`) to its tee.
-    /// No-op if already recording.
+    /// (starting it if not), then attaches the recording branch
+    /// (`queue -> splitmuxsink`) to its tee. No-op if already recording.
     pub async fn start_recording(
         &self,
         camera_id: Uuid,
         rtsp_url: &str,
         sub_rtsp_url: Option<&str>,
     ) -> Result<(), VmsError> {
-        if !self.is_running(camera_id) {
-            self.start_live(camera_id, rtsp_url, sub_rtsp_url).await?;
-        }
+        let lock = self.main_lock(camera_id);
+        let _guard = lock.lock().await;
+        self.start_main(camera_id, rtsp_url, sub_rtsp_url).await?;
 
         let (pipeline, naming) = {
             let cameras = self.cameras.lock().unwrap();
@@ -351,10 +397,12 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Stop recording for a camera by detaching the recording branch. The
-    /// live pipeline and its other branches keep running. No-op if the
-    /// camera is not recording or not live.
+    /// Stop recording for a camera by detaching the recording branch, then
+    /// close the main pipeline if nothing else needs it. No-op if the camera
+    /// is not recording or not live.
     pub async fn stop_recording(&self, camera_id: Uuid) -> Result<(), VmsError> {
+        let lock = self.main_lock(camera_id);
+        let _guard = lock.lock().await;
         let Some((pipeline, naming)) = self
             .cameras
             .lock()
@@ -367,6 +415,7 @@ impl MediaManager {
         camera_stream::detach_recording_branch(camera_id, &pipeline, &naming)?;
         tracing::info!(camera_id = %camera_id, "Recording stopped");
         self.reconcile_analytics(camera_id).await;
+        self.close_main_if_unused(camera_id).await;
         Ok(())
     }
 
@@ -403,19 +452,19 @@ impl MediaManager {
         sub_rtsp_url: Option<&str>,
         cached_codec: Option<&str>,
     ) -> Result<String, VmsError> {
+        let lock = self.main_lock(camera_id);
+        let _guard = lock.lock().await;
         if self.restream.is_restreaming(camera_id, quality) {
             return Ok(self.restream.codec(camera_id, quality).unwrap_or_default());
         }
 
         let (pipeline, tee_name, probe_url) = match quality {
             StreamQuality::Main => {
-                if !self.is_running(camera_id) {
-                    self.start_live(camera_id, rtsp_url, sub_rtsp_url).await?;
-                }
+                self.start_main(camera_id, rtsp_url, sub_rtsp_url).await?;
                 let cameras = self.cameras.lock().unwrap();
                 let h = cameras
                     .get(&camera_id)
-                    .expect("start_live just inserted this camera");
+                    .expect("start_main just inserted this camera");
                 (
                     h.pipeline.clone(),
                     main_tee_name(camera_id),
@@ -455,10 +504,14 @@ impl MediaManager {
     }
 
     /// Stop an RTSP restream mount for a camera/quality, then close the sub
-    /// stream if nothing else uses it. No-op if not restreaming.
+    /// stream and main pipeline if nothing else uses them. No-op if not
+    /// restreaming.
     pub async fn stop_restream(&self, camera_id: Uuid, quality: StreamQuality) {
+        let lock = self.main_lock(camera_id);
+        let _guard = lock.lock().await;
         self.detach_restream(camera_id, quality);
         self.reconcile_analytics(camera_id).await;
+        self.close_main_if_unused(camera_id).await;
     }
 
     fn detach_restream(&self, camera_id: Uuid, quality: StreamQuality) {
@@ -491,6 +544,10 @@ impl MediaManager {
     /// branch needs no separate detach because the whole pipeline goes to
     /// `Null`.
     pub async fn stop_live(&self, camera_id: Uuid) -> Result<(), VmsError> {
+        let lock = self.main_lock(camera_id);
+        let _guard = lock.lock().await;
+        self.held.lock().unwrap().remove(&camera_id);
+        self.ring_buffers.lock().unwrap().remove(&camera_id);
         self.stop_motion_detection(camera_id).await;
         self.stop_thumbnail_capture(camera_id).await;
         self.detach_restream(camera_id, StreamQuality::Main);
@@ -554,6 +611,58 @@ impl MediaManager {
 
         tracing::info!("MediaManager shutdown complete");
         Ok(())
+    }
+
+    /// Close the main pipeline if it is running and nothing needs it: no
+    /// recording, main restream, ring buffer or hold. Analytics on its tee
+    /// move to the sub stream if a sub restream keeps that open, and stop
+    /// otherwise. The caller holds the camera's `main_lock`.
+    async fn close_main_if_unused(&self, camera_id: Uuid) {
+        let Some(main) = self
+            .cameras
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .map(|h| h.pipeline.clone())
+        else {
+            return;
+        };
+        let needed = self.held.lock().unwrap().contains(&camera_id)
+            || self.ring_buffers.lock().unwrap().contains(&camera_id)
+            || self.restream.is_restreaming(camera_id, StreamQuality::Main)
+            || camera_stream::is_recording_attached(camera_id, &main);
+        if needed {
+            return;
+        }
+
+        // Detach while the pipeline is still `Playing`, so their blocking pad
+        // probes can fire.
+        let motion_on_main = self
+            .motion
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .is_some_and(|h| h.pipeline() == &main);
+        if motion_on_main {
+            self.stop_motion_detection(camera_id).await;
+        }
+        let thumbnails_on_main = self
+            .thumbnails
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .is_some_and(|h| h.pipeline() == &main);
+        if thumbnails_on_main {
+            self.stop_thumbnail_capture(camera_id).await;
+        }
+
+        let handle = self.cameras.lock().unwrap().remove(&camera_id);
+        if let Some(h) = handle {
+            let _ = h.shutdown_tx.send(());
+            h.task.await.ok();
+            tracing::info!(camera_id = %camera_id, "Main stream closed, nothing uses it");
+        }
+        self.reconcile_analytics(camera_id).await;
     }
 
     /// Start the camera's sub-stream pipeline if it is not running, and
@@ -870,14 +979,20 @@ impl MediaManager {
                 .pipeline
                 .clone()
         }; // lock dropped here so the GStreamer call runs without the mutex
-        ring_buffer_branch::attach(&pipeline, camera_id, ring_buffer)
+        ring_buffer_branch::attach(&pipeline, camera_id, ring_buffer)?;
+        self.ring_buffers.lock().unwrap().insert(camera_id);
+        Ok(())
     }
 
     /// Detach the ring-buffer branch from a running camera pipeline.
     ///
     /// No-op if the camera is not running or has no ring-buffer branch.
     /// Cleanup is asynchronous; see [`ring_buffer_branch::detach`].
+    ///
+    /// Doesn't close the main pipeline itself: a ring buffer only runs for a
+    /// pipeline that also holds the camera, and that hold's release does.
     pub fn detach_ring_buffer(&self, camera_id: Uuid) -> Result<(), VmsError> {
+        self.ring_buffers.lock().unwrap().remove(&camera_id);
         let pipeline = {
             let cameras = self.cameras.lock().unwrap();
             match cameras.get(&camera_id) {

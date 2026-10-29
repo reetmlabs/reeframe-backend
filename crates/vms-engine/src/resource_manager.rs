@@ -420,7 +420,7 @@ impl ResourceManager {
             .as_deref()
             .map(|sub| build_rtsp_url(sub, cam.username.as_deref(), password.as_deref()));
         self.media
-            .start_live(cam_id, &rtsp_url, sub_rtsp_url.as_deref())
+            .hold_live(cam_id, &rtsp_url, sub_rtsp_url.as_deref())
             .await
     }
 
