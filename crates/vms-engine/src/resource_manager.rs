@@ -393,7 +393,11 @@ impl ResourceManager {
 
     async fn stop(&self, id: &ResourceId) -> Result<(), VmsError> {
         match id {
-            ResourceId::CameraPipeline(cam_id) => self.media.stop_live(*cam_id).await,
+            // Only drops the hold: the camera may still be recording or relayed.
+            ResourceId::CameraPipeline(cam_id) => {
+                self.media.release_live(*cam_id).await;
+                Ok(())
+            }
             ResourceId::RingBuffer(cam_id) => self.ring_buffers.stop(*cam_id),
             ResourceId::Source(id) => self.source_manager.stop(*id).await,
             ResourceId::DestinationPool(id) => {
@@ -407,7 +411,7 @@ impl ResourceManager {
         }
     }
 
-    /// Starts the camera's **live** pipeline for `ResourceId::CameraPipeline`.
+    /// Holds the camera's **live** pipeline open for `ResourceId::CameraPipeline`.
     /// Recording is started separately by the `StartRecording`/`StopRecording`
     /// actions (see `vms-actions`); being referenced by a pipeline doesn't imply it.
     async fn start_live_camera(&self, cam_id: Uuid) -> Result<(), VmsError> {
@@ -420,7 +424,7 @@ impl ResourceManager {
             .as_deref()
             .map(|sub| build_rtsp_url(sub, cam.username.as_deref(), password.as_deref()));
         self.media
-            .start_live(cam_id, &rtsp_url, sub_rtsp_url.as_deref())
+            .hold_live(cam_id, &rtsp_url, sub_rtsp_url.as_deref())
             .await
     }
 
