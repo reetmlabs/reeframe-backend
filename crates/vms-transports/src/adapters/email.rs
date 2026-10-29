@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use lettre::{
-    message::{header::ContentType, Attachment, MultiPart, SinglePart},
+    message::{header::ContentType, Attachment, Mailbox, MessageBuilder, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
@@ -69,7 +69,8 @@ fn body_content_type(format: Option<&NotificationFormat>) -> ContentType {
 /// `smtp_port` defaults to 587. `from` defaults to `username` if not set.
 /// `tls` accepts `"starttls"` (default), `"tls"`, or `"none"`.
 /// `subject` is a minijinja template rendered with the same variables as other adapters.
-/// `to` may be a single address or a comma-separated list.
+/// `to` may be a single address or a comma-separated list. It's only required
+/// when `contact_list` is `None`; a contact list replaces it (see `add_recipients`).
 ///
 /// If the upstream node produced an **artifact file** it is attached to the email.
 /// The body text comes from `message_template` in `transport_cfg`, or raw upstream
@@ -79,6 +80,7 @@ pub async fn deliver(
     node_id: NodeId,
     dest: &destination::Model,
     transport_cfg: Option<&TransportConfig>,
+    contact_list: Option<&[String]>,
     input: &NodeInput,
     _progress_tx: Option<&UnboundedSender<TransferProgress>>,
 ) -> NodeOutput {
@@ -108,10 +110,7 @@ pub async fn deliver(
                 "email: destination config missing \"from\" (and no \"username\" to fall back to)",
             ),
         };
-    let to_raw = match cfg.get("to").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => return NodeOutput::failure(node_id, "email: destination config missing \"to\""),
-    };
+    let to = cfg.get("to").and_then(|v| v.as_str());
     let subject_tpl = cfg
         .get("subject")
         .and_then(|v| v.as_str())
@@ -171,27 +170,18 @@ pub async fn deliver(
     };
 
     // -- Parse addresses --
-    let from_mailbox: lettre::message::Mailbox = match from_addr.parse() {
+    let from_mailbox: Mailbox = match from_addr.parse() {
         Ok(m) => m,
         Err(e) => return NodeOutput::failure(node_id, format!("email: invalid from address: {e}")),
     };
 
-    let mut builder = Message::builder()
-        .from(from_mailbox)
+    let builder = Message::builder()
+        .from(from_mailbox.clone())
         .subject(subject.clone());
-
-    for addr in to_raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let mailbox: lettre::message::Mailbox = match addr.parse() {
-            Ok(m) => m,
-            Err(e) => {
-                return NodeOutput::failure(
-                    node_id,
-                    format!("email: invalid to address \"{addr}\": {e}"),
-                )
-            }
-        };
-        builder = builder.to(mailbox);
-    }
+    let (builder, recipients) = match add_recipients(builder, &from_mailbox, to, contact_list) {
+        Ok(r) => r,
+        Err(e) => return NodeOutput::failure(node_id, format!("email: {e}")),
+    };
 
     // -- Build message body --
     let content_type = body_content_type(body_format.as_ref());
@@ -247,18 +237,56 @@ pub async fn deliver(
             tracing::info!(
                 node_id  = %node_id,
                 dest_id  = %dest.id,
-                to       = %to_raw,
+                to       = %recipients,
                 subject  = %subject,
                 "Email: sent"
             );
             NodeOutput::success(node_id)
-                .with_metadata(serde_json::json!({ "to": to_raw, "subject": subject }))
+                .with_metadata(serde_json::json!({ "to": recipients, "subject": subject }))
         }
         Err(e) => NodeOutput::failure(node_id, format!("email: send failed: {e}")),
     }
 }
 
 // -- Helpers --
+
+/// Adds the recipients and returns them summarized for logs. A contact list
+/// goes in BCC with `from` in To, so members don't see each other's addresses.
+/// Invalid list addresses are skipped so one bad contact doesn't block the rest.
+fn add_recipients(
+    mut builder: MessageBuilder,
+    from: &Mailbox,
+    to: Option<&str>,
+    contact_list: Option<&[String]>,
+) -> Result<(MessageBuilder, String), String> {
+    if let Some(list) = contact_list {
+        let mut count = 0;
+        for addr in list {
+            match addr.parse::<Mailbox>() {
+                Ok(mailbox) => {
+                    builder = builder.bcc(mailbox);
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(address = %addr, error = %e, "Email: skipping invalid contact address")
+                }
+            }
+        }
+        if count == 0 {
+            return Err("contact list has no valid email addresses".into());
+        }
+        return Ok((builder.to(from.clone()), format!("{count} contacts (bcc)")));
+    }
+
+    let to = to.ok_or("destination config missing \"to\"")?;
+    for addr in to.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let mailbox: Mailbox = addr
+            .parse()
+            .map_err(|e| format!("invalid to address \"{addr}\": {e}"))?;
+        builder = builder.to(mailbox);
+    }
+    Ok((builder, to.to_string()))
+}
 
 fn build_transport(
     host: &str,
@@ -356,5 +384,84 @@ mod body_content_type_tests {
             ContentType::TEXT_PLAIN
         );
         assert_eq!(body_content_type(None), ContentType::TEXT_PLAIN);
+    }
+}
+
+#[cfg(test)]
+mod add_recipients_tests {
+    use lettre::Address;
+
+    use super::*;
+
+    fn from() -> Mailbox {
+        "reeframe@example.com".parse().unwrap()
+    }
+
+    fn build(
+        to: Option<&str>,
+        contact_list: Option<&[String]>,
+    ) -> Result<(Message, String), String> {
+        let builder = Message::builder().from(from()).subject("s");
+        let (builder, summary) = add_recipients(builder, &from(), to, contact_list)?;
+        Ok((builder.body(String::new()).unwrap(), summary))
+    }
+
+    fn envelope_to(message: &Message) -> Vec<String> {
+        message
+            .envelope()
+            .to()
+            .iter()
+            .map(Address::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn contact_list_goes_in_bcc_with_from_in_to() {
+        let list = vec!["a@example.com".to_string(), "b@example.com".to_string()];
+        let (message, summary) = build(Some("ops@example.com"), Some(&list)).unwrap();
+
+        assert_eq!(
+            message.headers().get_raw("To"),
+            Some("reeframe@example.com")
+        );
+        assert_eq!(
+            envelope_to(&message),
+            ["reeframe@example.com", "a@example.com", "b@example.com"]
+        );
+        assert_eq!(summary, "2 contacts (bcc)");
+    }
+
+    #[test]
+    fn invalid_contact_addresses_are_skipped() {
+        let list = vec!["not an address".to_string(), "a@example.com".to_string()];
+        let (message, _) = build(None, Some(&list)).unwrap();
+        assert_eq!(
+            envelope_to(&message),
+            ["reeframe@example.com", "a@example.com"]
+        );
+    }
+
+    #[test]
+    fn contact_list_without_valid_addresses_fails() {
+        let list = vec!["not an address".to_string()];
+        assert_eq!(
+            build(None, Some(&list)).unwrap_err(),
+            "contact list has no valid email addresses"
+        );
+    }
+
+    #[test]
+    fn without_contact_list_sends_to_destination_to() {
+        let (message, summary) = build(Some("a@example.com, b@example.com"), None).unwrap();
+        assert_eq!(envelope_to(&message), ["a@example.com", "b@example.com"]);
+        assert_eq!(summary, "a@example.com, b@example.com");
+    }
+
+    #[test]
+    fn without_contact_list_to_is_required() {
+        assert_eq!(
+            build(None, None).unwrap_err(),
+            "destination config missing \"to\""
+        );
     }
 }

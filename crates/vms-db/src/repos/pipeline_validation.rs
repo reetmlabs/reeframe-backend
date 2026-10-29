@@ -1,7 +1,8 @@
 //! Computes what's wrong with a pipeline's current definition: incomplete or
 //! malformed node config, disconnected nodes, structural DAG violations,
-//! dangling camera references, unresolved source/destination references, and
-//! nodes missing an upstream artifact. This is independent of whether the
+//! dangling camera references, unresolved source/destination references,
+//! contact lists on non-email destinations, and nodes missing an upstream
+//! artifact. This is independent of whether the
 //! pipeline can currently be compiled and run, and is the one place pipeline
 //! validity is computed.
 
@@ -18,6 +19,7 @@ use vms_core::{
 };
 
 use super::pipeline::camera_id_from_action_config;
+use crate::entities::destination::DestinationType;
 
 /// How serious a `ValidationIssue` is. `Error` should block a pipeline from
 /// being enabled; `Warning` should not.
@@ -53,6 +55,9 @@ pub enum ValidationCategory {
     /// least one path the executor could take. It then passes that single clip
     /// through unchanged instead of merging anything.
     MergeSingleSource,
+    /// A transport node has a contact list but its destination isn't email,
+    /// the only transport that delivers to one.
+    UnsupportedContactList,
 }
 
 impl ValidationCategory {
@@ -341,6 +346,30 @@ pub fn check_unresolved_node_references(nodes: &[PipelineNode]) -> Vec<Validatio
                 Some(n.id),
                 "node references a destination that no longer exists or is disabled",
             )
+        })
+        .collect()
+}
+
+/// A transport node with a contact list whose destination isn't email. Takes
+/// each referenced destination's type so it stays a plain synchronous function;
+/// a destination missing from the map is left to the other reference checks.
+pub fn check_contact_list_destinations(
+    nodes: &[PipelineNode],
+    destination_types: &HashMap<Uuid, DestinationType>,
+) -> Vec<ValidationIssue> {
+    nodes
+        .iter()
+        .filter(|n| n.contact_list_id.is_some())
+        .filter_map(|n| {
+            let dest_type = destination_types.get(&n.destination_id?)?;
+            if *dest_type == DestinationType::Email {
+                return None;
+            }
+            Some(ValidationIssue::new(
+                ValidationCategory::UnsupportedContactList,
+                Some(n.id),
+                "contact lists are only supported for email destinations",
+            ))
         })
         .collect()
 }
@@ -1064,5 +1093,46 @@ mod tests {
         let skip = action_node(vms_core::action::ActionConfig::Skip);
         let edges = [edge(root.id, skip.id, CoreEdgeType::Default)];
         assert!(check_artifact_lineage(&[root, skip], &edges).is_empty());
+    }
+
+    // -- Contact list destinations --
+
+    fn contact_list_node(dest_id: Uuid) -> PipelineNode {
+        let mut node = base_node(CoreNodeType::Transport);
+        node.destination_id = Some(dest_id);
+        node.contact_list_id = Some(Uuid::new_v4());
+        node
+    }
+
+    #[test]
+    fn contact_list_on_non_email_destination_is_flagged() {
+        let dest = Uuid::new_v4();
+        let node = contact_list_node(dest);
+        let types = HashMap::from([(dest, DestinationType::Webhook)]);
+
+        let issues = check_contact_list_destinations(std::slice::from_ref(&node), &types);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].category,
+            ValidationCategory::UnsupportedContactList
+        );
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, Some(node.id));
+    }
+
+    #[test]
+    fn contact_list_on_email_destination_is_not_flagged() {
+        let dest = Uuid::new_v4();
+        let types = HashMap::from([(dest, DestinationType::Email)]);
+        assert!(check_contact_list_destinations(&[contact_list_node(dest)], &types).is_empty());
+    }
+
+    #[test]
+    fn non_email_destination_without_contact_list_is_not_flagged() {
+        let dest = Uuid::new_v4();
+        let mut node = base_node(CoreNodeType::Transport);
+        node.destination_id = Some(dest);
+        let types = HashMap::from([(dest, DestinationType::Webhook)]);
+        assert!(check_contact_list_destinations(&[node], &types).is_empty());
     }
 }

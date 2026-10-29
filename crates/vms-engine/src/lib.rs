@@ -18,7 +18,7 @@ pub mod trigger_evaluator;
 pub use chunk_reconciliation::reconcile_orphaned_chunks;
 pub use event_bus::{EventBus, DEFAULT_CAPACITY};
 pub use metrics::Metrics;
-pub use pipeline_executor::PipelineExecutor;
+pub use pipeline_executor::{PipelineExecutor, TransportRepos};
 pub use pipeline_registry::PipelineRegistry;
 pub use recording_intent::reconcile_recording_intent;
 pub use resource_manager::ResourceManager;

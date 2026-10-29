@@ -29,7 +29,7 @@ use vms_db::{
 };
 use vms_engine::{
     CoverageConfig, EventBus, Metrics, PipelineExecutor, PipelineRegistry, RecordingIntentConfig,
-    ResourceManager, RetentionConfig, StatMonitor, TriggerEvaluator,
+    ResourceManager, RetentionConfig, StatMonitor, TransportRepos, TriggerEvaluator,
 };
 use vms_media::{MediaConfig, MediaManager, RingBufferManager};
 use vms_sources::SourceManager;
@@ -509,7 +509,10 @@ async fn main() -> anyhow::Result<()> {
     // -- Pipeline Executor --
     let pipeline_executor = PipelineExecutor::new(
         pipeline_run_repo.clone(),
-        dest_repo.clone(),
+        TransportRepos {
+            destinations: dest_repo.clone(),
+            contact_lists: contact_list_repo.clone(),
+        },
         media_manager.clone(),
         ring_buffer_manager.clone(),
         cfg.media.recording_dir.clone(),
