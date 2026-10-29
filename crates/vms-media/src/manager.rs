@@ -1387,4 +1387,108 @@ mod tests {
     fn missing_dir_does_not_panic() {
         cleanup_stale_tmp_files(std::path::Path::new("/nonexistent/does/not/exist"));
     }
+
+    // -- Main stream lifecycle --
+
+    use super::{MediaConfig, MediaManager, StreamQuality};
+
+    /// Nothing listens here, so the main pipeline starts but never connects.
+    const UNREACHABLE: &str = "rtsp://127.0.0.1:1/none";
+
+    fn manager(dir: &ScratchDir) -> MediaManager {
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (chunk_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (live_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let config = MediaConfig {
+            recording_dir: dir.0.clone(),
+            rtsp_bind: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        MediaManager::new(config, event_tx, chunk_tx, live_tx).unwrap()
+    }
+
+    async fn start_main_restream(media: &MediaManager, camera_id: Uuid) {
+        media
+            .start_restream(
+                camera_id,
+                StreamQuality::Main,
+                UNREACHABLE,
+                None,
+                Some("H264"),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_closes_main_when_nothing_else_needs_it() {
+        let dir = ScratchDir::new("release-closes-main");
+        let media = manager(&dir);
+        let cam = Uuid::new_v4();
+
+        media.hold_live(cam, UNREACHABLE, None).await.unwrap();
+        assert!(media.is_running(cam));
+
+        media.release_live(cam).await;
+        assert!(!media.is_running(cam));
+    }
+
+    #[tokio::test]
+    async fn main_restream_keeps_main_open_after_release() {
+        let dir = ScratchDir::new("restream-keeps-main");
+        let media = manager(&dir);
+        let cam = Uuid::new_v4();
+
+        media.hold_live(cam, UNREACHABLE, None).await.unwrap();
+        start_main_restream(&media, cam).await;
+
+        media.release_live(cam).await;
+        assert!(media.is_running(cam));
+
+        media.stop_restream(cam, StreamQuality::Main).await;
+        assert!(!media.is_running(cam));
+    }
+
+    #[tokio::test]
+    async fn hold_keeps_main_open_after_restream_stops() {
+        let dir = ScratchDir::new("hold-keeps-main");
+        let media = manager(&dir);
+        let cam = Uuid::new_v4();
+
+        start_main_restream(&media, cam).await;
+        media.hold_live(cam, UNREACHABLE, None).await.unwrap();
+
+        media.stop_restream(cam, StreamQuality::Main).await;
+        media.stop_recording(cam).await.unwrap();
+        assert!(media.is_running(cam));
+    }
+
+    #[tokio::test]
+    async fn stop_recording_closes_main_when_nothing_else_needs_it() {
+        let dir = ScratchDir::new("stop-recording-closes-main");
+        let media = manager(&dir);
+        let cam = Uuid::new_v4();
+
+        // The camera never sends a codec, so the recording branch can't attach,
+        // but the main pipeline is left open as it is for an unreachable camera.
+        assert!(media.start_recording(cam, UNREACHABLE, None).await.is_err());
+        assert!(media.is_running(cam));
+
+        media.stop_recording(cam).await.unwrap();
+        assert!(!media.is_running(cam));
+    }
+
+    #[tokio::test]
+    async fn stop_live_clears_the_hold() {
+        let dir = ScratchDir::new("stop-live-clears-hold");
+        let media = manager(&dir);
+        let cam = Uuid::new_v4();
+
+        media.hold_live(cam, UNREACHABLE, None).await.unwrap();
+        media.stop_live(cam).await.unwrap();
+
+        start_main_restream(&media, cam).await;
+        media.stop_restream(cam, StreamQuality::Main).await;
+        assert!(!media.is_running(cam));
+    }
 }
