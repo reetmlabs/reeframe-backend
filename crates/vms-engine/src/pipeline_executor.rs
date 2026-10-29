@@ -524,7 +524,7 @@ pub(crate) async fn execute_node(
                         .await
                     {
                         Ok(emails) => Some(emails),
-                        Err(failure) => return failure,
+                        Err(e) => return NodeOutput::failure(node.id, format!("transport: {e}")),
                     }
                 }
                 None => None,
@@ -567,13 +567,11 @@ async fn contact_list_emails(
     repo: &ContactListRepo,
     node_id: NodeId,
     list_id: Uuid,
-) -> Result<Vec<String>, NodeOutput> {
-    let members = repo.list_members(list_id).await.map_err(|e| {
-        NodeOutput::failure(
-            node_id,
-            format!("transport: contact list lookup failed: {e}"),
-        )
-    })?;
+) -> Result<Vec<String>, String> {
+    let members = repo
+        .list_members(list_id)
+        .await
+        .map_err(|e| format!("contact list lookup failed: {e}"))?;
     let mut emails = Vec::with_capacity(members.len());
     for contact in members {
         match contact.email.filter(|e| !e.trim().is_empty()) {
@@ -587,9 +585,8 @@ async fn contact_list_emails(
         }
     }
     if emails.is_empty() {
-        return Err(NodeOutput::failure(
-            node_id,
-            format!("transport: contact list {list_id} has no members with an email"),
+        return Err(format!(
+            "contact list {list_id} has no members with an email"
         ));
     }
     Ok(emails)
@@ -1108,14 +1105,10 @@ mod tests {
     #[tokio::test]
     async fn contact_list_emails_fails_when_no_member_has_an_email() {
         let (repo, list_id) = contact_list_with(&[None]).await;
-        let failure = contact_list_emails(&repo, Uuid::new_v4(), list_id)
+        let err = contact_list_emails(&repo, Uuid::new_v4(), list_id)
             .await
             .unwrap_err();
-        assert!(!failure.success);
-        assert!(failure
-            .error
-            .unwrap()
-            .contains("has no members with an email"));
+        assert!(err.contains("has no members with an email"));
     }
 
     #[tokio::test]
