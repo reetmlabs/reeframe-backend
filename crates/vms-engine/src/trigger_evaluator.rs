@@ -17,7 +17,9 @@ use vms_core::{
 };
 use vms_db::repos::PipelineRepo;
 
-use crate::{time_helpers, EventBus, PipelineExecutor, PipelineRegistry};
+use crate::{
+    payload_path::register_json_path, time_helpers, EventBus, PipelineExecutor, PipelineRegistry,
+};
 
 /// Evaluates pipeline triggers and dispatches pipeline runs.
 ///
@@ -717,6 +719,8 @@ impl TriggerEvaluator {
 /// The event's top-level payload fields are exposed as `event.<key>`. Strings,
 /// numbers and booleans are mapped; nested objects, arrays and nulls are
 /// skipped. `event.type` and `event.topic` are always set from the event.
+/// Nested fields are reached with `json_path`/`json_paths` (see
+/// `payload_path`).
 ///
 /// Example expression: `event.confidence > 0.85 && event.label == "person"`
 fn build_event_context(event: &Event) -> HashMapContext {
@@ -744,6 +748,7 @@ fn build_event_context(event: &Event) -> HashMapContext {
             ctx.set_value(key, eval_val).ok();
         }
     }
+    register_json_path(&mut ctx, Some(&event.payload));
     ctx
 }
 
@@ -787,6 +792,20 @@ mod tests {
         let ctx = build_event_context(&event);
         let result = eval_boolean_with_context(
             r#"event.confidence > 0.85 && event.label == "person""#,
+            &ctx,
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn event_context_filter_reads_nested_payload_fields() {
+        let event = make_event(
+            "object_detected",
+            json!({"data": {"objects": [{"label": "car", "score": 0.9}]}}),
+        );
+        let ctx = build_event_context(&event);
+        let result = eval_boolean_with_context(
+            r#"json_path("$.data.objects[0].label") == "car" && json_path("$.data.objects[0].score") > 0.8"#,
             &ctx,
         );
         assert_eq!(result, Ok(true));

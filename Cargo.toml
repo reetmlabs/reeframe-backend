@@ -122,6 +122,7 @@ lz4_flex = "0.11"
 # Templates & expressions
 minijinja = "2"
 evalexpr  = "11"
+serde_json_path = "0.7"
 
 # Async traits (object-safe dyn Trait with async fn)
 async-trait = "0.1"

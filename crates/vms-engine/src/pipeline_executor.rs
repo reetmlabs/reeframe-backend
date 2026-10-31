@@ -21,6 +21,7 @@ use vms_media::{MediaManager, RingBufferManager};
 use vms_transports::TransportDispatcher;
 
 use crate::metrics::Metrics;
+use crate::payload_path::{register_json_path, register_manual_path};
 
 // -- Executor --
 
@@ -453,7 +454,7 @@ pub(crate) async fn execute_node(
 
         NodeType::Condition => {
             let expr = node.condition_expr.as_deref().unwrap_or("false");
-            let eval_ctx = build_condition_context(parent_outputs);
+            let eval_ctx = build_condition_context(parent_outputs, ctx);
             match evalexpr::eval_boolean_with_context(expr, &eval_ctx) {
                 // Forwards the parent's artifact_path/text (like Fork) so an
                 // artifact can pass through a Condition.
@@ -616,9 +617,16 @@ fn flatten_scalar_fields(
 }
 
 /// Build an `evalexpr` context from the first parent's metadata so that
-/// condition expressions can reference its top-level fields by name.
-pub(crate) fn build_condition_context(parent_outputs: &[NodeOutput]) -> HashMapContext {
+/// condition expressions can reference its top-level fields by name. The
+/// trigger's raw event payload and manual parameters are reachable through
+/// `json_path`/`manual_path` (see `payload_path`), whatever the parent is.
+pub(crate) fn build_condition_context(
+    parent_outputs: &[NodeOutput],
+    trigger: &TriggerContext,
+) -> HashMapContext {
     let mut ctx = HashMapContext::new();
+    register_json_path(&mut ctx, trigger.event_payload.as_ref());
+    register_manual_path(&mut ctx, trigger.manual_params.as_ref());
     let Some(parent) = parent_outputs.first() else {
         return ctx;
     };
@@ -754,14 +762,14 @@ mod tests {
     fn condition_context_exposes_parent_metadata() {
         let parent = NodeOutput::success(Uuid::new_v4())
             .with_metadata(serde_json::json!({"confidence": 0.92, "label": "person"}));
-        let ctx = build_condition_context(&[parent]);
+        let ctx = build_condition_context(&[parent], &schedule_ctx(Uuid::new_v4()));
         let ok = evalexpr::eval_boolean_with_context("confidence > 0.85", &ctx);
         assert_eq!(ok, Ok(true));
     }
 
     #[test]
     fn condition_context_empty_on_no_parent() {
-        let ctx = build_condition_context(&[]);
+        let ctx = build_condition_context(&[], &schedule_ctx(Uuid::new_v4()));
         assert!(evalexpr::eval_boolean_with_context("x > 1", &ctx).is_err());
     }
 
@@ -828,6 +836,21 @@ mod tests {
             &progress_map(),
         )
         .await;
+        assert!(cond_out.success);
+        assert_eq!(cond_out.metadata["condition_result"], true);
+    }
+
+    #[tokio::test]
+    async fn condition_reads_nested_event_field_through_any_parent() {
+        let pid = Uuid::new_v4();
+        let ctx = event_ctx(pid, serde_json::json!({"data": {"zone": "gate"}}));
+        let dr = transport_repos().await;
+        let parent = NodeOutput::success(Uuid::new_v4());
+
+        let mut cond = node(pid, NodeType::Condition);
+        cond.condition_expr = Some(r#"json_path("$.data.zone") == "gate""#.into());
+        let cond_out =
+            execute_node(&cond, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
         assert!(cond_out.success);
         assert_eq!(cond_out.metadata["condition_result"], true);
     }

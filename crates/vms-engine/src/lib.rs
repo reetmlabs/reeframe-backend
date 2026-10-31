@@ -5,6 +5,7 @@ pub mod chunk_reconciliation;
 pub mod coverage;
 pub mod event_bus;
 pub mod metrics;
+mod payload_path;
 pub mod pipeline_executor;
 pub mod pipeline_registry;
 pub mod recording_intent;
