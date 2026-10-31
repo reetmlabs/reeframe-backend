@@ -18,7 +18,8 @@ use vms_core::{
 use vms_db::repos::PipelineRepo;
 
 use crate::{
-    payload_path::register_json_path, time_helpers, EventBus, PipelineExecutor, PipelineRegistry,
+    payload_path::{register_json_path, to_eval},
+    time_helpers, EventBus, PipelineExecutor, PipelineRegistry,
 };
 
 /// Evaluates pipeline triggers and dispatches pipeline runs.
@@ -717,8 +718,8 @@ impl TriggerEvaluator {
 /// Build an evalexpr context from `event` for filter expression evaluation.
 ///
 /// The event's top-level payload fields are exposed as `event.<key>`. Strings,
-/// numbers and booleans are mapped; nested objects, arrays and nulls are
-/// skipped. `event.type` and `event.topic` are always set from the event.
+/// numbers and booleans are mapped, whole numbers as `Int`; nested objects,
+/// arrays and nulls are skipped. `event.type` and `event.topic` are always set from the event.
 /// Nested fields are reached with `json_path`/`json_paths` (see
 /// `payload_path`).
 ///
@@ -735,17 +736,14 @@ fn build_event_context(event: &Event) -> HashMapContext {
 
     if let serde_json::Value::Object(map) = &event.payload {
         for (k, v) in map {
-            let key = format!("event.{k}");
-            let eval_val = match v {
-                serde_json::Value::String(s) => EvalValue::String(s.clone()),
-                serde_json::Value::Number(n) => {
-                    let Some(f) = n.as_f64() else { continue };
-                    EvalValue::Float(f)
-                }
-                serde_json::Value::Bool(b) => EvalValue::Boolean(*b),
-                _ => continue,
-            };
-            ctx.set_value(key, eval_val).ok();
+            if matches!(
+                v,
+                serde_json::Value::String(_)
+                    | serde_json::Value::Number(_)
+                    | serde_json::Value::Bool(_)
+            ) {
+                ctx.set_value(format!("event.{k}"), to_eval(v)).ok();
+            }
         }
     }
     register_json_path(&mut ctx, Some(&event.payload));

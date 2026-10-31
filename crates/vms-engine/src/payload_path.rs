@@ -51,7 +51,7 @@ fn query<'a>(root: &'a JsonValue, arg: &EvalValue) -> EvalexprResult<Vec<&'a Jso
 
 /// Scalars map to their evalexpr value, whole numbers as `Int`. Null, objects
 /// and arrays map to `Empty`, since an expression can only compare scalars.
-fn to_eval(v: &JsonValue) -> EvalValue {
+pub(crate) fn to_eval(v: &JsonValue) -> EvalValue {
     match v {
         JsonValue::String(s) => EvalValue::String(s.clone()),
         JsonValue::Bool(b) => EvalValue::Boolean(*b),
