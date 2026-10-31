@@ -7,7 +7,7 @@ use vms_core::VmsError;
 // -- Codec detection --
 
 /// Probe the first video stream in `path` and return its GStreamer caps structure
-/// name (e.g. `"video/x-h264"`, `"video/x-h265"`).
+/// name (e.g. `"video/x-h264"`, `"video/x-h265"`, `"video/x-av1"`).
 ///
 /// Returns `None` if the file cannot be discovered or contains no video stream.
 /// Called from a blocking context only (`spawn_blocking`).
@@ -31,34 +31,40 @@ pub fn probe_video_codec(path: &Path) -> Option<String> {
 
 /// Map a GStreamer caps structure name to an encoder element name.
 ///
-/// `"video/x-h265"` → `x265enc`; everything else → `x264enc`.
+/// `"video/x-h265"` → `x265enc`, `"video/x-av1"` → `svtav1enc`; everything
+/// else → `x264enc`. SVT-AV1 is used over `av1enc` (libaom) because it
+/// encodes many times faster at comparable quality.
 pub fn codec_to_encoder(caps_name: &str) -> &'static str {
     match caps_name {
         "video/x-h265" => "x265enc",
+        "video/x-av1" => "svtav1enc",
         _ => "x264enc",
     }
 }
 
 /// Map a GStreamer caps structure name to a parser element name.
 ///
-/// `"video/x-h265"` → `h265parse`; everything else → `h264parse`.
+/// `"video/x-h265"` → `h265parse`, `"video/x-av1"` → `av1parse`; everything
+/// else → `h264parse`.
 pub fn codec_to_parser(caps_name: &str) -> &'static str {
     match caps_name {
         "video/x-h265" => "h265parse",
+        "video/x-av1" => "av1parse",
         _ => "h264parse",
     }
 }
 
 /// Map a GStreamer caps structure name to a software decoder element name.
 ///
-/// `"video/x-h265"` → `avdec_h265`; everything else → `avdec_h264`. Used
-/// where a hardware decoder is known to misbehave with a specific
-/// downstream element (see `watermark.rs`), so decodebin's own autoplug
-/// (which can pick a hardware decoder) is bypassed in favor of an explicit
-/// software one.
+/// `"video/x-h265"` → `avdec_h265`, `"video/x-av1"` → `av1dec`; everything
+/// else → `avdec_h264`. Used where a hardware decoder is known to misbehave
+/// with a specific downstream element (see `watermark.rs`), so decodebin's
+/// own autoplug (which can pick a hardware decoder) is bypassed in favor of
+/// an explicit software one.
 pub fn codec_to_software_decoder(caps_name: &str) -> &'static str {
     match caps_name {
         "video/x-h265" => "avdec_h265",
+        "video/x-av1" => "av1dec",
         _ => "avdec_h264",
     }
 }
