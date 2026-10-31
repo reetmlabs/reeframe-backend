@@ -107,6 +107,78 @@ pub struct UpdateTrigger {
     pub enabled: Option<bool>,
 }
 
+/// The whole node and edge set a pipeline should have after
+/// [`PipelineRepo::save_graph`].
+pub struct SaveGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+/// `key` is the id of an existing node in the pipeline, which is then updated
+/// in place. Any other key creates a new node.
+pub struct GraphNode {
+    pub key: String,
+    pub node: CreateNode,
+    /// Only valid on a `trigger_root` node.
+    pub trigger: Option<CreateTrigger>,
+}
+
+/// An edge between two nodes named by their `GraphNode::key`.
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub edge_type: CoreEdgeType,
+}
+
+#[derive(Debug)]
+pub struct SavedGraph {
+    pub nodes: Vec<PipelineNode>,
+    pub edges: Vec<PipelineEdge>,
+    /// Every `GraphNode::key` mapped to the id of the node it was saved as.
+    pub node_ids: HashMap<String, Uuid>,
+}
+
+/// The part of a graph save that was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphItem {
+    Graph,
+    Node(String),
+    Edge { from: String, to: String },
+}
+
+/// A failed [`PipelineRepo::save_graph`]. Nothing from the save was kept.
+#[derive(Debug)]
+pub struct GraphSaveError {
+    pub item: GraphItem,
+    pub error: VmsError,
+}
+
+impl GraphSaveError {
+    fn graph(error: VmsError) -> Self {
+        Self {
+            item: GraphItem::Graph,
+            error,
+        }
+    }
+
+    fn node(key: &str, error: VmsError) -> Self {
+        Self {
+            item: GraphItem::Node(key.to_owned()),
+            error,
+        }
+    }
+
+    fn edge(edge: &GraphEdge, error: VmsError) -> Self {
+        Self {
+            item: GraphItem::Edge {
+                from: edge.from.clone(),
+                to: edge.to.clone(),
+            },
+            error,
+        }
+    }
+}
+
 // -- Repository --
 
 /// Generic over the connection so the same writes can run inside a
@@ -610,6 +682,220 @@ where
             .await?
             .filter(|n| n.pipeline_id == pipeline_id)
             .ok_or(VmsError::NodeNotFound(node_id))
+    }
+
+    // -- Whole-graph save --
+
+    /// Replace `pipeline_id`'s nodes, edges and trigger with `graph` in one
+    /// transaction, so a rejected item leaves the pipeline as it was. Existing
+    /// nodes and edges missing from `graph` are deleted. Every item gets the
+    /// same checks as the single-item methods above.
+    pub async fn save_graph(
+        &self,
+        pipeline_id: Uuid,
+        graph: SaveGraph,
+    ) -> Result<SavedGraph, GraphSaveError> {
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| GraphSaveError::graph(db_err(e)))?;
+        let repo = PipelineRepo::new(txn);
+        match repo.apply_graph(pipeline_id, graph).await {
+            Ok(saved) => {
+                repo.db
+                    .commit()
+                    .await
+                    .map_err(|e| GraphSaveError::graph(db_err(e)))?;
+                Ok(saved)
+            }
+            Err(e) => {
+                // Dropping the transaction rolls it back too, so a failed
+                // rollback can't keep any of the save.
+                let _ = repo.db.rollback().await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn apply_graph(
+        &self,
+        pipeline_id: Uuid,
+        graph: SaveGraph,
+    ) -> Result<SavedGraph, GraphSaveError> {
+        if self
+            .get(pipeline_id)
+            .await
+            .map_err(GraphSaveError::graph)?
+            .is_none()
+        {
+            return Err(GraphSaveError::graph(VmsError::PipelineNotFound(
+                pipeline_id,
+            )));
+        }
+
+        let mut keys = HashSet::with_capacity(graph.nodes.len());
+        for n in &graph.nodes {
+            if !keys.insert(n.key.as_str()) {
+                return Err(GraphSaveError::node(
+                    &n.key,
+                    VmsError::DagValidation(format!("duplicate node key {}", n.key)),
+                ));
+            }
+        }
+
+        let existing: HashMap<Uuid, CoreNodeType> = self
+            .load_nodes(pipeline_id)
+            .await
+            .map_err(GraphSaveError::graph)?
+            .into_iter()
+            .map(|n| (n.id, n.node_type))
+            .collect();
+        let kept: HashSet<Uuid> = graph
+            .nodes
+            .iter()
+            .filter_map(|n| existing_node_id(&n.key, &existing))
+            .collect();
+
+        // Deletes run first so a replaced trigger_root is gone before its
+        // successor is created.
+        for (&id, node_type) in &existing {
+            if kept.contains(&id) {
+                continue;
+            }
+            self.delete_node(id).await.map_err(GraphSaveError::graph)?;
+            if *node_type == CoreNodeType::TriggerRoot {
+                self.delete_triggers_for_pipeline(pipeline_id)
+                    .await
+                    .map_err(GraphSaveError::graph)?;
+            }
+        }
+
+        let mut node_ids = HashMap::with_capacity(graph.nodes.len());
+        for GraphNode { key, node, trigger } in graph.nodes {
+            let id = self
+                .save_graph_node(pipeline_id, &existing, &key, node, trigger)
+                .await
+                .map_err(|e| GraphSaveError::node(&key, e))?;
+            node_ids.insert(key, id);
+        }
+
+        let mut wanted = HashMap::with_capacity(graph.edges.len());
+        let mut resolved = Vec::with_capacity(graph.edges.len());
+        for e in &graph.edges {
+            let resolve = |key: &str| {
+                node_ids.get(key).copied().ok_or_else(|| {
+                    GraphSaveError::edge(
+                        e,
+                        VmsError::DagValidation(format!("edge refers to unknown node key {key}")),
+                    )
+                })
+            };
+            let (from, to) = (resolve(&e.from)?, resolve(&e.to)?);
+            if wanted.insert((from, to), e.edge_type.clone()).is_some() {
+                return Err(GraphSaveError::edge(
+                    e,
+                    VmsError::DagValidation("duplicate edge between the same two nodes".into()),
+                ));
+            }
+            resolved.push((e, from, to));
+        }
+
+        // An edge whose type changes is deleted and recreated, so swapping two
+        // condition branches never passes through two edges on one branch.
+        let mut unchanged = HashSet::new();
+        for edge in self
+            .load_edges(pipeline_id)
+            .await
+            .map_err(GraphSaveError::graph)?
+        {
+            let pair = (edge.from_node_id, edge.to_node_id);
+            if wanted.get(&pair) == Some(&edge.edge_type) {
+                unchanged.insert(pair);
+            } else {
+                self.delete_edge(edge.id)
+                    .await
+                    .map_err(GraphSaveError::graph)?;
+            }
+        }
+        for (e, from, to) in resolved {
+            if unchanged.contains(&(from, to)) {
+                continue;
+            }
+            self.create_edge(
+                pipeline_id,
+                CreateEdge {
+                    from_node_id: from,
+                    to_node_id: to,
+                    edge_type: e.edge_type.clone(),
+                },
+            )
+            .await
+            .map_err(|err| GraphSaveError::edge(e, err))?;
+        }
+
+        Ok(SavedGraph {
+            nodes: self
+                .load_nodes(pipeline_id)
+                .await
+                .map_err(GraphSaveError::graph)?,
+            edges: self
+                .load_edges(pipeline_id)
+                .await
+                .map_err(GraphSaveError::graph)?,
+            node_ids,
+        })
+    }
+
+    /// Create or fully overwrite one node of a graph save, plus its trigger.
+    /// Returns the node's id.
+    async fn save_graph_node(
+        &self,
+        pipeline_id: Uuid,
+        existing: &HashMap<Uuid, CoreNodeType>,
+        key: &str,
+        node: CreateNode,
+        trigger: Option<CreateTrigger>,
+    ) -> Result<Uuid, VmsError> {
+        if trigger.is_some() && node.node_type != CoreNodeType::TriggerRoot {
+            return Err(VmsError::DagValidation(
+                "trigger config is only valid on a trigger_root node".into(),
+            ));
+        }
+
+        let id = match existing_node_id(key, existing) {
+            Some(id) => {
+                let current_type = &existing[&id];
+                if *current_type != node.node_type {
+                    return Err(VmsError::DagValidation(format!(
+                        "cannot change node type from {} to {}, delete and recreate instead",
+                        current_type.as_str(),
+                        node.node_type.as_str()
+                    )));
+                }
+                self.update_node(
+                    id,
+                    UpdateNode {
+                        action_config: node.action_config,
+                        transport_config: node.transport_config,
+                        destination_id: Some(node.destination_id),
+                        contact_list_id: Some(node.contact_list_id),
+                        condition_expr: node.condition_expr,
+                        label: Some(node.label),
+                        pos_x: Some(node.pos_x),
+                        pos_y: Some(node.pos_y),
+                    },
+                )
+                .await?
+                .id
+            }
+            None => self.create_node(pipeline_id, node).await?.id,
+        };
+
+        if let Some(t) = trigger {
+            self.upsert_node_trigger(pipeline_id, t).await?;
+        }
+        Ok(id)
     }
 
     // -- Cross-entity FK existence checks --
@@ -1147,6 +1433,12 @@ where
         active.update(&self.db).await.map_err(db_err)?;
         Ok(())
     }
+}
+
+/// The node a graph save key refers to, if it's the id of a node already in
+/// the pipeline.
+fn existing_node_id(key: &str, existing: &HashMap<Uuid, CoreNodeType>) -> Option<Uuid> {
+    key.parse().ok().filter(|id| existing.contains_key(id))
 }
 
 // -- DB-to-domain translation --
