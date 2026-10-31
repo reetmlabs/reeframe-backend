@@ -16,15 +16,16 @@ use crate::dispatcher::ActionContext;
 
 /// Burn a text watermark onto every frame of the upstream video artifact.
 ///
-/// Pipeline: `filesrc → qtdemux → h264parse/h265parse → avdec_h264/avdec_h265
-/// → videoconvert → textoverlay → videoconvert → x264enc → mp4mux → filesink`
+/// Pipeline: `filesrc → qtdemux → parser → software decoder → videoconvert →
+/// textoverlay → videoconvert → encoder → mp4mux → filesink`, with the parser,
+/// decoder and encoder matching the input codec (H.264, H.265 or AV1).
 ///
 /// Decoding uses an explicit software decoder rather than decodebin's own
 /// autoplug, since a hardware H.264 decoder on this machine produces
 /// corrupted frames when textoverlay follows it on content with B-frames.
 ///
 /// The text is a minijinja template rendered with `TriggerContext` variables.
-/// Audio is dropped. Output is always H.264/MP4.
+/// Audio is dropped. Output is MP4 in the input's codec.
 pub async fn execute(
     node_id: NodeId,
     cfg: &WatermarkConfig,
@@ -262,5 +263,29 @@ mod tests {
         let alpha = (opacity * 255.0) as u32; // 127
         let color = (alpha << 24) | 0x00FF_FFFF;
         assert_eq!(color >> 24, 127);
+    }
+
+    #[test]
+    fn av1_input_is_watermarked_as_av1() {
+        gstreamer::init().ok();
+        let dir = std::env::temp_dir();
+        let input = dir.join(format!("watermark_av1_in_{}.mp4", std::process::id()));
+        let output = dir.join(format!("watermark_av1_out_{}.mp4", std::process::id()));
+        gst_util::make_test_clip_with(&input, "svtav1enc");
+        let cfg = WatermarkConfig {
+            text_template: "cam".into(),
+            position: WatermarkPosition::TopLeft,
+            font_size: 12,
+            opacity: 1.0,
+        };
+
+        watermark_blocking(&input, "cam", &cfg, &output).unwrap();
+
+        assert_eq!(
+            gst_util::probe_video_codec(&output).as_deref(),
+            Some("video/x-av1")
+        );
+        std::fs::remove_file(&input).ok();
+        std::fs::remove_file(&output).ok();
     }
 }

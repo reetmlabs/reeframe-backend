@@ -7,7 +7,7 @@ use vms_core::VmsError;
 // -- Codec detection --
 
 /// Probe the first video stream in `path` and return its GStreamer caps structure
-/// name (e.g. `"video/x-h264"`, `"video/x-h265"`).
+/// name (e.g. `"video/x-h264"`, `"video/x-h265"`, `"video/x-av1"`).
 ///
 /// Returns `None` if the file cannot be discovered or contains no video stream.
 /// Called from a blocking context only (`spawn_blocking`).
@@ -31,34 +31,40 @@ pub fn probe_video_codec(path: &Path) -> Option<String> {
 
 /// Map a GStreamer caps structure name to an encoder element name.
 ///
-/// `"video/x-h265"` → `x265enc`; everything else → `x264enc`.
+/// `"video/x-h265"` → `x265enc`, `"video/x-av1"` → `svtav1enc`; everything
+/// else → `x264enc`. SVT-AV1 is used over `av1enc` (libaom) because it
+/// encodes many times faster at comparable quality.
 pub fn codec_to_encoder(caps_name: &str) -> &'static str {
     match caps_name {
         "video/x-h265" => "x265enc",
+        "video/x-av1" => "svtav1enc",
         _ => "x264enc",
     }
 }
 
 /// Map a GStreamer caps structure name to a parser element name.
 ///
-/// `"video/x-h265"` → `h265parse`; everything else → `h264parse`.
+/// `"video/x-h265"` → `h265parse`, `"video/x-av1"` → `av1parse`; everything
+/// else → `h264parse`.
 pub fn codec_to_parser(caps_name: &str) -> &'static str {
     match caps_name {
         "video/x-h265" => "h265parse",
+        "video/x-av1" => "av1parse",
         _ => "h264parse",
     }
 }
 
 /// Map a GStreamer caps structure name to a software decoder element name.
 ///
-/// `"video/x-h265"` → `avdec_h265`; everything else → `avdec_h264`. Used
-/// where a hardware decoder is known to misbehave with a specific
-/// downstream element (see `watermark.rs`), so decodebin's own autoplug
-/// (which can pick a hardware decoder) is bypassed in favor of an explicit
-/// software one.
+/// `"video/x-h265"` → `avdec_h265`, `"video/x-av1"` → `av1dec`; everything
+/// else → `avdec_h264`. Used where a hardware decoder is known to misbehave
+/// with a specific downstream element (see `watermark.rs`), so decodebin's
+/// own autoplug (which can pick a hardware decoder) is bypassed in favor of
+/// an explicit software one.
 pub fn codec_to_software_decoder(caps_name: &str) -> &'static str {
     match caps_name {
         "video/x-h265" => "avdec_h265",
+        "video/x-av1" => "av1dec",
         _ => "avdec_h264",
     }
 }
@@ -242,9 +248,15 @@ pub fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
 
 #[cfg(test)]
 fn make_test_clip(path: &Path) {
+    make_test_clip_with(path, "x264enc");
+}
+
+/// Writes a short 64x64 MP4 test clip encoded with `encoder`.
+#[cfg(test)]
+pub(crate) fn make_test_clip_with(path: &Path, encoder: &str) {
     let pipeline = gstreamer::parse::launch(&format!(
         "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64,framerate=10/1,format=I420 ! \
-         x264enc ! mp4mux ! filesink location={}",
+         {encoder} ! mp4mux ! filesink location={}",
         path.display()
     ))
     .expect("parse test clip pipeline");
@@ -355,5 +367,17 @@ mod wire_demux_video_tests {
 
         pipeline.set_state(gstreamer::State::Null).ok();
         std::fs::remove_file(&src_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod codec_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn av1_maps_to_av1_elements() {
+        assert_eq!(codec_to_parser("video/x-av1"), "av1parse");
+        assert_eq!(codec_to_software_decoder("video/x-av1"), "av1dec");
+        assert_eq!(codec_to_encoder("video/x-av1"), "svtav1enc");
     }
 }
