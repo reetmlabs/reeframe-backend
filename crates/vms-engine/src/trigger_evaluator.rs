@@ -796,6 +796,20 @@ mod tests {
     }
 
     #[test]
+    fn event_context_filter_matches_whole_numbers_as_integers() {
+        let event = make_event("object_detected", json!({"count": 5, "score": 0.5}));
+        let ctx = build_event_context(&event);
+        assert_eq!(
+            eval_boolean_with_context("event.count == 5", &ctx),
+            Ok(true)
+        );
+        assert_eq!(
+            eval_boolean_with_context("event.score == 0.5", &ctx),
+            Ok(true)
+        );
+    }
+
+    #[test]
     fn event_context_filter_reads_nested_payload_fields() {
         let event = make_event(
             "object_detected",
