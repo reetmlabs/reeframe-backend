@@ -264,4 +264,28 @@ mod tests {
         let color = (alpha << 24) | 0x00FF_FFFF;
         assert_eq!(color >> 24, 127);
     }
+
+    #[test]
+    fn av1_input_is_watermarked_as_av1() {
+        gstreamer::init().ok();
+        let dir = std::env::temp_dir();
+        let input = dir.join(format!("watermark_av1_in_{}.mp4", std::process::id()));
+        let output = dir.join(format!("watermark_av1_out_{}.mp4", std::process::id()));
+        gst_util::make_test_clip_with(&input, "svtav1enc");
+        let cfg = WatermarkConfig {
+            text_template: "cam".into(),
+            position: WatermarkPosition::TopLeft,
+            font_size: 12,
+            opacity: 1.0,
+        };
+
+        watermark_blocking(&input, "cam", &cfg, &output).unwrap();
+
+        assert_eq!(
+            gst_util::probe_video_codec(&output).as_deref(),
+            Some("video/x-av1")
+        );
+        std::fs::remove_file(&input).ok();
+        std::fs::remove_file(&output).ok();
+    }
 }

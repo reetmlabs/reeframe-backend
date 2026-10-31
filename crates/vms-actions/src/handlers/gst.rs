@@ -248,9 +248,15 @@ pub fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
 
 #[cfg(test)]
 fn make_test_clip(path: &Path) {
+    make_test_clip_with(path, "x264enc");
+}
+
+/// Writes a short 64x64 MP4 test clip encoded with `encoder`.
+#[cfg(test)]
+pub(crate) fn make_test_clip_with(path: &Path, encoder: &str) {
     let pipeline = gstreamer::parse::launch(&format!(
         "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64,framerate=10/1,format=I420 ! \
-         x264enc ! mp4mux ! filesink location={}",
+         {encoder} ! mp4mux ! filesink location={}",
         path.display()
     ))
     .expect("parse test clip pipeline");
@@ -361,5 +367,17 @@ mod wire_demux_video_tests {
 
         pipeline.set_state(gstreamer::State::Null).ok();
         std::fs::remove_file(&src_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod codec_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn av1_maps_to_av1_elements() {
+        assert_eq!(codec_to_parser("video/x-av1"), "av1parse");
+        assert_eq!(codec_to_software_decoder("video/x-av1"), "av1dec");
+        assert_eq!(codec_to_encoder("video/x-av1"), "svtav1enc");
     }
 }

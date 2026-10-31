@@ -239,4 +239,30 @@ mod tests {
         c.reverse();
         assert_eq!(c[0], PathBuf::from("/tmp/clip02.mp4"));
     }
+
+    #[test]
+    fn av1_clips_merge_to_av1() {
+        use super::{gst_util, merge_blocking};
+
+        gstreamer::init().ok();
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let inputs: Vec<PathBuf> = (0..2)
+            .map(|i| dir.join(format!("merge_av1_in{i}_{pid}.mp4")))
+            .collect();
+        for clip in &inputs {
+            gst_util::make_test_clip_with(clip, "svtav1enc");
+        }
+        let output = dir.join(format!("merge_av1_out_{pid}.mp4"));
+
+        merge_blocking(&inputs, "mp4", &output).unwrap();
+
+        assert_eq!(
+            gst_util::probe_video_codec(&output).as_deref(),
+            Some("video/x-av1")
+        );
+        for clip in inputs.iter().chain([&output]) {
+            std::fs::remove_file(clip).ok();
+        }
+    }
 }
