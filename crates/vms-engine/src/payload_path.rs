@@ -14,6 +14,12 @@ pub(crate) fn register_json_path(ctx: &mut HashMapContext, payload: Option<&Json
     register(ctx, "json_path", "json_paths", payload);
 }
 
+/// Adds `manual_path(path)` and `manual_paths(path)` over a manual trigger's
+/// parameters, with the same semantics as [`register_json_path`].
+pub(crate) fn register_manual_path(ctx: &mut HashMapContext, params: Option<&JsonValue>) {
+    register(ctx, "manual_path", "manual_paths", params);
+}
+
 fn register(ctx: &mut HashMapContext, first: &str, all: &str, root: Option<&JsonValue>) {
     let root = root.cloned().unwrap_or(JsonValue::Null);
     let first_root = root.clone();
