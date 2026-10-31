@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait,
-    PaginatorTrait, QueryFilter, TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter, TransactionTrait,
 };
 use uuid::Uuid;
 use vms_core::{
@@ -109,13 +109,18 @@ pub struct UpdateTrigger {
 
 // -- Repository --
 
+/// Generic over the connection so the same writes can run inside a
+/// `DatabaseTransaction`.
 #[derive(Clone)]
-pub struct PipelineRepo {
-    db: DatabaseConnection,
+pub struct PipelineRepo<C = DatabaseConnection> {
+    db: C,
 }
 
-impl PipelineRepo {
-    pub fn new(db: DatabaseConnection) -> Self {
+impl<C> PipelineRepo<C>
+where
+    C: ConnectionTrait + TransactionTrait<Transaction = DatabaseTransaction>,
+{
+    pub fn new(db: C) -> Self {
         Self { db }
     }
 
