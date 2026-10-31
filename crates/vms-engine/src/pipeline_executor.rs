@@ -841,6 +841,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn condition_reads_nested_event_field_through_any_parent() {
+        let pid = Uuid::new_v4();
+        let ctx = event_ctx(pid, serde_json::json!({"data": {"zone": "gate"}}));
+        let dr = transport_repos().await;
+        let parent = NodeOutput::success(Uuid::new_v4());
+
+        let mut cond = node(pid, NodeType::Condition);
+        cond.condition_expr = Some(r#"json_path("$.data.zone") == "gate""#.into());
+        let cond_out =
+            execute_node(&cond, &[parent], &ctx, &action_ctx(), &dr, &progress_map()).await;
+        assert!(cond_out.success);
+        assert_eq!(cond_out.metadata["condition_result"], true);
+    }
+
+    #[tokio::test]
     async fn trigger_root_forwards_manual_params_as_manual_fields() {
         let pid = Uuid::new_v4();
         let n = node(pid, NodeType::TriggerRoot);

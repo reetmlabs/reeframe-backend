@@ -797,6 +797,20 @@ mod tests {
         assert_eq!(result, Ok(true));
     }
 
+    #[test]
+    fn event_context_filter_reads_nested_payload_fields() {
+        let event = make_event(
+            "object_detected",
+            json!({"data": {"objects": [{"label": "car", "score": 0.9}]}}),
+        );
+        let ctx = build_event_context(&event);
+        let result = eval_boolean_with_context(
+            r#"json_path("$.data.objects[0].label") == "car" && json_path("$.data.objects[0].score") > 0.8"#,
+            &ctx,
+        );
+        assert_eq!(result, Ok(true));
+    }
+
     // A filter referencing event.topic must resolve instead of failing with
     // VariableIdentifierNotFound.
     #[test]
