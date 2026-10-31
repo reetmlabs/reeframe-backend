@@ -9,6 +9,7 @@ mod export_jobs;
 mod health;
 mod metrics;
 mod pipeline_edges;
+mod pipeline_graph;
 mod pipeline_nodes;
 mod pipeline_triggers;
 mod pipelines;
@@ -251,6 +252,7 @@ fn protected_routes() -> Router {
                                 .get(pipelines::list_runs)
                                 .push(Router::with_path("{run_id}").get(pipelines::get_run)),
                         )
+                        .push(Router::with_path("graph").put(pipeline_graph::save_graph))
                         .push(
                             Router::with_path("nodes")
                                 .get(pipeline_nodes::list_nodes)
