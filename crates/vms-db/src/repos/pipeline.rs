@@ -3939,4 +3939,191 @@ mod tests {
             EnableOutcome::BlockedByErrors(_)
         ));
     }
+
+    // -- save_graph --
+
+    fn graph_node(key: &str, node_type: CoreNodeType) -> GraphNode {
+        GraphNode {
+            key: key.into(),
+            node: bare_node(node_type),
+            trigger: None,
+        }
+    }
+
+    fn graph_edge(from: &str, to: &str, edge_type: CoreEdgeType) -> GraphEdge {
+        GraphEdge {
+            from: from.into(),
+            to: to.into(),
+            edge_type,
+        }
+    }
+
+    /// Saves a trigger_root (key "root") with a manual trigger and a fork
+    /// (key "fork") below it.
+    async fn save_root_and_fork(repo: &PipelineRepo, pipeline_id: Uuid) -> SavedGraph {
+        let mut root = graph_node("root", CoreNodeType::TriggerRoot);
+        root.trigger = Some(manual_trigger());
+        repo.save_graph(
+            pipeline_id,
+            SaveGraph {
+                nodes: vec![root, graph_node("fork", CoreNodeType::Fork)],
+                edges: vec![graph_edge("root", "fork", CoreEdgeType::Default)],
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_graph_creates_nodes_edges_and_trigger() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let saved = save_root_and_fork(&repo, pipeline_id).await;
+
+        assert_eq!(saved.nodes.len(), 2);
+        assert_eq!(saved.edges.len(), 1);
+        assert_eq!(saved.edges[0].from_node_id, saved.node_ids["root"]);
+        assert_eq!(saved.edges[0].to_node_id, saved.node_ids["fork"]);
+        assert_eq!(repo.load_triggers(pipeline_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_graph_updates_listed_nodes_and_deletes_the_rest() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let first = save_root_and_fork(&repo, pipeline_id).await;
+        let root_id = first.node_ids["root"];
+
+        let mut root = graph_node(&root_id.to_string(), CoreNodeType::TriggerRoot);
+        root.node.label = Some("start".into());
+        let saved = repo
+            .save_graph(
+                pipeline_id,
+                SaveGraph {
+                    nodes: vec![root],
+                    edges: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(saved.nodes.len(), 1);
+        assert_eq!(saved.nodes[0].id, root_id);
+        assert_eq!(saved.nodes[0].label.as_deref(), Some("start"));
+        assert!(saved.edges.is_empty());
+        assert_eq!(repo.load_triggers(pipeline_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_graph_swaps_condition_branches() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let nodes = || {
+            vec![
+                graph_node("cond", CoreNodeType::Condition),
+                graph_node("a", CoreNodeType::Fork),
+                graph_node("b", CoreNodeType::Fork),
+            ]
+        };
+        let first = repo
+            .save_graph(
+                pipeline_id,
+                SaveGraph {
+                    nodes: nodes(),
+                    edges: vec![
+                        graph_edge("cond", "a", CoreEdgeType::TrueBranch),
+                        graph_edge("cond", "b", CoreEdgeType::FalseBranch),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut swapped = nodes();
+        for n in &mut swapped {
+            n.key = first.node_ids[&n.key].to_string();
+        }
+        let key = |k: &str| first.node_ids[k].to_string();
+        let saved = repo
+            .save_graph(
+                pipeline_id,
+                SaveGraph {
+                    nodes: swapped,
+                    edges: vec![
+                        graph_edge(&key("cond"), &key("a"), CoreEdgeType::FalseBranch),
+                        graph_edge(&key("cond"), &key("b"), CoreEdgeType::TrueBranch),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+
+        let to_a = saved
+            .edges
+            .iter()
+            .find(|e| e.to_node_id == first.node_ids["a"])
+            .unwrap();
+        assert_eq!(to_a.edge_type, CoreEdgeType::FalseBranch);
+        assert_eq!(saved.edges.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejected_edge_rolls_back_the_whole_save() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+        let first = save_root_and_fork(&repo, pipeline_id).await;
+        let fork_id = first.node_ids["fork"];
+
+        let mut fork = graph_node(&fork_id.to_string(), CoreNodeType::Fork);
+        fork.node.label = Some("changed".into());
+        let err = repo
+            .save_graph(
+                pipeline_id,
+                SaveGraph {
+                    nodes: vec![fork, graph_node("new", CoreNodeType::Fork)],
+                    edges: vec![graph_edge("new", "new", CoreEdgeType::Default)],
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.item,
+            GraphItem::Edge {
+                from: "new".into(),
+                to: "new".into()
+            }
+        );
+        let nodes = repo.load_nodes(pipeline_id).await.unwrap();
+        assert_eq!(nodes.len(), 2);
+        let fork = nodes.iter().find(|n| n.id == fork_id).unwrap();
+        assert_eq!(fork.label, None);
+        assert_eq!(repo.load_edges(pipeline_id).await.unwrap().len(), 1);
+        assert_eq!(repo.load_triggers(pipeline_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_node_is_named_by_its_key() {
+        let repo = test_repo().await;
+        let pipeline_id = make_pipeline(&repo).await;
+
+        let err = repo
+            .save_graph(
+                pipeline_id,
+                SaveGraph {
+                    nodes: vec![
+                        graph_node("root", CoreNodeType::TriggerRoot),
+                        graph_node("second-root", CoreNodeType::TriggerRoot),
+                    ],
+                    edges: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.item, GraphItem::Node("second-root".into()));
+        assert!(matches!(err.error, VmsError::DagValidation(_)));
+        assert!(repo.load_nodes(pipeline_id).await.unwrap().is_empty());
+    }
 }
