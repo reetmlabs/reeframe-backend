@@ -382,4 +382,28 @@ mod tests {
         assert_eq!(auth.mode, "local");
         assert!(auth.jwks_url.is_none());
     }
+
+    fn from_toml(toml: &str) -> AppConfig {
+        Figment::new()
+            .merge(Serialized::defaults(AppConfig::default()))
+            .merge(Toml::string(toml))
+            .extract()
+            .unwrap()
+    }
+
+    #[test]
+    fn be_id_is_read_from_the_coordinator_section() {
+        let be_id = uuid::Uuid::new_v4();
+        let cfg = from_toml(&format!("[coordinator]\nbe_id = \"{be_id}\"\n"));
+        assert_eq!(cfg.coordinator.be_id, Some(be_id));
+    }
+
+    #[test]
+    fn a_gateway_section_does_not_set_be_id() {
+        let cfg = from_toml(&format!(
+            "[gateway]\nbe_id = \"{}\"\n",
+            uuid::Uuid::new_v4()
+        ));
+        assert_eq!(cfg.coordinator.be_id, None);
+    }
 }
