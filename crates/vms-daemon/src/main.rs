@@ -151,12 +151,12 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("[auth] mode = \"oidc\" requires [auth] jwks_url to be set");
             anyhow::anyhow!("missing jwks_url for oidc auth mode")
         })?;
-        let be_id = cfg.gateway.be_id.ok_or_else(|| {
+        let be_id = cfg.coordinator.be_id.ok_or_else(|| {
             tracing::error!(
-                "[auth] mode = \"oidc\" requires [gateway] be_id to be set, it's the expected \
+                "[auth] mode = \"oidc\" requires [coordinator] be_id to be set, it's the expected \
                  `aud` for every Coordinator-issued token this BE accepts"
             );
-            anyhow::anyhow!("missing gateway.be_id for oidc auth mode")
+            anyhow::anyhow!("missing coordinator.be_id for oidc auth mode")
         })?;
         let provider = Arc::new(CoordinatorJwksAuthProvider::new(
             jwks_url.clone(),

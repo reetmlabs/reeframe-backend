@@ -145,10 +145,10 @@ impl Default for AuthConfig {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct GatewayConfig {
+pub struct CoordinatorConfig {
     /// The ID this BE is registered under in the Coordinator's `sites` table,
     /// and the expected `aud` of Coordinator-issued tokens. Required when
-    /// `[auth] mode = "oidc"`. Set via config file or VMS_GATEWAY__BE_ID env var.
+    /// `[auth] mode = "oidc"`. Set via config file or VMS_COORDINATOR__BE_ID env var.
     pub be_id: Option<uuid::Uuid>,
 }
 
@@ -162,7 +162,7 @@ pub struct AppConfig {
     pub api: ApiConfig,
     pub rtsp: RtspConfig,
     pub auth: AuthConfig,
-    pub gateway: GatewayConfig,
+    pub coordinator: CoordinatorConfig,
     /// Base64-encoded 32-byte AES-256-GCM encryption key.
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
@@ -181,7 +181,7 @@ impl Default for AppConfig {
             api: ApiConfig::default(),
             rtsp: RtspConfig::default(),
             auth: AuthConfig::default(),
-            gateway: GatewayConfig::default(),
+            coordinator: CoordinatorConfig::default(),
             encryption_key: String::new(),
             log_level: "info".into(),
         }
@@ -217,6 +217,8 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_RTSP__PUBLIC_PORT`    | `rtsp.public_port`          |
 /// | `VMS_AUTH__MODE`           | `auth.mode`                 |
 /// | `VMS_AUTH__JWT_SECRET`     | `auth.jwt_secret`           |
+/// | `VMS_AUTH__JWKS_URL`       | `auth.jwks_url`             |
+/// | `VMS_COORDINATOR__BE_ID`   | `coordinator.be_id`         |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
 // `figment::Error` is large, but it is returned once, at startup.
 #[allow(clippy::result_large_err)]
