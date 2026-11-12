@@ -152,6 +152,22 @@ pub struct CoordinatorConfig {
     pub be_id: Option<uuid::Uuid>,
 }
 
+/// Where the site identity from `vms-daemon enroll` is kept.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdentityConfig {
+    /// Path of the identity file, relative to the working directory unless
+    /// absolute. Set via config file or VMS_IDENTITY__PATH env var.
+    pub path: String,
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
+            path: "site_identity.json".into(),
+        }
+    }
+}
+
 // -- Root config --
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -163,6 +179,7 @@ pub struct AppConfig {
     pub rtsp: RtspConfig,
     pub auth: AuthConfig,
     pub coordinator: CoordinatorConfig,
+    pub identity: IdentityConfig,
     /// Base64-encoded 32-byte AES-256-GCM encryption key.
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
@@ -182,6 +199,7 @@ impl Default for AppConfig {
             rtsp: RtspConfig::default(),
             auth: AuthConfig::default(),
             coordinator: CoordinatorConfig::default(),
+            identity: IdentityConfig::default(),
             encryption_key: String::new(),
             log_level: "info".into(),
         }
@@ -219,6 +237,7 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_AUTH__JWT_SECRET`     | `auth.jwt_secret`           |
 /// | `VMS_AUTH__JWKS_URL`       | `auth.jwks_url`             |
 /// | `VMS_COORDINATOR__BE_ID`   | `coordinator.be_id`         |
+/// | `VMS_IDENTITY__PATH`       | `identity.path`             |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
 // `figment::Error` is large, but it is returned once, at startup.
 #[allow(clippy::result_large_err)]

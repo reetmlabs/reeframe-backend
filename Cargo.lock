@@ -6516,13 +6516,16 @@ name = "vms-daemon"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
+ "ed25519-dalek",
  "figment",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "rand 0.8.6",
+ "reqwest 0.12.28",
  "salvo",
  "sea-orm",
  "sea-orm-migration",

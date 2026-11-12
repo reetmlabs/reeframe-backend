@@ -1,5 +1,7 @@
 mod cli;
 mod config;
+mod enroll;
+mod identity;
 // TODO(#41): the control channel client uses this; unused until then.
 #[allow(dead_code)]
 mod reconnect;
@@ -38,8 +40,7 @@ use vms_sources::SourceManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // A subcommand (only `token ...` so far) connects to the DB, does one
-    // thing and exits. With no subcommand the full daemon starts, which is
+    // A subcommand (`token ...` or `enroll ...`) does one thing and exits. With no subcommand the full daemon starts, which is
     // how systemd and docker invoke the binary.
     if let Some(command) = cli::Cli::parse().command {
         return cli::run(command).await;
