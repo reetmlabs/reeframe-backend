@@ -1,6 +1,7 @@
 mod cli;
 mod config;
-mod gateway;
+// TODO(#41): the control channel client uses this; unused until then.
+#[allow(dead_code)]
 mod reconnect;
 
 use std::path::PathBuf;
@@ -173,20 +174,6 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-
-    // -- Gateway (tunnel client for mobile app pairing) --
-    // With no `[gateway] url` (the default), no connection is attempted.
-    let gateway_task = gateway::resolve(&cfg.gateway)
-        .map_err(|e| {
-            tracing::error!(error = %e, "Invalid gateway configuration");
-            anyhow::anyhow!(e)
-        })?
-        .map(|(url, be_id)| {
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            tracing::info!(url = %url, %be_id, "Gateway client starting");
-            let join_handle = tokio::spawn(gateway::run(url, be_id, shutdown_rx));
-            (shutdown_tx, join_handle)
-        });
 
     // -- Crypto --
     let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {
@@ -634,13 +621,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!(error = %e, "Error during media manager shutdown");
         anyhow::anyhow!(e)
     })?;
-
-    // -- Graceful shutdown: gateway client --
-    if let Some((shutdown_tx, join_handle)) = gateway_task {
-        let _ = shutdown_tx.send(());
-        join_handle.await.ok();
-        tracing::info!("Gateway client stopped");
-    }
 
     tracing::info!("VMS Daemon stopped");
     Ok(())

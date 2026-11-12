@@ -146,16 +146,9 @@ impl Default for AuthConfig {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GatewayConfig {
-    /// `host:port` of a gateway server for mobile app pairing. Unset by
-    /// default, in which case the BE runs standalone and never connects to a
-    /// gateway. Set via config file or VMS_GATEWAY__URL env var.
-    pub url: Option<String>,
-    /// The ID this BE is registered under in the Coordinator's `sites` table.
-    /// Sent to the gateway on every connection so it knows which site the
-    /// connection belongs to (required when `url` is set). Also used as the
-    /// expected `aud` of Coordinator-issued tokens, so it is required when
-    /// `[auth] mode = "oidc"` even without a gateway `url`.
-    /// Set via config file or VMS_GATEWAY__BE_ID env var.
+    /// The ID this BE is registered under in the Coordinator's `sites` table,
+    /// and the expected `aud` of Coordinator-issued tokens. Required when
+    /// `[auth] mode = "oidc"`. Set via config file or VMS_GATEWAY__BE_ID env var.
     pub be_id: Option<uuid::Uuid>,
 }
 
