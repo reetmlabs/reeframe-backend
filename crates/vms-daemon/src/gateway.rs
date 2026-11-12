@@ -4,14 +4,13 @@
 
 use std::time::Duration;
 
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::config::GatewayConfig;
+use crate::reconnect::{jittered, Backoff};
 
 /// Sent once, right after connecting, so the gateway knows which site this
 /// connection belongs to. Framed as NDJSON because it is simple and easy to
@@ -55,57 +54,6 @@ pub(crate) fn resolve(cfg: &GatewayConfig) -> Result<Option<(String, Uuid)>, Str
 /// gap. A malformed `be_id` already fails in `Uuid`'s `Deserialize`.
 fn require_be_id(be_id: Option<Uuid>) -> Result<Uuid, String> {
     be_id.ok_or_else(|| "[gateway] be_id must be set when [gateway] url is configured".into())
-}
-
-/// Exponential backoff capped at `max` (jitter is added by [`jittered`]).
-/// Like `vms_media::camera_stream::ReconnectPolicy`, the delay only resets
-/// after a connection has stayed up for a while, so a flapping connection
-/// keeps backing off instead of hot-looping.
-struct Backoff {
-    base: Duration,
-    max: Duration,
-    /// How long a connection must stay up before the next failure starts a
-    /// fresh failure streak.
-    stable_uptime: Duration,
-    connected_at: Instant,
-    delay: Duration,
-}
-
-impl Backoff {
-    fn new(base: Duration, max: Duration, stable_uptime: Duration) -> Self {
-        Self {
-            base,
-            max,
-            stable_uptime,
-            connected_at: Instant::now(),
-            delay: base,
-        }
-    }
-
-    /// Call once per failed or dropped connection to get the next delay.
-    /// Deterministic so it can be tested exactly; the caller adds jitter.
-    fn next_delay(&mut self) -> Duration {
-        if self.connected_at.elapsed() >= self.stable_uptime {
-            self.delay = self.base;
-        }
-        let delay = self.delay;
-        self.delay = (self.delay * 2).min(self.max);
-        delay
-    }
-
-    /// Starts the uptime clock that `next_delay` checks. It doesn't reset
-    /// `delay`, because only a stable connection counts as recovery.
-    fn record_connected(&mut self) {
-        self.connected_at = Instant::now();
-    }
-}
-
-/// Applies up to ±20% jitter to `delay` so BEs reconnecting to the same
-/// gateway after a shared outage don't retry in lockstep.
-fn jittered(delay: Duration) -> Duration {
-    let jitter_range = delay.as_secs_f64() * 0.2;
-    let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
-    Duration::from_secs_f64((delay.as_secs_f64() + jitter).max(0.0))
 }
 
 /// Runs until `shutdown` resolves, reconnecting with backoff after any
@@ -210,56 +158,6 @@ mod tests {
             Duration::from_millis(80),
             Duration::from_millis(200),
         )
-    }
-
-    // -- Backoff --
-
-    #[tokio::test(start_paused = true)]
-    async fn first_failure_uses_base_delay() {
-        let mut backoff = test_backoff();
-        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn repeated_quick_failures_escalate_and_cap() {
-        let mut backoff = test_backoff();
-        let expected_ms = [10u64, 20, 40, 80, 80, 80];
-        for expected in expected_ms {
-            assert_eq!(backoff.next_delay().as_millis() as u64, expected);
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stable_uptime_resets_backoff_to_base() {
-        let mut backoff = test_backoff();
-        backoff.next_delay();
-        backoff.next_delay();
-        backoff.next_delay(); // escalated past base by now
-
-        backoff.record_connected();
-        tokio::time::advance(Duration::from_millis(201)).await;
-
-        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn short_uptime_does_not_reset_backoff() {
-        let mut backoff = test_backoff();
-        backoff.next_delay(); // returns 10ms, escalates internal state to 20ms
-
-        backoff.record_connected();
-        tokio::time::advance(Duration::from_millis(100)).await; // < stable_uptime
-
-        assert_eq!(backoff.next_delay().as_millis() as u64, 20);
-    }
-
-    #[test]
-    fn jitter_stays_within_twenty_percent_and_never_negative() {
-        let base = Duration::from_secs(10);
-        for _ in 0..1000 {
-            let d = jittered(base);
-            assert!(d.as_secs_f64() >= 8.0 && d.as_secs_f64() <= 12.0);
-        }
     }
 
     // -- Connection lifecycle against a local mock acceptor --

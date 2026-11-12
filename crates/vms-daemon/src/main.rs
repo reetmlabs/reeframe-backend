@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod gateway;
+mod reconnect;
 
 use std::path::PathBuf;
 use std::sync::Arc;
