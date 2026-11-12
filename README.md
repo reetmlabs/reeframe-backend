@@ -115,6 +115,8 @@ In Docker, set `VMS_RTSP__PUBLIC_HOST` to the Docker host's address so `restream
 
 For scripts and other services, mint a long-lived API key with `vms-daemon token generate`.
 
+To connect the backend to a Reeframe Coordinator, create an enrollment code for its site there, then run `sudo -u reeframe vms-daemon enroll --coordinator https://coordinator.example.com --code <code>` on the host (in Docker: `docker exec <container> vms-daemon enroll ...`). It writes the site identity to `site_identity.json` in the working directory and prints the settings that are still needed.
+
 ## Building from source
 
 Requires stable Rust and GStreamer 1.20 or newer. On Debian or Ubuntu:

@@ -5,14 +5,17 @@
 //! [`vms_db::ApiKeyRepo`] token, and exits without starting media, pipelines
 //! or the HTTP server. This lets an operator provision a credential for the
 //! FE (or any other client) from a shell on the host, without logging in
-//! through the HTTP API first.
+//! through the HTTP API first. `vms-daemon enroll ...` registers this backend
+//! with a Coordinator.
+
+use std::path::Path;
 
 use clap::{Args, Parser, Subcommand};
 use sea_orm::Database;
 use uuid::Uuid;
 use vms_db::{entities::user, repos::api_key::CreateApiKey, ApiKeyRepo, UserRepo};
 
-use crate::config;
+use crate::{config, enroll};
 
 #[derive(Parser)]
 #[command(name = "vms-daemon", version, about = "Reeframe VMS daemon")]
@@ -28,6 +31,21 @@ pub enum Command {
         #[command(subcommand)]
         action: TokenAction,
     },
+    /// Register this backend with a Coordinator using a one-time enrollment code.
+    Enroll(EnrollArgs),
+}
+
+#[derive(Args)]
+pub struct EnrollArgs {
+    /// Base URL of the Coordinator, for example https://coordinator.example.com.
+    #[arg(long)]
+    pub coordinator: String,
+    /// The enrollment code an admin created for this site in the Coordinator.
+    #[arg(long)]
+    pub code: String,
+    /// Replace an existing site identity with a new key.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Subcommand)]
@@ -60,11 +78,17 @@ pub struct TokenListArgs {
 
 pub async fn run(command: Command) -> anyhow::Result<()> {
     let cfg = config::load().map_err(|e| anyhow::anyhow!(e))?;
-    let db = Database::connect(&cfg.database.url).await?;
+    match command {
+        Command::Token { action } => run_token(&cfg.database.url, action).await,
+        Command::Enroll(args) => enroll::run(args, Path::new(&cfg.identity.path)).await,
+    }
+}
+
+async fn run_token(database_url: &str, action: TokenAction) -> anyhow::Result<()> {
+    let db = Database::connect(database_url).await?;
     let user_repo = UserRepo::new(db.clone());
     let api_key_repo = ApiKeyRepo::new(db);
 
-    let Command::Token { action } = command;
     match action {
         TokenAction::Generate(args) => generate(&user_repo, &api_key_repo, args).await,
         TokenAction::List(args) => list(&user_repo, &api_key_repo, args).await,
