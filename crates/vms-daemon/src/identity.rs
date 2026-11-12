@@ -103,3 +103,92 @@ pub fn resolve_be_id(
         (None, configured) => Ok(configured),
     }
 }
+
+// -- Tests --
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vms-identity-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_saved_identity_loads_back_with_the_same_key() {
+        let dir = scratch_dir();
+        let path = dir.join("site_identity.json");
+        let key = SigningKey::generate(&mut OsRng);
+        let be_id = Uuid::new_v4();
+
+        save(
+            &path,
+            &SiteIdentity::new(be_id, "https://c.example".into(), &key),
+        )
+        .unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+
+        assert_eq!(loaded.be_id, be_id);
+        assert_eq!(loaded.coordinator_url, "https://c.example");
+        assert_eq!(loaded.signing_key().unwrap().to_bytes(), key.to_bytes());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn only_the_owner_can_read_the_file_even_over_a_leftover_temp_file() {
+        let dir = scratch_dir();
+        let path = dir.join("site_identity.json");
+        fs::write(temp_path(&path), "left over").unwrap();
+        fs::set_permissions(temp_path(&path), Permissions::from_mode(0o644)).unwrap();
+
+        let key = SigningKey::generate(&mut OsRng);
+        save(&path, &SiteIdentity::new(Uuid::new_v4(), "u".into(), &key)).unwrap();
+
+        assert_eq!(mode(&path), 0o600);
+        assert!(!temp_path(&path).exists());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_missing_file_is_no_identity_and_a_broken_one_is_an_error() {
+        let dir = scratch_dir();
+        let path = dir.join("site_identity.json");
+        assert!(load(&path).unwrap().is_none());
+
+        fs::write(&path, "not json").unwrap();
+        assert!(load(&path).is_err());
+
+        fs::write(
+            &path,
+            format!(
+                r#"{{"be_id":"{}","coordinator_url":"u","seed_b64":"c2hvcnQ="}}"#,
+                Uuid::new_v4()
+            ),
+        )
+        .unwrap();
+        assert!(load(&path).is_err());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_enrolled_be_id_wins_and_a_conflicting_config_is_an_error() {
+        let enrolled = Uuid::new_v4();
+        let configured = Uuid::new_v4();
+
+        assert_eq!(resolve_be_id(Some(enrolled), None), Ok(Some(enrolled)));
+        assert_eq!(
+            resolve_be_id(Some(enrolled), Some(enrolled)),
+            Ok(Some(enrolled))
+        );
+        assert_eq!(resolve_be_id(None, Some(configured)), Ok(Some(configured)));
+        assert_eq!(resolve_be_id(None, None), Ok(None));
+        assert!(resolve_be_id(Some(enrolled), Some(configured)).is_err());
+    }
+}
