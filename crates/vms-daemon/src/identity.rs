@@ -86,3 +86,20 @@ fn temp_path(path: &Path) -> PathBuf {
     name.push(".tmp");
     PathBuf::from(name)
 }
+
+/// Picks the `be_id` this backend runs as: the enrolled identity first, the
+/// configured `coordinator.be_id` otherwise. Two different values mean the
+/// config points at another site than the key, so that is an error.
+pub fn resolve_be_id(
+    enrolled: Option<Uuid>,
+    configured: Option<Uuid>,
+) -> Result<Option<Uuid>, String> {
+    match (enrolled, configured) {
+        (Some(enrolled), Some(configured)) if enrolled != configured => Err(format!(
+            "the site identity is enrolled as {enrolled}, but [coordinator] be_id is {configured}. \
+             Remove [coordinator] be_id or enroll again"
+        )),
+        (Some(enrolled), _) => Ok(Some(enrolled)),
+        (None, configured) => Ok(configured),
+    }
+}

@@ -6,7 +6,7 @@ mod identity;
 #[allow(dead_code)]
 mod reconnect;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -145,6 +145,17 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Auth provider ready (local JWT)");
 
+    // -- Site identity --
+    let identity = identity::load(Path::new(&cfg.identity.path)).map_err(|e| {
+        tracing::error!(error = %e, "Cannot load the site identity");
+        e
+    })?;
+    let be_id =
+        identity::resolve_be_id(identity.map(|i| i.be_id), cfg.coordinator.be_id).map_err(|e| {
+            tracing::error!(error = %e, "Conflicting site IDs");
+            anyhow::anyhow!(e)
+        })?;
+
     // Local auth stays active in every `mode`. Trusting Coordinator tokens
     // is added on top, and the BE works without any `jwks_url`.
     let coordinator_auth_provider = if cfg.auth.mode == "oidc" {
@@ -152,12 +163,13 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("[auth] mode = \"oidc\" requires [auth] jwks_url to be set");
             anyhow::anyhow!("missing jwks_url for oidc auth mode")
         })?;
-        let be_id = cfg.coordinator.be_id.ok_or_else(|| {
+        let be_id = be_id.ok_or_else(|| {
             tracing::error!(
-                "[auth] mode = \"oidc\" requires [coordinator] be_id to be set, it's the expected \
-                 `aud` for every Coordinator-issued token this BE accepts"
+                "[auth] mode = \"oidc\" requires a site ID, the expected `aud` for every \
+                 Coordinator-issued token this BE accepts. Run `vms-daemon enroll` or set \
+                 [coordinator] be_id"
             );
-            anyhow::anyhow!("missing coordinator.be_id for oidc auth mode")
+            anyhow::anyhow!("missing site ID for oidc auth mode")
         })?;
         let provider = Arc::new(CoordinatorJwksAuthProvider::new(
             jwks_url.clone(),
