@@ -1,8 +1,12 @@
 mod cli;
 mod config;
-mod gateway;
+mod enroll;
+mod identity;
+// TODO(#41): the control channel client uses this; unused until then.
+#[allow(dead_code)]
+mod reconnect;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -36,8 +40,7 @@ use vms_sources::SourceManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // A subcommand (only `token ...` so far) connects to the DB, does one
-    // thing and exits. With no subcommand the full daemon starts, which is
+    // A subcommand (`token ...` or `enroll ...`) does one thing and exits. With no subcommand the full daemon starts, which is
     // how systemd and docker invoke the binary.
     if let Some(command) = cli::Cli::parse().command {
         return cli::run(command).await;
@@ -142,6 +145,17 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Auth provider ready (local JWT)");
 
+    // -- Site identity --
+    let identity = identity::load(Path::new(&cfg.identity.path)).map_err(|e| {
+        tracing::error!(error = %e, "Cannot load the site identity");
+        e
+    })?;
+    let be_id =
+        identity::resolve_be_id(identity.map(|i| i.be_id), cfg.coordinator.be_id).map_err(|e| {
+            tracing::error!(error = %e, "Conflicting site IDs");
+            anyhow::anyhow!(e)
+        })?;
+
     // Local auth stays active in every `mode`. Trusting Coordinator tokens
     // is added on top, and the BE works without any `jwks_url`.
     let coordinator_auth_provider = if cfg.auth.mode == "oidc" {
@@ -149,12 +163,13 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("[auth] mode = \"oidc\" requires [auth] jwks_url to be set");
             anyhow::anyhow!("missing jwks_url for oidc auth mode")
         })?;
-        let be_id = cfg.gateway.be_id.ok_or_else(|| {
+        let be_id = be_id.ok_or_else(|| {
             tracing::error!(
-                "[auth] mode = \"oidc\" requires [gateway] be_id to be set, it's the expected \
-                 `aud` for every Coordinator-issued token this BE accepts"
+                "[auth] mode = \"oidc\" requires a site ID, the expected `aud` for every \
+                 Coordinator-issued token this BE accepts. Run `vms-daemon enroll` or set \
+                 [coordinator] be_id"
             );
-            anyhow::anyhow!("missing gateway.be_id for oidc auth mode")
+            anyhow::anyhow!("missing site ID for oidc auth mode")
         })?;
         let provider = Arc::new(CoordinatorJwksAuthProvider::new(
             jwks_url.clone(),
@@ -172,20 +187,6 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-
-    // -- Gateway (tunnel client for mobile app pairing) --
-    // With no `[gateway] url` (the default), no connection is attempted.
-    let gateway_task = gateway::resolve(&cfg.gateway)
-        .map_err(|e| {
-            tracing::error!(error = %e, "Invalid gateway configuration");
-            anyhow::anyhow!(e)
-        })?
-        .map(|(url, be_id)| {
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            tracing::info!(url = %url, %be_id, "Gateway client starting");
-            let join_handle = tokio::spawn(gateway::run(url, be_id, shutdown_rx));
-            (shutdown_tx, join_handle)
-        });
 
     // -- Crypto --
     let crypto = Crypto::from_b64(&cfg.encryption_key).map_err(|e| {
@@ -633,13 +634,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!(error = %e, "Error during media manager shutdown");
         anyhow::anyhow!(e)
     })?;
-
-    // -- Graceful shutdown: gateway client --
-    if let Some((shutdown_tx, join_handle)) = gateway_task {
-        let _ = shutdown_tx.send(());
-        join_handle.await.ok();
-        tracing::info!("Gateway client stopped");
-    }
 
     tracing::info!("VMS Daemon stopped");
     Ok(())
