@@ -1,27 +1,23 @@
-//! The control channel client: one QUIC connection to the Coordinator,
-//! authenticated with the site key, kept alive with pings and opened again
-//! whenever it is lost.
+//! The control channel client: one connection to the Coordinator, over QUIC
+//! or, where UDP is blocked, over a WebSocket. Authenticated with the site
+//! key, kept alive with pings and opened again whenever it is lost.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+mod quic;
+mod wss;
+
 use std::time::Duration;
 
 use anyhow::Context;
-use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::SigningKey;
-use futures::stream::{FuturesUnordered, StreamExt};
-use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{Connection, ConnectionError, Endpoint};
-use rand::seq::SliceRandom;
-use reeframe_protocol::{read_message, write_message, CloseReason, Message, ALPN};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use reeframe_protocol::{CloseReason, Message, NONCE_TTL};
 use rustls::RootCertStore;
 use tokio::time::{interval_at, sleep, sleep_until, timeout, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
+use crate::proxy::OutboundProxy;
 use crate::reconnect::{jittered, Backoff};
 
-/// Where the control channel connects to. `host` is also the TLS server name.
+/// A host and port to connect to. `host` is also the TLS server name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Target {
     pub host: String,
@@ -29,19 +25,12 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    /// Parses `control_addr` (`host:port`). An empty one means the host of
-    /// `coordinator_url` on port 443.
-    pub(crate) fn resolve(control_addr: &str, coordinator_url: &str) -> anyhow::Result<Self> {
+    /// The QUIC target: `control_addr` (`host:port`), or when it is empty
+    /// the host of `coordinator_url` on port 443.
+    pub(crate) fn quic(control_addr: &str, coordinator_url: &str) -> anyhow::Result<Self> {
         if control_addr.is_empty() {
-            let url = reqwest::Url::parse(coordinator_url)
-                .with_context(|| format!("coordinator URL {coordinator_url:?} is not a URL"))?;
-            let host = url
-                .host_str()
-                .with_context(|| format!("coordinator URL {coordinator_url:?} has no host"))?;
-            return Ok(Self {
-                host: unbracket(host).to_owned(),
-                port: 443,
-            });
+            let (host, _) = url_host_port(coordinator_url)?;
+            return Ok(Self { host, port: 443 });
         }
         let (host, port) = control_addr
             .rsplit_once(':')
@@ -58,6 +47,26 @@ impl Target {
             port,
         })
     }
+
+    /// The WebSocket target: host and port of `coordinator_url`, port 443
+    /// when it has none. `control_addr` does not apply, since the WebSocket
+    /// goes through the same HTTPS front as the rest of the Coordinator.
+    pub(crate) fn wss(coordinator_url: &str) -> anyhow::Result<Self> {
+        let (host, port) = url_host_port(coordinator_url)?;
+        Ok(Self {
+            host,
+            port: port.unwrap_or(443),
+        })
+    }
+}
+
+fn url_host_port(coordinator_url: &str) -> anyhow::Result<(String, Option<u16>)> {
+    let url = reqwest::Url::parse(coordinator_url)
+        .with_context(|| format!("coordinator URL {coordinator_url:?} is not a URL"))?;
+    let host = url
+        .host_str()
+        .with_context(|| format!("coordinator URL {coordinator_url:?} has no host"))?;
+    Ok((unbracket(host).to_owned(), url.port()))
 }
 
 /// IPv6 literals are written `[::1]` in URLs and addresses, but resolved and
@@ -75,10 +84,14 @@ pub(crate) struct Timings {
     pub ping_interval: Duration,
     /// Silence after which the connection counts as dead.
     pub silence_timeout: Duration,
-    /// Gap between connection attempts to the next address of the host.
+    /// Gap between QUIC attempts to the next address of the host.
     pub race_stagger: Duration,
-    /// Limit for resolving and connecting to all addresses.
+    /// Time QUIC gets before the WebSocket is tried instead.
+    pub quic_fallback_after: Duration,
+    /// Limit for resolving and connecting, per transport.
     pub connect_timeout: Duration,
+    /// Limit for each step of the WebSocket login.
+    pub login_timeout: Duration,
     pub retry_base: Duration,
     pub retry_max: Duration,
     /// Uptime after which a lost connection counts as recovered, so the
@@ -92,7 +105,9 @@ impl Default for Timings {
             ping_interval: Duration::from_secs(15),
             silence_timeout: Duration::from_secs(45),
             race_stagger: Duration::from_millis(250),
+            quic_fallback_after: Duration::from_secs(3),
             connect_timeout: Duration::from_secs(10),
+            login_timeout: NONCE_TTL,
             retry_base: Duration::from_secs(1),
             retry_max: Duration::from_secs(60),
             stable_uptime: Duration::from_secs(30),
@@ -110,23 +125,23 @@ pub(crate) fn web_pki_roots() -> RootCertStore {
 
 /// A control channel client, ready to [`run`](Self::run).
 pub(crate) struct ControlClient {
-    endpoint: Endpoint,
-    target: Target,
+    quic: quic::Transport,
+    wss: wss::Transport,
     timings: Timings,
 }
 
 impl ControlClient {
     pub(crate) fn new(
         key: &SigningKey,
-        target: Target,
+        quic_target: Target,
+        wss_target: Target,
+        proxy: Option<OutboundProxy>,
         roots: RootCertStore,
         timings: Timings,
     ) -> anyhow::Result<Self> {
-        let mut endpoint = client_endpoint()?;
-        endpoint.set_default_client_config(client_config(key, roots)?);
         Ok(Self {
-            endpoint,
-            target,
+            quic: quic::Transport::new(key, quic_target, roots.clone())?,
+            wss: wss::Transport::new(key, wss_target, proxy, roots)?,
             timings,
         })
     }
@@ -145,12 +160,16 @@ impl ControlClient {
                 connected = self.connect() => connected,
             };
             let end = match connected {
-                Ok((connection, addr)) => {
+                Ok(mut channel) => {
                     backoff.record_connected();
-                    tracing::info!(host = %self.target.host, %addr, "Control channel connected");
-                    session(&connection, &self.timings, &shutdown).await
+                    tracing::info!(
+                        transport = channel.transport(),
+                        peer = %channel.peer(),
+                        "Control channel connected"
+                    );
+                    session(&mut channel, &self.timings, &shutdown).await
                 }
-                Err(e) => SessionEnd::ConnectFailed(e),
+                Err(end) => end,
             };
             if matches!(end, SessionEnd::Shutdown) {
                 break;
@@ -162,114 +181,91 @@ impl ControlClient {
                 _ = sleep(delay) => {}
             }
         }
-        self.endpoint
-            .close(CloseReason::Closed.code().into(), b"shutdown");
-        // Gives the close frame a moment to reach the Coordinator.
-        let _ = timeout(Duration::from_secs(1), self.endpoint.wait_idle()).await;
+        self.quic.shutdown().await;
         tracing::info!("Control channel stopped");
     }
 
-    async fn connect(&self) -> anyhow::Result<(Connection, SocketAddr)> {
-        let attempt = async {
-            let mut addrs: Vec<SocketAddr> =
-                tokio::net::lookup_host((self.target.host.as_str(), self.target.port))
-                    .await
-                    .with_context(|| format!("cannot resolve {}", self.target.host))?
-                    .collect();
-            addrs.shuffle(&mut rand::thread_rng());
-            race(
-                &self.endpoint,
-                addrs,
-                &self.target.host,
-                self.timings.race_stagger,
-            )
-            .await
+    /// QUIC first on every attempt; the WebSocket only when no QUIC handshake
+    /// completes within `quic_fallback_after`.
+    async fn connect(&self) -> Result<Channel, SessionEnd> {
+        let quic = timeout(
+            self.timings.quic_fallback_after,
+            self.quic.connect(&self.timings),
+        )
+        .await;
+        let quic_error = match quic {
+            Ok(Ok(channel)) => return Ok(Channel::Quic(channel)),
+            Ok(Err(SessionEnd::ConnectFailed(e))) => format!("{e:#}"),
+            Ok(Err(end)) => return Err(end),
+            Err(_) => "no handshake in time".to_owned(),
         };
-        timeout(self.timings.connect_timeout, attempt)
+        tracing::debug!(error = quic_error, "QUIC unavailable, trying the WebSocket");
+        self.wss
+            .connect(&self.timings)
             .await
-            .unwrap_or_else(|_| {
-                Err(anyhow::anyhow!(
-                    "no address of {} answered in time",
-                    self.target.host
-                ))
-            })
+            .map(|channel| Channel::Wss(Box::new(channel)))
     }
 }
 
-/// A UDP endpoint for both address families where the host has IPv6, so
-/// racing can try every resolved address.
-fn client_endpoint() -> anyhow::Result<Endpoint> {
-    Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into())
-        .or_else(|_| Endpoint::client((std::net::Ipv4Addr::UNSPECIFIED, 0).into()))
-        .context("cannot open a UDP socket for the control channel")
+/// An open control channel on either transport.
+enum Channel {
+    Quic(quic::Channel),
+    // Boxed because the WebSocket and TLS state make it much larger.
+    Wss(Box<wss::Channel>),
 }
 
-/// TLS 1.3 with the site key as client certificate. The Coordinator only
-/// looks at the key, so the certificate is self-signed and its names do not
-/// matter.
-fn client_config(key: &SigningKey, roots: RootCertStore) -> anyhow::Result<quinn::ClientConfig> {
-    let pkcs8 = key.to_pkcs8_der()?;
-    let key_pair = rcgen::KeyPair::try_from(pkcs8.as_bytes())?;
-    let cert =
-        rcgen::CertificateParams::new(vec!["reeframe-backend".into()])?.self_signed(&key_pair)?;
-    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8.as_bytes().to_vec()));
-
-    // Chosen explicitly because the dependency tree also enables aws-lc-rs,
-    // and rustls refuses to guess between two installed providers.
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_root_certificates(roots)
-        .with_client_auth_cert(vec![CertificateDer::from(cert.der().to_vec())], private_key)?;
-    tls.alpn_protocols = vec![ALPN.to_vec()];
-    tls.enable_early_data = false;
-    Ok(quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(tls)?,
-    )))
+/// What a channel received.
+enum Received {
+    Message(Message),
+    /// Traffic that carries no message, like a WebSocket ping. It still
+    /// shows the connection is alive.
+    Other,
+    /// The channel ended; the session asks the transport why.
+    Ended(String),
 }
 
-/// Connects to the first address that completes a handshake. Attempts start
-/// `stagger` apart, or at once when the previous one failed, so an address
-/// that never answers costs only `stagger`. Losing attempts are dropped,
-/// which closes them.
-async fn race(
-    endpoint: &Endpoint,
-    addrs: Vec<SocketAddr>,
-    server_name: &str,
-    stagger: Duration,
-) -> anyhow::Result<(Connection, SocketAddr)> {
-    let attempt = |addr: SocketAddr| async move {
-        let connecting = endpoint
-            .connect(addr, server_name)
-            .with_context(|| format!("cannot connect to {addr}"))?;
-        let connection = connecting
-            .await
-            .with_context(|| format!("handshake with {addr} failed"))?;
-        anyhow::Ok((connection, addr))
-    };
-
-    let mut addrs = addrs.into_iter();
-    let mut attempts = FuturesUnordered::new();
-    let mut last_error = anyhow::anyhow!("{server_name} resolved to no address");
-    loop {
-        if attempts.is_empty() {
-            match addrs.next() {
-                Some(addr) => attempts.push(attempt(addr)),
-                None => return Err(last_error),
-            }
+impl Channel {
+    fn transport(&self) -> &'static str {
+        match self {
+            Self::Quic(_) => "quic",
+            Self::Wss(_) => "wss",
         }
-        let more = addrs.len() > 0;
-        tokio::select! {
-            result = attempts.next() => match result {
-                Some(Ok(won)) => return Ok(won),
-                Some(Err(e)) => last_error = e,
-                None => {}
-            },
-            _ = sleep(stagger), if more => {
-                if let Some(addr) = addrs.next() {
-                    attempts.push(attempt(addr));
-                }
-            }
+    }
+
+    fn peer(&self) -> String {
+        match self {
+            Self::Quic(channel) => channel.peer(),
+            Self::Wss(channel) => channel.peer(),
+        }
+    }
+
+    async fn send(&mut self, message: &Message) -> Result<(), String> {
+        match self {
+            Self::Quic(channel) => channel.send(message).await,
+            Self::Wss(channel) => channel.send(message).await,
+        }
+    }
+
+    /// Cancel safe, so it can sit in a `select!` next to timers.
+    async fn recv(&mut self) -> Received {
+        match self {
+            Self::Quic(channel) => channel.recv().await,
+            Self::Wss(channel) => channel.recv().await,
+        }
+    }
+
+    async fn close(&mut self, reason: CloseReason) {
+        match self {
+            Self::Quic(channel) => channel.close(reason),
+            Self::Wss(channel) => channel.close(reason).await,
+        }
+    }
+
+    /// Why the channel ended after a failed send or receive.
+    async fn end(&mut self, error: String) -> SessionEnd {
+        match self {
+            Self::Quic(channel) => channel.end(error).await,
+            Self::Wss(channel) => channel.end(error),
         }
     }
 }
@@ -279,8 +275,12 @@ async fn race(
 enum SessionEnd {
     Shutdown,
     ConnectFailed(anyhow::Error),
-    /// The Coordinator closed the connection with this application code.
-    ClosedByServer(u32),
+    /// The Coordinator closed the connection. `code` is the code on the
+    /// wire, `reason` its meaning if this version knows it.
+    ClosedByServer {
+        code: u32,
+        reason: Option<CloseReason>,
+    },
     /// The connection broke for any other reason.
     Lost(String),
     /// Nothing arrived within the silence timeout.
@@ -288,10 +288,24 @@ enum SessionEnd {
 }
 
 impl SessionEnd {
+    fn quic_close(code: u32) -> Self {
+        Self::ClosedByServer {
+            code,
+            reason: CloseReason::from_code(code),
+        }
+    }
+
+    fn ws_close(code: u16) -> Self {
+        Self::ClosedByServer {
+            code: code.into(),
+            reason: CloseReason::from_ws_code(code),
+        }
+    }
+
     fn log(&self, delay: Duration) {
         let retry_in_secs = delay.as_secs_f64();
         match self {
-            Self::ClosedByServer(code) => match CloseReason::from_code(*code) {
+            Self::ClosedByServer { code, reason } => match reason {
                 Some(
                     reason @ (CloseReason::UnknownKey
                     | CloseReason::Replaced
@@ -330,11 +344,10 @@ impl SessionEnd {
 fn retry_delay(end: &SessionEnd, backoff: &mut Backoff, retry_max: Duration) -> Duration {
     let refused = matches!(
         end,
-        SessionEnd::ClosedByServer(code)
-            if matches!(
-                CloseReason::from_code(*code),
-                Some(CloseReason::UnknownKey | CloseReason::Replaced | CloseReason::Revoked)
-            )
+        SessionEnd::ClosedByServer {
+            reason: Some(CloseReason::UnknownKey | CloseReason::Replaced | CloseReason::Revoked),
+            ..
+        }
     );
     if refused {
         retry_max
@@ -343,31 +356,13 @@ fn retry_delay(end: &SessionEnd, backoff: &mut Backoff, retry_max: Duration) -> 
     }
 }
 
-/// Runs one connection: opens the control stream, pings, and watches for
-/// silence until the connection ends or `shutdown` is cancelled.
+/// Runs one open channel: pings, and watches for silence until the channel
+/// ends or `shutdown` is cancelled.
 async fn session(
-    connection: &Connection,
+    channel: &mut Channel,
     timings: &Timings,
     shutdown: &CancellationToken,
 ) -> SessionEnd {
-    let (mut send, recv) = match connection.open_bi().await {
-        Ok(streams) => streams,
-        Err(e) => return connection_end(connection, e.to_string()).await,
-    };
-    // The Coordinator only sees the stream once data is sent on it, so the
-    // first ping goes out right away.
-    if let Err(e) = write_message(&mut send, &Message::Ping).await {
-        return connection_end(connection, e.to_string()).await;
-    }
-
-    // A stream keeps a partly read frame across `select!` iterations, unlike a
-    // `read_message` future that a firing timer would drop.
-    let messages = futures::stream::unfold(recv, |mut recv| async move {
-        let message = read_message(&mut recv).await.transpose()?;
-        Some((message, recv))
-    });
-    tokio::pin!(messages);
-
     let mut ping = interval_at(
         Instant::now() + timings.ping_interval,
         timings.ping_interval,
@@ -378,46 +373,26 @@ async fn session(
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
-                connection.close(CloseReason::Closed.code().into(), CloseReason::Closed.text().as_bytes());
+                channel.close(CloseReason::Closed).await;
                 return SessionEnd::Shutdown;
             }
             _ = ping.tick() => {
-                if let Err(e) = write_message(&mut send, &Message::Ping).await {
-                    return connection_end(connection, e.to_string()).await;
+                if let Err(e) = channel.send(&Message::Ping).await {
+                    return channel.end(e).await;
                 }
             }
-            message = messages.next() => match message {
-                Some(Ok(message)) => {
+            received = channel.recv() => match received {
+                Received::Message(message) => {
                     deadline = Instant::now() + timings.silence_timeout;
                     tracing::trace!(?message, "Control message received");
                 }
-                Some(Err(e)) => return connection_end(connection, e.to_string()).await,
-                None => return connection_end(connection, "stream finished".into()).await,
+                Received::Other => deadline = Instant::now() + timings.silence_timeout,
+                Received::Ended(e) => return channel.end(e).await,
             },
             _ = sleep_until(deadline) => {
-                connection.close(CloseReason::Timeout.code().into(), CloseReason::Timeout.text().as_bytes());
+                channel.close(CloseReason::Timeout).await;
                 return SessionEnd::Silent;
             }
-        }
-    }
-}
-
-/// Turns a failed read or write into the reason the connection ended. A
-/// stream error usually arrives just before the close itself, so this waits
-/// briefly for the close code.
-async fn connection_end(connection: &Connection, error: String) -> SessionEnd {
-    let closed = timeout(Duration::from_secs(1), connection.closed()).await;
-    match closed {
-        Ok(ConnectionError::ApplicationClosed(close)) => {
-            match u32::try_from(close.error_code.into_inner()) {
-                Ok(code) => SessionEnd::ClosedByServer(code),
-                Err(_) => SessionEnd::Lost(format!("closed with code {}", close.error_code)),
-            }
-        }
-        Ok(other) => SessionEnd::Lost(other.to_string()),
-        Err(_) => {
-            connection.close(CloseReason::Protocol.code().into(), error.as_bytes());
-            SessionEnd::Lost(error)
         }
     }
 }

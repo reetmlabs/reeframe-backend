@@ -1,13 +1,16 @@
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use ed25519_dalek::VerifyingKey;
 use quinn::crypto::rustls::QuicServerConfig;
+use quinn::{Connection, ConnectionError, Endpoint};
 use rand::rngs::OsRng;
+use reeframe_protocol::{read_message, write_message, ALPN};
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::UnixTime;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use tokio::task::JoinHandle;
@@ -18,7 +21,7 @@ use super::*;
 
 #[test]
 fn an_empty_control_addr_uses_the_coordinator_host_on_443() {
-    let target = Target::resolve("", "https://coordinator.example:8443/api").unwrap();
+    let target = Target::quic("", "https://coordinator.example:8443/api").unwrap();
     assert_eq!(
         target,
         Target {
@@ -27,16 +30,16 @@ fn an_empty_control_addr_uses_the_coordinator_host_on_443() {
         }
     );
 
-    let target = Target::resolve("", "https://[2001:db8::1]/").unwrap();
+    let target = Target::quic("", "https://[2001:db8::1]/").unwrap();
     assert_eq!(target.host, "2001:db8::1");
     assert_eq!(target.port, 443);
 
-    assert!(Target::resolve("", "not a url").is_err());
+    assert!(Target::quic("", "not a url").is_err());
 }
 
 #[test]
 fn a_set_control_addr_wins_over_the_coordinator_url() {
-    let target = Target::resolve("control.example:4433", "https://coordinator.example").unwrap();
+    let target = Target::quic("control.example:4433", "https://coordinator.example").unwrap();
     assert_eq!(
         target,
         Target {
@@ -45,12 +48,31 @@ fn a_set_control_addr_wins_over_the_coordinator_url() {
         }
     );
 
-    let target = Target::resolve("[::1]:4433", "https://coordinator.example").unwrap();
+    let target = Target::quic("[::1]:4433", "https://coordinator.example").unwrap();
     assert_eq!(target.host, "::1");
 
-    assert!(Target::resolve("control.example", "https://c.example").is_err());
-    assert!(Target::resolve("control.example:http", "https://c.example").is_err());
-    assert!(Target::resolve(":4433", "https://c.example").is_err());
+    assert!(Target::quic("control.example", "https://c.example").is_err());
+    assert!(Target::quic("control.example:http", "https://c.example").is_err());
+    assert!(Target::quic(":4433", "https://c.example").is_err());
+}
+
+#[test]
+fn the_websocket_goes_to_the_coordinator_url_and_ignores_control_addr() {
+    let target = Target::wss("https://coordinator.example/api").unwrap();
+    assert_eq!(
+        target,
+        Target {
+            host: "coordinator.example".into(),
+            port: 443
+        }
+    );
+    assert_eq!(
+        Target::wss("https://coordinator.example:8443")
+            .unwrap()
+            .port,
+        8443
+    );
+    assert!(Target::wss("not a url").is_err());
 }
 
 // -- Retry delay --
@@ -61,15 +83,27 @@ async fn refusals_retry_at_the_maximum_and_everything_else_backs_off_normally() 
     let backoff = || Backoff::new(Duration::from_secs(1), max, Duration::from_secs(30));
 
     for code in [1, 2, 4] {
-        let delay = retry_delay(&SessionEnd::ClosedByServer(code), &mut backoff(), max);
-        assert_eq!(delay, max, "close code {code}");
+        let delay = retry_delay(&SessionEnd::quic_close(code), &mut backoff(), max);
+        assert_eq!(delay, max, "QUIC close code {code}");
+    }
+    for code in [4001, 4002, 4004] {
+        let delay = retry_delay(&SessionEnd::ws_close(code), &mut backoff(), max);
+        assert_eq!(delay, max, "WebSocket close code {code}");
     }
 
     let others = [
-        SessionEnd::ClosedByServer(0),
-        SessionEnd::ClosedByServer(3),
-        SessionEnd::ClosedByServer(5),
-        SessionEnd::ClosedByServer(99),
+        SessionEnd::quic_close(0),
+        SessionEnd::quic_close(3),
+        SessionEnd::quic_close(5),
+        SessionEnd::quic_close(99),
+        SessionEnd::ws_close(1000),
+        SessionEnd::ws_close(1006),
+        SessionEnd::ws_close(4000),
+        SessionEnd::ws_close(4003),
+        SessionEnd::ws_close(4005),
+        SessionEnd::ws_close(4099),
+        // QUIC codes arriving as WebSocket codes must not count as refusals.
+        SessionEnd::ws_close(1),
         SessionEnd::Lost("reset".into()),
         SessionEnd::Silent,
         SessionEnd::ConnectFailed(anyhow::anyhow!("unreachable")),
@@ -91,12 +125,14 @@ async fn refusals_retry_at_the_maximum_and_everything_else_backs_off_normally() 
 
 // -- Against a local Coordinator stand-in --
 
-fn fast_timings() -> Timings {
+pub(super) fn fast_timings() -> Timings {
     Timings {
         ping_interval: Duration::from_millis(100),
         silence_timeout: Duration::from_millis(400),
         race_stagger: Duration::from_millis(50),
+        quic_fallback_after: Duration::from_millis(500),
         connect_timeout: Duration::from_secs(2),
+        login_timeout: Duration::from_millis(300),
         retry_base: Duration::from_millis(50),
         retry_max: Duration::from_millis(200),
         stable_uptime: Duration::from_secs(1),
@@ -295,13 +331,34 @@ impl ClientCertVerifier for AnyClientCert {
 }
 
 fn start_client(server: &TestServer, key: &SigningKey) -> (CancellationToken, JoinHandle<()>) {
-    let client = ControlClient::new(key, server.target(), server.roots(), fast_timings()).unwrap();
+    let client = ControlClient::new(
+        key,
+        server.target(),
+        unreachable_wss_target(),
+        None,
+        server.roots(),
+        fast_timings(),
+    )
+    .unwrap();
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(client.run(shutdown.clone()));
     (shutdown, task)
 }
 
-async fn wait_until(what: &str, condition: impl Fn() -> bool) {
+/// A TCP port nothing listens on, so a WebSocket fallback fails at once.
+pub(super) fn unreachable_wss_target() -> Target {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    Target {
+        host: "127.0.0.1".into(),
+        port,
+    }
+}
+
+pub(super) async fn wait_until(what: &str, condition: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !condition() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -380,12 +437,12 @@ async fn racing_skips_an_address_that_never_answers() {
 
     let mut roots = first.roots();
     roots.add(second.cert.clone()).unwrap();
-    let mut endpoint = client_endpoint().unwrap();
-    endpoint.set_default_client_config(client_config(&key, roots).unwrap());
+    let mut endpoint = quic::client_endpoint().unwrap();
+    endpoint.set_default_client_config(quic::client_config(&key, roots).unwrap());
     let addrs = vec![black_hole.local_addr().unwrap(), first.addr, second.addr];
 
     let started = Instant::now();
-    let (_connection, addr) = race(&endpoint, addrs, "localhost", Duration::from_millis(250))
+    let (_connection, addr) = quic::race(&endpoint, addrs, "localhost", Duration::from_millis(250))
         .await
         .unwrap();
 
