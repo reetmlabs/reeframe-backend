@@ -73,6 +73,8 @@ fn the_websocket_goes_to_the_coordinator_url_and_ignores_control_addr() {
         8443
     );
     assert!(Target::wss("not a url").is_err());
+    let error = Target::wss("http://coordinator.example").unwrap_err();
+    assert!(error.to_string().contains("https://"), "{error}");
 }
 
 // -- Retry delay --

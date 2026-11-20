@@ -391,4 +391,15 @@ mod tests {
         assert!(error.to_string().contains("cannot reach"), "{error:#}");
         assert!(identity::load(&path).unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn an_http_coordinator_url_is_rejected_before_any_request() {
+        let (url, _captured) = spawn_coordinator(200, r#"{"be_id":"x"}"#).await;
+        let path = scratch_identity_path();
+
+        let error = run(args(&url, false), &path, "").await.unwrap_err();
+
+        assert!(error.to_string().contains("https://"), "{error:#}");
+        assert!(identity::load(&path).unwrap().is_none());
+    }
 }

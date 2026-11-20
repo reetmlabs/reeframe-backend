@@ -135,4 +135,16 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).ok();
     }
+
+    #[test]
+    fn only_https_coordinator_urls_are_accepted() {
+        assert!(https_url("https://coordinator.example").is_ok());
+        for url in [
+            "http://coordinator.example",
+            "ws://coordinator.example",
+            "coordinator.example",
+        ] {
+            assert!(https_url(url).is_err(), "{url}");
+        }
+    }
 }
