@@ -173,6 +173,30 @@ impl Default for IdentityConfig {
     }
 }
 
+/// Outbound network access.
+#[derive(Default, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    /// HTTP proxy in the site own network that outgoing connections must go
+    /// through (HTTP CONNECT). Leave empty for direct access. This is not the
+    /// reverse proxy in front of the Coordinator. Format
+    /// `http://[user:pass@]host:port`. Set via config file or
+    /// VMS_NETWORK__OUTBOUND_PROXY_URL env var.
+    #[serde(default)]
+    pub outbound_proxy_url: String,
+}
+
+// Hand-written so the proxy password never reaches a log line.
+impl std::fmt::Debug for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkConfig")
+            .field(
+                "outbound_proxy_url",
+                &crate::proxy::redact(&self.outbound_proxy_url),
+            )
+            .finish()
+    }
+}
+
 // -- Root config --
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -185,6 +209,8 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     pub coordinator: CoordinatorConfig,
     pub identity: IdentityConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
     /// Base64-encoded 32-byte AES-256-GCM encryption key.
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
@@ -205,6 +231,7 @@ impl Default for AppConfig {
             auth: AuthConfig::default(),
             coordinator: CoordinatorConfig::default(),
             identity: IdentityConfig::default(),
+            network: NetworkConfig::default(),
             encryption_key: String::new(),
             log_level: "info".into(),
         }
@@ -244,6 +271,7 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_COORDINATOR__BE_ID`   | `coordinator.be_id`         |
 /// | `VMS_COORDINATOR__CONTROL_ADDR` | `coordinator.control_addr` |
 /// | `VMS_IDENTITY__PATH`       | `identity.path`             |
+/// | `VMS_NETWORK__OUTBOUND_PROXY_URL` | `network.outbound_proxy_url` |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
 // `figment::Error` is large, but it is returned once, at startup.
 #[allow(clippy::result_large_err)]
@@ -437,5 +465,21 @@ mod tests {
         assert_eq!(from_toml("").coordinator.control_addr, "");
         let cfg = from_toml("[coordinator]\ncontrol_addr = \"c.example:4433\"\n");
         assert_eq!(cfg.coordinator.control_addr, "c.example:4433");
+    }
+
+    #[test]
+    fn outbound_proxy_url_defaults_to_empty_and_debug_hides_its_password() {
+        assert_eq!(from_toml("").network.outbound_proxy_url, "");
+
+        let cfg = from_toml(
+            "[network]\noutbound_proxy_url = \"http://alice:s3cret@proxy.example:3128\"\n",
+        );
+        assert_eq!(
+            cfg.network.outbound_proxy_url,
+            "http://alice:s3cret@proxy.example:3128"
+        );
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("s3cret"), "{debug}");
+        assert!(debug.contains("proxy.example"), "{debug}");
     }
 }

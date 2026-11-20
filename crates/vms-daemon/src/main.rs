@@ -3,6 +3,7 @@ mod config;
 mod control;
 mod enroll;
 mod identity;
+mod proxy;
 mod reconnect;
 
 use std::path::{Path, PathBuf};
@@ -75,6 +76,15 @@ async fn main() -> anyhow::Result<()> {
              Generate one with: openssl rand -base64 32"
         );
         return Err(anyhow::anyhow!("missing encryption key"));
+    }
+
+    let outbound_proxy =
+        proxy::OutboundProxy::parse(&cfg.network.outbound_proxy_url).map_err(|e| {
+            tracing::error!(error = %e, "Invalid [network] outbound_proxy_url");
+            e
+        })?;
+    if let Some(proxy) = &outbound_proxy {
+        tracing::info!(proxy = %proxy, "Outbound connections go through an HTTP proxy");
     }
 
     // -- Database --
@@ -158,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         Some(identity) => Some(build_control_client(
             identity,
             &cfg.coordinator.control_addr,
+            outbound_proxy,
         )?),
         None => {
             tracing::info!("Not enrolled with a Coordinator, the control channel stays off");
@@ -665,19 +676,27 @@ async fn main() -> anyhow::Result<()> {
 fn build_control_client(
     identity: &identity::SiteIdentity,
     control_addr: &str,
+    proxy: Option<proxy::OutboundProxy>,
 ) -> anyhow::Result<control::ControlClient> {
-    let target =
-        control::Target::resolve(control_addr, &identity.coordinator_url).map_err(|e| {
+    let quic_target =
+        control::Target::quic(control_addr, &identity.coordinator_url).map_err(|e| {
             tracing::error!(
                 error = format!("{e:#}"),
                 "Invalid [coordinator] control_addr"
             );
             e
         })?;
-    tracing::info!(host = %target.host, port = target.port, "Control channel enabled");
+    let wss_target = control::Target::wss(&identity.coordinator_url)?;
+    tracing::info!(
+        quic = format!("{}:{}", quic_target.host, quic_target.port),
+        wss = format!("{}:{}", wss_target.host, wss_target.port),
+        "Control channel enabled"
+    );
     control::ControlClient::new(
         &identity.signing_key()?,
-        target,
+        quic_target,
+        wss_target,
+        proxy,
         control::web_pki_roots(),
         control::Timings::default(),
     )
