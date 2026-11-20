@@ -34,6 +34,7 @@ rcgen             = "0.13"
 webpki-roots      = "1"
 tokio-util        = { workspace = true }
 futures           = { workspace = true }
+percent-encoding  = "2"
 reqwest           = { workspace = true }
 tracing           = { workspace = true }
 tracing-subscriber = { workspace = true }

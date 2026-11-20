@@ -3,6 +3,7 @@ mod config;
 mod control;
 mod enroll;
 mod identity;
+mod proxy;
 mod reconnect;
 
 use std::path::{Path, PathBuf};
@@ -75,6 +76,15 @@ async fn main() -> anyhow::Result<()> {
              Generate one with: openssl rand -base64 32"
         );
         return Err(anyhow::anyhow!("missing encryption key"));
+    }
+
+    let outbound_proxy =
+        proxy::OutboundProxy::parse(&cfg.network.outbound_proxy_url).map_err(|e| {
+            tracing::error!(error = %e, "Invalid [network] outbound_proxy_url");
+            e
+        })?;
+    if let Some(proxy) = &outbound_proxy {
+        tracing::info!(proxy = %proxy, "Outbound connections go through an HTTP proxy");
     }
 
     // -- Database --
