@@ -41,6 +41,18 @@ pub(crate) fn trusted_roots(ca_file: &str) -> anyhow::Result<RootCertStore> {
     Ok(roots)
 }
 
+/// Parses `coordinator_url` and requires `https://`, since the site key and
+/// the Coordinator's tokens must never travel unencrypted.
+pub(crate) fn https_url(coordinator_url: &str) -> anyhow::Result<reqwest::Url> {
+    let url = reqwest::Url::parse(coordinator_url)
+        .with_context(|| format!("coordinator URL {coordinator_url:?} is not a URL"))?;
+    anyhow::ensure!(
+        url.scheme() == "https",
+        "coordinator URL {coordinator_url:?} must start with https://"
+    );
+    Ok(url)
+}
+
 /// An HTTP client for the Coordinator that trusts exactly `roots`. It uses
 /// rustls with ring like the control channel, not the system TLS library,
 /// so enrollment and the control channel cannot disagree about a certificate.

@@ -695,7 +695,13 @@ fn build_control_client(
             );
             e
         })?;
-    let wss_target = control::Target::wss(&identity.coordinator_url)?;
+    let wss_target = control::Target::wss(&identity.coordinator_url).map_err(|e| {
+        tracing::error!(
+            error = format!("{e:#}"),
+            "Invalid Coordinator URL in the site identity, enroll again with an https:// URL"
+        );
+        e
+    })?;
     tracing::info!(
         quic = format!("{}:{}", quic_target.host, quic_target.port),
         wss = format!("{}:{}", wss_target.host, wss_target.port),

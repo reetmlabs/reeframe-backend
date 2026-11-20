@@ -115,6 +115,7 @@ pub async fn run(args: EnrollArgs, identity_path: &Path, ca_file: &str) -> anyho
     }
 
     let coordinator_url = args.coordinator.trim_end_matches('/').to_string();
+    coordinator::https_url(&coordinator_url)?;
     let key = SigningKey::generate(&mut OsRng);
     let client = coordinator::http_client(coordinator::trusted_roots(ca_file)?, TIMEOUT)?;
     let be_id = enroll(&client, &coordinator_url, &args.code, &key).await?;
@@ -316,15 +317,28 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
+    /// An HTTPS stand-in from a fresh test CA, and a `ca_file` that trusts it.
+    async fn spawn_trusted_coordinator(status: u16, body: impl Into<String>) -> (String, PathBuf) {
+        let ca = TestCa::new();
+        let (cert, key) = ca.leaf("localhost");
+        let (url, _captured) = spawn_tls_coordinator(status, body, cert, key).await;
+        (url, ca.pem_file())
+    }
+
     #[tokio::test]
     async fn a_successful_run_writes_the_identity() {
         let be_id = Uuid::new_v4();
-        let (url, _captured) = spawn_coordinator(200, format!(r#"{{"be_id":"{be_id}"}}"#)).await;
+        let (url, ca_file) =
+            spawn_trusted_coordinator(200, format!(r#"{{"be_id":"{be_id}"}}"#)).await;
         let path = scratch_identity_path();
 
-        run(args(&format!("{url}/"), false), &path, "")
-            .await
-            .unwrap();
+        run(
+            args(&format!("{url}/"), false),
+            &path,
+            ca_file.to_str().unwrap(),
+        )
+        .await
+        .unwrap();
 
         let written = identity::load(&path).unwrap().unwrap();
         assert_eq!(written.be_id, be_id);
@@ -336,7 +350,7 @@ mod tests {
         let path = scratch_identity_path();
         let before = existing_identity(&path);
 
-        let result = run(args("http://127.0.0.1:9", false), &path, "").await;
+        let result = run(args("https://127.0.0.1:9", false), &path, "").await;
 
         assert!(result.unwrap_err().to_string().contains("--force"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -344,13 +358,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_enrollment_leaves_the_existing_identity_untouched() {
-        let (url, _captured) = spawn_coordinator(401, r#"{"error":"no"}"#).await;
+        let (url, ca_file) = spawn_trusted_coordinator(401, r#"{"error":"no"}"#).await;
         let path = scratch_identity_path();
         let before = existing_identity(&path);
 
-        let result = run(args(&url, true), &path, "").await;
+        let result = run(args(&url, true), &path, ca_file.to_str().unwrap()).await;
 
-        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
