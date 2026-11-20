@@ -422,3 +422,5 @@ async fn connection_end(connection: &Connection, error: String) -> SessionEnd {
     }
 }
 
+#[cfg(test)]
+mod tests;
