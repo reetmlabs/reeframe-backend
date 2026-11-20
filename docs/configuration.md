@@ -56,6 +56,7 @@ Generate each with `openssl rand -base64 32`.
 | `auth.jwks_url` | unset | The Coordinator's `/.well-known/jwks.json`. Required for `oidc`. |
 | `auth.jwks_refresh_interval_secs` | `300` | How long fetched Coordinator keys are trusted |
 | `coordinator.be_id` | unset | This backend's site ID from the Coordinator, for setups without `vms-daemon enroll`. An enrolled site identity takes precedence, and a different value here stops startup. `auth.mode = "oidc"` needs one of the two. |
+| `coordinator.control_addr` | empty | `host:port` of the Coordinator's control channel (QUIC, UDP). Empty uses the host of the enrolled Coordinator URL on port 443. Only used once the backend is enrolled. |
 | `identity.path` | `site_identity.json` | Site identity written by `vms-daemon enroll`: key, site ID and Coordinator URL, readable only by its owner. Relative to the working directory. |
 | `log_level` | `info` | Stderr log filter. Takes a level or any `RUST_LOG`-style directive, for example `info,vms_media=debug`. A non-empty `RUST_LOG` overrides it. Changes apply on restart. |
 

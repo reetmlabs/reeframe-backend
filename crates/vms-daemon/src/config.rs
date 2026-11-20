@@ -150,6 +150,11 @@ pub struct CoordinatorConfig {
     /// and the expected `aud` of Coordinator-issued tokens. Required when
     /// `[auth] mode = "oidc"`. Set via config file or VMS_COORDINATOR__BE_ID env var.
     pub be_id: Option<uuid::Uuid>,
+    /// `host:port` of the Coordinator's QUIC control channel. Empty means the
+    /// host of the enrolled `coordinator_url` on port 443. Set via config file
+    /// or VMS_COORDINATOR__CONTROL_ADDR env var.
+    #[serde(default)]
+    pub control_addr: String,
 }
 
 /// Where the site identity from `vms-daemon enroll` is kept.
@@ -237,6 +242,7 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_AUTH__JWT_SECRET`     | `auth.jwt_secret`           |
 /// | `VMS_AUTH__JWKS_URL`       | `auth.jwks_url`             |
 /// | `VMS_COORDINATOR__BE_ID`   | `coordinator.be_id`         |
+/// | `VMS_COORDINATOR__CONTROL_ADDR` | `coordinator.control_addr` |
 /// | `VMS_IDENTITY__PATH`       | `identity.path`             |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
 // `figment::Error` is large, but it is returned once, at startup.
@@ -424,5 +430,12 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         assert_eq!(cfg.coordinator.be_id, None);
+    }
+
+    #[test]
+    fn control_addr_is_read_from_the_coordinator_section_and_defaults_to_empty() {
+        assert_eq!(from_toml("").coordinator.control_addr, "");
+        let cfg = from_toml("[coordinator]\ncontrol_addr = \"c.example:4433\"\n");
+        assert_eq!(cfg.coordinator.control_addr, "c.example:4433");
     }
 }

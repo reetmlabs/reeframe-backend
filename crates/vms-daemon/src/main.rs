@@ -1,9 +1,8 @@
 mod cli;
 mod config;
+mod control;
 mod enroll;
 mod identity;
-// TODO(#41): the control channel client uses this; unused until then.
-#[allow(dead_code)]
 mod reconnect;
 
 use std::path::{Path, PathBuf};
@@ -150,11 +149,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!(error = %e, "Cannot load the site identity");
         e
     })?;
-    let be_id =
-        identity::resolve_be_id(identity.map(|i| i.be_id), cfg.coordinator.be_id).map_err(|e| {
+    let be_id = identity::resolve_be_id(identity.as_ref().map(|i| i.be_id), cfg.coordinator.be_id)
+        .map_err(|e| {
             tracing::error!(error = %e, "Conflicting site IDs");
             anyhow::anyhow!(e)
         })?;
+    let control_client = match &identity {
+        Some(identity) => Some(build_control_client(
+            identity,
+            &cfg.coordinator.control_addr,
+        )?),
+        None => {
+            tracing::info!("Not enrolled with a Coordinator, the control channel stays off");
+            None
+        }
+    };
 
     // Local auth stays active in every `mode`. Trusting Coordinator tokens
     // is added on top, and the BE works without any `jwks_url`.
@@ -609,6 +618,10 @@ async fn main() -> anyhow::Result<()> {
     let server_handle = server.handle();
     let server_task = tokio::spawn(server.serve(router));
 
+    let control_shutdown = tokio_util::sync::CancellationToken::new();
+    let control_task =
+        control_client.map(|client| tokio::spawn(client.run(control_shutdown.clone())));
+
     tracing::info!("VMS Daemon started, press Ctrl+C or send SIGTERM to stop");
     eprintln!(
         "Reeframe VMS daemon v{}, listening on {}",
@@ -620,9 +633,15 @@ async fn main() -> anyhow::Result<()> {
     shutdown_signal().await;
     tracing::info!("Shutdown signal received, draining HTTP connections (10 s timeout)");
 
+    control_shutdown.cancel();
+
     server_handle.stop_graceful(std::time::Duration::from_secs(10));
     server_task.await.ok();
     tracing::info!("HTTP server stopped");
+
+    if let Some(task) = control_task {
+        task.await.ok();
+    }
 
     // -- Graceful shutdown: trigger schedulers and event listeners --
     trigger_evaluator_shutdown.stop_schedulers().await;
@@ -640,6 +659,29 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // -- Helpers --
+
+/// Builds the control channel client for an enrolled site. A `control_addr`
+/// that cannot be parsed stops startup like any other config error.
+fn build_control_client(
+    identity: &identity::SiteIdentity,
+    control_addr: &str,
+) -> anyhow::Result<control::ControlClient> {
+    let target =
+        control::Target::resolve(control_addr, &identity.coordinator_url).map_err(|e| {
+            tracing::error!(
+                error = format!("{e:#}"),
+                "Invalid [coordinator] control_addr"
+            );
+            e
+        })?;
+    tracing::info!(host = %target.host, port = target.port, "Control channel enabled");
+    control::ControlClient::new(
+        &identity.signing_key()?,
+        target,
+        control::web_pki_roots(),
+        control::Timings::default(),
+    )
+}
 
 /// Installs the global `tracing` subscriber: a JSON layer to stderr, plus
 /// OTLP export of spans and log events when `OTEL_EXPORTER_OTLP_ENDPOINT`
