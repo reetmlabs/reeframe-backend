@@ -22,3 +22,7 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
+
+[sources]
+# The control channel wire protocol is shared with the Coordinator.
+allow-git = ["https://github.com/reetmlabs/reeframe-protocol"]
