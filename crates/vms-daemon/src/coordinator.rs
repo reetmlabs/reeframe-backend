@@ -2,6 +2,8 @@
 //! enrollment and the control channel so both accept the same certificates.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use rustls::pki_types::pem::PemObject;
@@ -37,6 +39,24 @@ pub(crate) fn trusted_roots(ca_file: &str) -> anyhow::Result<RootCertStore> {
         })?;
     }
     Ok(roots)
+}
+
+/// An HTTP client for the Coordinator that trusts exactly `roots`. It uses
+/// rustls with ring like the control channel, not the system TLS library,
+/// so enrollment and the control channel cannot disagree about a certificate.
+pub(crate) fn http_client(
+    roots: RootCertStore,
+    timeout: Duration,
+) -> anyhow::Result<reqwest::Client> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .timeout(timeout)
+        .build()?)
 }
 
 #[cfg(test)]

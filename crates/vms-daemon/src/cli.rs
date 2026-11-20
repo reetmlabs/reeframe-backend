@@ -80,7 +80,14 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
     let cfg = config::load().map_err(|e| anyhow::anyhow!(e))?;
     match command {
         Command::Token { action } => run_token(&cfg.database.url, action).await,
-        Command::Enroll(args) => enroll::run(args, Path::new(&cfg.identity.path)).await,
+        Command::Enroll(args) => {
+            enroll::run(
+                args,
+                Path::new(&cfg.identity.path),
+                &cfg.coordinator.ca_file,
+            )
+            .await
+        }
     }
 }
 

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::cli::EnrollArgs;
+use crate::coordinator;
 use crate::identity::{self, SiteIdentity};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,8 +104,9 @@ pub async fn enroll(
 }
 
 /// Runs the `enroll` subcommand: generates a new key, enrolls it, and only
-/// then replaces the identity file.
-pub async fn run(args: EnrollArgs, identity_path: &Path) -> anyhow::Result<()> {
+/// then replaces the identity file. `ca_file` is `[coordinator] ca_file`, so
+/// enrollment trusts the same certificates as the control channel later.
+pub async fn run(args: EnrollArgs, identity_path: &Path, ca_file: &str) -> anyhow::Result<()> {
     if !args.force && identity::load(identity_path)?.is_some() {
         anyhow::bail!(
             "{} already holds a site identity. Pass --force to enroll again with a new key",
@@ -114,7 +116,7 @@ pub async fn run(args: EnrollArgs, identity_path: &Path) -> anyhow::Result<()> {
 
     let coordinator_url = args.coordinator.trim_end_matches('/').to_string();
     let key = SigningKey::generate(&mut OsRng);
-    let client = reqwest::Client::builder().timeout(TIMEOUT).build()?;
+    let client = coordinator::http_client(coordinator::trusted_roots(ca_file)?, TIMEOUT)?;
     let be_id = enroll(&client, &coordinator_url, &args.code, &key).await?;
 
     identity::save(
@@ -271,7 +273,9 @@ mod tests {
         let (url, _captured) = spawn_coordinator(200, format!(r#"{{"be_id":"{be_id}"}}"#)).await;
         let path = scratch_identity_path();
 
-        run(args(&format!("{url}/"), false), &path).await.unwrap();
+        run(args(&format!("{url}/"), false), &path, "")
+            .await
+            .unwrap();
 
         let written = identity::load(&path).unwrap().unwrap();
         assert_eq!(written.be_id, be_id);
@@ -283,7 +287,7 @@ mod tests {
         let path = scratch_identity_path();
         let before = existing_identity(&path);
 
-        let result = run(args("http://127.0.0.1:9", false), &path).await;
+        let result = run(args("http://127.0.0.1:9", false), &path, "").await;
 
         assert!(result.unwrap_err().to_string().contains("--force"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -295,7 +299,7 @@ mod tests {
         let path = scratch_identity_path();
         let before = existing_identity(&path);
 
-        let result = run(args(&url, true), &path).await;
+        let result = run(args(&url, true), &path, "").await;
 
         assert!(result.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
