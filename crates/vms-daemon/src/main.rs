@@ -6,6 +6,8 @@ mod enroll;
 mod identity;
 mod proxy;
 mod reconnect;
+#[cfg(test)]
+mod test_ca;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
