@@ -115,14 +115,6 @@ impl Default for Timings {
     }
 }
 
-/// The trusted roots for the Coordinator's certificate: the Mozilla set, so
-/// the result does not depend on the host's CA store.
-pub(crate) fn web_pki_roots() -> RootCertStore {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    roots
-}
-
 /// A control channel client, ready to [`run`](Self::run).
 pub(crate) struct ControlClient {
     quic: quic::Transport,

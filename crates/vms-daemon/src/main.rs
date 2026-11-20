@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod control;
+mod coordinator;
 mod enroll;
 mod identity;
 mod proxy;
@@ -164,11 +165,16 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!(error = %e, "Conflicting site IDs");
             anyhow::anyhow!(e)
         })?;
+    let coordinator_roots = coordinator::trusted_roots(&cfg.coordinator.ca_file).map_err(|e| {
+        tracing::error!(error = format!("{e:#}"), "Invalid [coordinator] ca_file");
+        e
+    })?;
     let control_client = match &identity {
         Some(identity) => Some(build_control_client(
             identity,
             &cfg.coordinator.control_addr,
             outbound_proxy,
+            coordinator_roots,
         )?),
         None => {
             tracing::info!("Not enrolled with a Coordinator, the control channel stays off");
@@ -677,6 +683,7 @@ fn build_control_client(
     identity: &identity::SiteIdentity,
     control_addr: &str,
     proxy: Option<proxy::OutboundProxy>,
+    roots: rustls::RootCertStore,
 ) -> anyhow::Result<control::ControlClient> {
     let quic_target =
         control::Target::quic(control_addr, &identity.coordinator_url).map_err(|e| {
@@ -697,7 +704,7 @@ fn build_control_client(
         quic_target,
         wss_target,
         proxy,
-        control::web_pki_roots(),
+        roots,
         control::Timings::default(),
     )
 }
