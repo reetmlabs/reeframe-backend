@@ -16,7 +16,9 @@ pub(crate) struct Backoff {
     /// How long a connection must stay up before the next failure starts a
     /// fresh failure streak.
     stable_uptime: Duration,
-    connected_at: Instant,
+    /// When the current connection came up. Taken by the first failure after
+    /// it, so time spent failing afterwards never counts as uptime.
+    connected_at: Option<Instant>,
     delay: Duration,
 }
 
@@ -26,7 +28,7 @@ impl Backoff {
             base,
             max,
             stable_uptime,
-            connected_at: Instant::now(),
+            connected_at: None,
             delay: base,
         }
     }
@@ -34,7 +36,11 @@ impl Backoff {
     /// Call once per failed or dropped connection to get the next delay.
     /// Deterministic so it can be tested exactly; the caller adds jitter.
     pub(crate) fn next_delay(&mut self) -> Duration {
-        if self.connected_at.elapsed() >= self.stable_uptime {
+        let stable = self
+            .connected_at
+            .take()
+            .is_some_and(|at| at.elapsed() >= self.stable_uptime);
+        if stable {
             self.delay = self.base;
         }
         let delay = self.delay;
@@ -45,7 +51,7 @@ impl Backoff {
     /// Starts the uptime clock that `next_delay` checks. It doesn't reset
     /// `delay`, because only a stable connection counts as recovery.
     pub(crate) fn record_connected(&mut self) {
-        self.connected_at = Instant::now();
+        self.connected_at = Some(Instant::now());
     }
 }
 
@@ -108,6 +114,45 @@ mod tests {
         tokio::time::advance(Duration::from_millis(100)).await; // < stable_uptime
 
         assert_eq!(backoff.next_delay().as_millis() as u64, 20);
+    }
+
+    /// Waits out each delay like the reconnect loop does, so the clock keeps
+    /// moving while every attempt fails.
+    async fn failing_delays(backoff: &mut Backoff, count: usize) -> Vec<u64> {
+        let mut delays = Vec::new();
+        for _ in 0..count {
+            let delay = backoff.next_delay();
+            delays.push(delay.as_secs());
+            tokio::time::advance(delay).await;
+        }
+        delays
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failures_after_a_stable_connection_escalate_again() {
+        let mut backoff = Backoff::new(
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+        );
+        backoff.record_connected();
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        assert_eq!(failing_delays(&mut backoff, 4).await, [1, 2, 4, 8]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_outage_without_any_connection_keeps_escalating() {
+        let mut backoff = Backoff::new(
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(
+            failing_delays(&mut backoff, 8).await,
+            [1, 2, 4, 8, 16, 32, 60, 60]
+        );
     }
 
     #[test]
