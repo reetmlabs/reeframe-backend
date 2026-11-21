@@ -11,6 +11,7 @@ use anyhow::Context;
 use ed25519_dalek::SigningKey;
 use reeframe_protocol::{CloseReason, Message, NONCE_TTL};
 use rustls::RootCertStore;
+use tokio::sync::mpsc;
 use tokio::time::{interval_at, sleep, sleep_until, timeout, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
@@ -118,11 +119,22 @@ impl Default for Timings {
     }
 }
 
+/// Carries WebRTC session messages between the control channel and the
+/// session manager. It outlives single connections, so a reconnect does not
+/// end any session.
+pub(crate) struct SessionLink {
+    /// `session_*` messages from the Coordinator.
+    pub to_sessions: mpsc::UnboundedSender<Message>,
+    /// Messages for the Coordinator, sent on the connection that is up.
+    pub from_sessions: mpsc::UnboundedReceiver<Message>,
+}
+
 /// A control channel client, ready to [`run`](Self::run).
 pub(crate) struct ControlClient {
     quic: quic::Transport,
     wss: wss::Transport,
     timings: Timings,
+    sessions: Option<SessionLink>,
 }
 
 impl ControlClient {
@@ -138,12 +150,19 @@ impl ControlClient {
             quic: quic::Transport::new(key, quic_target, roots.clone())?,
             wss: wss::Transport::new(key, wss_target, proxy, roots)?,
             timings,
+            sessions: None,
         })
+    }
+
+    /// Forwards session messages to and from a session manager.
+    pub(crate) fn with_sessions(mut self, link: SessionLink) -> Self {
+        self.sessions = Some(link);
+        self
     }
 
     /// Keeps the control channel up until `shutdown` is cancelled, then
     /// closes it.
-    pub(crate) async fn run(self, shutdown: CancellationToken) {
+    pub(crate) async fn run(mut self, shutdown: CancellationToken) {
         let mut backoff = Backoff::new(
             self.timings.retry_base,
             self.timings.retry_max,
@@ -162,7 +181,7 @@ impl ControlClient {
                         peer = %channel.peer(),
                         "Control channel connected"
                     );
-                    session(&mut channel, &self.timings, &shutdown).await
+                    session(&mut channel, &self.timings, &shutdown, &mut self.sessions).await
                 }
                 Err(end) => end,
             };
@@ -357,6 +376,7 @@ async fn session(
     channel: &mut Channel,
     timings: &Timings,
     shutdown: &CancellationToken,
+    sessions: &mut Option<SessionLink>,
 ) -> SessionEnd {
     let mut ping = interval_at(
         Instant::now() + timings.ping_interval,
@@ -376,10 +396,16 @@ async fn session(
                     return channel.end(e).await;
                 }
             }
+            Some(message) = from_sessions(sessions) => {
+                if let Err(e) = channel.send(&message).await {
+                    return channel.end(e).await;
+                }
+            }
             received = channel.recv() => match received {
                 Received::Message(message) => {
                     deadline = Instant::now() + timings.silence_timeout;
                     tracing::trace!(?message, "Control message received");
+                    to_sessions(sessions, message);
                 }
                 Received::Other => deadline = Instant::now() + timings.silence_timeout,
                 Received::Ended(e) => return channel.end(e).await,
@@ -389,6 +415,32 @@ async fn session(
                 return SessionEnd::Silent;
             }
         }
+    }
+}
+
+/// The next message a session sends, or never without a session manager.
+async fn from_sessions(sessions: &mut Option<SessionLink>) -> Option<Message> {
+    match sessions {
+        Some(link) => link.from_sessions.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn to_sessions(sessions: &Option<SessionLink>, message: Message) {
+    let is_session = matches!(
+        message,
+        Message::SessionOffer { .. }
+            | Message::SessionCandidate { .. }
+            | Message::SessionClose { .. }
+    );
+    match sessions {
+        Some(link) if is_session => {
+            let _ = link.to_sessions.send(message);
+        }
+        None if is_session => {
+            tracing::debug!("Session message received, but WebRTC is not running");
+        }
+        _ => {}
     }
 }
 
