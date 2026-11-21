@@ -15,6 +15,7 @@ vms-media      = { path = "../vms-media" }
 vms-sources    = { path = "../vms-sources" }
 vms-engine     = { path = "../vms-engine" }
 vms-api        = { path = "../vms-api" }
+vms-webrtc     = { path = "../vms-webrtc" }
 tokio             = { workspace = true }
 salvo             = { workspace = true }
 figment           = { workspace = true }
