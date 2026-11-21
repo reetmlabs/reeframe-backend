@@ -41,7 +41,8 @@ jobs:
             gstreamer1.0-x \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav
+            gstreamer1.0-libav \
+            gstreamer1.0-nice
 
       # Caches the registry and target dir, keyed on Cargo.lock and the toolchain
       - uses: Swatinem/rust-cache@v2
@@ -87,7 +88,8 @@ jobs:
             gstreamer1.0-x \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav
+            gstreamer1.0-libav \
+            gstreamer1.0-nice
 
       # Caches the registry and target dir, keyed on Cargo.lock and the toolchain
       - uses: Swatinem/rust-cache@v2
