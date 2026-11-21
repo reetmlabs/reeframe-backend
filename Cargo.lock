@@ -6544,6 +6544,7 @@ dependencies = [
  "ed25519-dalek",
  "figment",
  "futures",
+ "jsonwebtoken 9.3.1",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

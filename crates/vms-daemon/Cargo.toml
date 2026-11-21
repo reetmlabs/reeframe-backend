@@ -49,3 +49,4 @@ tracing-opentelemetry          = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+jsonwebtoken = { workspace = true }
