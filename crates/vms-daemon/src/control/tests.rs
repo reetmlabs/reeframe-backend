@@ -148,6 +148,9 @@ enum Behavior {
     Silent,
     /// Closes the first connection with this code at its first ping.
     CloseFirstWith(u32),
+    /// Sends `session_close` for `from-<n>` on connection n, and drops the
+    /// first connection right after it.
+    SessionMessages,
 }
 
 #[derive(Default)]
@@ -157,6 +160,8 @@ struct Stats {
     foreign_key: AtomicBool,
     /// Close code the client sent, plus one, so zero means none yet.
     client_close: AtomicU32,
+    /// Messages other than `ping` the client sent.
+    received: std::sync::Mutex<Vec<Message>>,
 }
 
 struct TestServer {
@@ -256,10 +261,27 @@ async fn serve_connection(
     if let Ok((mut send, mut recv)) = connection.accept_bi().await {
         while let Ok(Some(message)) = read_message(&mut recv).await {
             if message != Message::Ping {
+                stats.received.lock().unwrap().push(message);
                 continue;
             }
-            stats.pings.fetch_add(1, Ordering::SeqCst);
+            let first_ping = stats.pings.fetch_add(1, Ordering::SeqCst) == 0 || n > 1;
             match behavior {
+                Behavior::SessionMessages if first_ping => {
+                    let close = Message::SessionClose {
+                        session_id: format!("from-{n}"),
+                        reason: "test".into(),
+                    };
+                    if write_message(&mut send, &close).await.is_err() {
+                        break;
+                    }
+                    if n == 1 {
+                        // A close discards unsent stream data, so the message
+                        // gets a moment to arrive first.
+                        sleep(Duration::from_millis(200)).await;
+                        connection.close(CloseReason::Timeout.code().into(), b"test");
+                        return;
+                    }
+                }
                 Behavior::CloseFirstWith(code) if n == 1 => {
                     connection.close(code.into(), b"test");
                     return;
@@ -484,4 +506,53 @@ async fn quic_trusts_a_coordinator_signed_by_a_ca_from_the_ca_file() {
         matches!(connected, Err(SessionEnd::ConnectFailed(_))),
         "accepted a certificate from an untrusted CA"
     );
+}
+
+#[tokio::test]
+async fn session_messages_pass_both_ways_and_the_link_survives_a_reconnect() {
+    let key = SigningKey::generate(&mut OsRng);
+    let server = TestServer::start(Behavior::SessionMessages, key.verifying_key());
+    let (to_sessions, mut inbound) = tokio::sync::mpsc::unbounded_channel();
+    let (outbound, from_sessions) = tokio::sync::mpsc::unbounded_channel();
+    let client = ControlClient::new(
+        &key,
+        server.target(),
+        unreachable_wss_target(),
+        None,
+        server.roots(),
+        fast_timings(),
+    )
+    .unwrap()
+    .with_sessions(SessionLink {
+        to_sessions,
+        from_sessions,
+    });
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(client.run(shutdown.clone()));
+
+    for expected in ["from-1", "from-2"] {
+        match timeout(Duration::from_secs(5), inbound.recv()).await {
+            Ok(Some(Message::SessionClose { session_id, .. })) => {
+                assert_eq!(session_id, expected)
+            }
+            other => panic!("expected session_close {expected}, got {other:?}"),
+        }
+    }
+    assert_eq!(server.connections(), 2);
+
+    let answer = Message::SessionAnswer {
+        session_id: "s1".into(),
+        sdp: "v=0".into(),
+    };
+    outbound.send(answer.clone()).unwrap();
+    wait_until("the answer at the server", || {
+        server.stats.received.lock().unwrap().contains(&answer)
+    })
+    .await;
+
+    shutdown.cancel();
+    timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
 }

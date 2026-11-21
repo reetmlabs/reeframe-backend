@@ -199,7 +199,8 @@ async fn main() -> anyhow::Result<()> {
             );
             anyhow::anyhow!("missing site ID for oidc auth mode")
         })?;
-        let client = coordinator::http_client(coordinator_roots, coordinator::JWKS_TIMEOUT)?;
+        let client =
+            coordinator::http_client(coordinator_roots.clone(), coordinator::JWKS_TIMEOUT)?;
         let provider = Arc::new(CoordinatorJwksAuthProvider::new(
             jwks_url.clone(),
             client,
@@ -216,6 +217,39 @@ async fn main() -> anyhow::Result<()> {
         Some(provider)
     } else {
         None
+    };
+
+    // -- WebRTC sessions --
+    // Started with the control channel, which carries their signaling.
+    let webrtc_shutdown = tokio_util::sync::CancellationToken::new();
+    let (control_client, webrtc_task) = match (control_client, &identity) {
+        (Some(client), Some(identity)) => {
+            let verifier: Arc<dyn vms_core::AuthProvider> = match &coordinator_auth_provider {
+                Some(provider) => provider.clone(),
+                None => site_token_verifier(identity, &cfg.auth, coordinator_roots)?,
+            };
+            let (to_sessions, inbound) = tokio::sync::mpsc::unbounded_channel();
+            let (outbound, from_sessions) = tokio::sync::mpsc::unbounded_channel();
+            let manager = vms_webrtc::SessionManager::new(
+                vms_webrtc::Config {
+                    max_sessions: cfg.webrtc.max_sessions,
+                    ..vms_webrtc::Config::default()
+                },
+                verifier,
+                outbound,
+            )?;
+            tracing::info!(
+                max_sessions = cfg.webrtc.max_sessions,
+                "WebRTC sessions enabled"
+            );
+            let task = tokio::spawn(manager.run(inbound, webrtc_shutdown.clone()));
+            let client = client.with_sessions(control::SessionLink {
+                to_sessions,
+                from_sessions,
+            });
+            (Some(client), Some(task))
+        }
+        (client, _) => (client, None),
     };
 
     // -- Crypto --
@@ -654,12 +688,16 @@ async fn main() -> anyhow::Result<()> {
     shutdown_signal().await;
     tracing::info!("Shutdown signal received, draining HTTP connections (10 s timeout)");
 
+    webrtc_shutdown.cancel();
     control_shutdown.cancel();
 
     server_handle.stop_graceful(std::time::Duration::from_secs(10));
     server_task.await.ok();
     tracing::info!("HTTP server stopped");
 
+    if let Some(task) = webrtc_task {
+        task.await.ok();
+    }
     if let Some(task) = control_task {
         task.await.ok();
     }
@@ -683,6 +721,33 @@ async fn main() -> anyhow::Result<()> {
 
 /// Builds the control channel client for an enrolled site. A `control_addr`
 /// that cannot be parsed stops startup like any other config error.
+/// Verifies the site tokens of WebRTC offers when Coordinator login is off.
+/// Without `[auth] jwks_url`, the keys come from the enrolled Coordinator.
+fn site_token_verifier(
+    identity: &identity::SiteIdentity,
+    auth: &config::AuthConfig,
+    roots: rustls::RootCertStore,
+) -> anyhow::Result<Arc<CoordinatorJwksAuthProvider>> {
+    let jwks_url = auth.jwks_url.clone().unwrap_or_else(|| {
+        format!(
+            "{}/.well-known/jwks.json",
+            identity.coordinator_url.trim_end_matches('/')
+        )
+    });
+    let provider = Arc::new(CoordinatorJwksAuthProvider::new(
+        jwks_url.clone(),
+        coordinator::http_client(roots, coordinator::JWKS_TIMEOUT)?,
+        std::time::Duration::from_secs(auth.jwks_refresh_interval_secs),
+        identity.be_id,
+    ));
+    tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.load_with_retry().await }
+    });
+    tracing::info!(jwks_url = %jwks_url, "Site tokens of WebRTC offers checked against this JWKS");
+    Ok(provider)
+}
+
 fn build_control_client(
     identity: &identity::SiteIdentity,
     control_addr: &str,

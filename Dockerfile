@@ -66,6 +66,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-libav \
         # ugly: x264enc, used by the transcode, watermark and merge actions
         gstreamer1.0-plugins-ugly \
+        # nice:  ICE transport of webrtcbin (bad), for WebRTC sessions
+        gstreamer1.0-nice \
         # TLS + CA trust store (RTSPS, outbound HTTPS transports)
         libssl3 \
         ca-certificates \

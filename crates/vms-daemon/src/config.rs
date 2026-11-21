@@ -203,6 +203,21 @@ impl std::fmt::Debug for NetworkConfig {
     }
 }
 
+/// WebRTC sessions the Coordinator requests over the control channel.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebRtcConfig {
+    /// Sessions beyond this many are refused. Each runs its own encoder, so
+    /// this bounds the CPU that viewers can take. Set via config file or
+    /// VMS_WEBRTC__MAX_SESSIONS env var.
+    pub max_sessions: usize,
+}
+
+impl Default for WebRtcConfig {
+    fn default() -> Self {
+        Self { max_sessions: 16 }
+    }
+}
+
 // -- Root config --
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -217,6 +232,8 @@ pub struct AppConfig {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub webrtc: WebRtcConfig,
     /// Base64-encoded 32-byte AES-256-GCM encryption key.
     /// Set via config file or VMS_ENCRYPTION_KEY env var.
     /// Generate with: openssl rand -base64 32
@@ -238,6 +255,7 @@ impl Default for AppConfig {
             coordinator: CoordinatorConfig::default(),
             identity: IdentityConfig::default(),
             network: NetworkConfig::default(),
+            webrtc: WebRtcConfig::default(),
             encryption_key: String::new(),
             log_level: "info".into(),
         }
@@ -279,6 +297,7 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_COORDINATOR__CA_FILE` | `coordinator.ca_file` |
 /// | `VMS_IDENTITY__PATH`       | `identity.path`             |
 /// | `VMS_NETWORK__OUTBOUND_PROXY_URL` | `network.outbound_proxy_url` |
+/// | `VMS_WEBRTC__MAX_SESSIONS` | `webrtc.max_sessions` |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
 // `figment::Error` is large, but it is returned once, at startup.
 #[allow(clippy::result_large_err)]

@@ -316,7 +316,13 @@ async fn a_close_code_from_the_coordinator_maps_to_its_reason() {
         panic!("login failed");
     };
     let mut channel = Channel::Wss(Box::new(channel));
-    let end = session(&mut channel, &fast_timings(), &CancellationToken::new()).await;
+    let end = session(
+        &mut channel,
+        &fast_timings(),
+        &CancellationToken::new(),
+        &mut None,
+    )
+    .await;
 
     assert!(
         matches!(

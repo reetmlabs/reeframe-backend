@@ -15,6 +15,7 @@ vms-media      = { path = "../vms-media" }
 vms-sources    = { path = "../vms-sources" }
 vms-engine     = { path = "../vms-engine" }
 vms-api        = { path = "../vms-api" }
+vms-webrtc     = { path = "../vms-webrtc" }
 tokio             = { workspace = true }
 salvo             = { workspace = true }
 figment           = { workspace = true }
@@ -27,7 +28,7 @@ uuid              = { workspace = true }
 rand              = { workspace = true }
 base64            = { workspace = true }
 ed25519-dalek     = { version = "2", features = ["rand_core", "pkcs8"] }
-reeframe-protocol = { git = "https://github.com/reetmlabs/reeframe-protocol", tag = "v0.2.0" }
+reeframe-protocol = { git = "https://github.com/reetmlabs/reeframe-protocol", tag = "v0.3.0" }
 quinn             = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rustls            = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 rcgen             = "0.13"
