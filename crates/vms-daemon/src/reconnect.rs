@@ -16,7 +16,9 @@ pub(crate) struct Backoff {
     /// How long a connection must stay up before the next failure starts a
     /// fresh failure streak.
     stable_uptime: Duration,
-    connected_at: Instant,
+    /// When the current connection came up. Taken by the first failure after
+    /// it, so time spent failing afterwards never counts as uptime.
+    connected_at: Option<Instant>,
     delay: Duration,
 }
 
@@ -26,7 +28,7 @@ impl Backoff {
             base,
             max,
             stable_uptime,
-            connected_at: Instant::now(),
+            connected_at: None,
             delay: base,
         }
     }
@@ -34,7 +36,11 @@ impl Backoff {
     /// Call once per failed or dropped connection to get the next delay.
     /// Deterministic so it can be tested exactly; the caller adds jitter.
     pub(crate) fn next_delay(&mut self) -> Duration {
-        if self.connected_at.elapsed() >= self.stable_uptime {
+        let stable = self
+            .connected_at
+            .take()
+            .is_some_and(|at| at.elapsed() >= self.stable_uptime);
+        if stable {
             self.delay = self.base;
         }
         let delay = self.delay;
@@ -45,7 +51,7 @@ impl Backoff {
     /// Starts the uptime clock that `next_delay` checks. It doesn't reset
     /// `delay`, because only a stable connection counts as recovery.
     pub(crate) fn record_connected(&mut self) {
-        self.connected_at = Instant::now();
+        self.connected_at = Some(Instant::now());
     }
 }
 
