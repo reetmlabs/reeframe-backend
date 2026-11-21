@@ -1,5 +1,6 @@
 //! What the backend trusts when it talks to its Coordinator, shared by
-//! enrollment and the control channel so both accept the same certificates.
+//! enrollment, the control channel and the token key fetch so all accept the
+//! same certificates.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -52,6 +53,10 @@ pub(crate) fn https_url(coordinator_url: &str) -> anyhow::Result<reqwest::Url> {
     );
     Ok(url)
 }
+
+/// Limit for one JWKS fetch, so a Coordinator that drops traffic cannot stall
+/// token checks.
+pub(crate) const JWKS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// An HTTP client for the Coordinator that trusts exactly `roots`. It uses
 /// rustls with ring like the control channel, not the system TLS library,

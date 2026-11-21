@@ -176,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
             identity,
             &cfg.coordinator.control_addr,
             outbound_proxy,
-            coordinator_roots,
+            coordinator_roots.clone(),
         )?),
         None => {
             tracing::info!("Not enrolled with a Coordinator, the control channel stays off");
@@ -199,8 +199,10 @@ async fn main() -> anyhow::Result<()> {
             );
             anyhow::anyhow!("missing site ID for oidc auth mode")
         })?;
+        let client = coordinator::http_client(coordinator_roots, coordinator::JWKS_TIMEOUT)?;
         let provider = Arc::new(CoordinatorJwksAuthProvider::new(
             jwks_url.clone(),
+            client,
             std::time::Duration::from_secs(cfg.auth.jwks_refresh_interval_secs),
             be_id,
         ));
