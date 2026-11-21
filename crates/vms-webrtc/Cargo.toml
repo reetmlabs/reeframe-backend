@@ -1,0 +1,17 @@
+[package]
+name    = "vms-webrtc"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+vms-core          = { path = "../vms-core" }
+reeframe-protocol = { git = "https://github.com/reetmlabs/reeframe-protocol", tag = "v0.3.0" }
+gstreamer         = { workspace = true }
+gstreamer-webrtc  = { workspace = true, features = ["v1_18"] }
+gstreamer-sdp     = { workspace = true }
+tokio             = { workspace = true }
+tokio-util        = { workspace = true }
+tracing           = { workspace = true }
+anyhow            = { workspace = true }
+percent-encoding  = "2"
