@@ -37,7 +37,7 @@ futures           = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tokio-rustls      = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 percent-encoding  = "2"
-reqwest           = { workspace = true }
+reqwest           = { workspace = true, features = ["rustls-tls-manual-roots-no-provider"] }
 tracing           = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow            = { workspace = true }

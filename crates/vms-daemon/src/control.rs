@@ -52,10 +52,13 @@ impl Target {
     /// when it has none. `control_addr` does not apply, since the WebSocket
     /// goes through the same HTTPS front as the rest of the Coordinator.
     pub(crate) fn wss(coordinator_url: &str) -> anyhow::Result<Self> {
-        let (host, port) = url_host_port(coordinator_url)?;
+        let url = crate::coordinator::https_url(coordinator_url)?;
+        let host = url
+            .host_str()
+            .with_context(|| format!("coordinator URL {coordinator_url:?} has no host"))?;
         Ok(Self {
-            host,
-            port: port.unwrap_or(443),
+            host: unbracket(host).to_owned(),
+            port: url.port().unwrap_or(443),
         })
     }
 }
@@ -113,14 +116,6 @@ impl Default for Timings {
             stable_uptime: Duration::from_secs(30),
         }
     }
-}
-
-/// The trusted roots for the Coordinator's certificate: the Mozilla set, so
-/// the result does not depend on the host's CA store.
-pub(crate) fn web_pki_roots() -> RootCertStore {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    roots
 }
 
 /// A control channel client, ready to [`run`](Self::run).

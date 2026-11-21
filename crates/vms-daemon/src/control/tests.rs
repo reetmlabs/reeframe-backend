@@ -73,6 +73,8 @@ fn the_websocket_goes_to_the_coordinator_url_and_ignores_control_addr() {
         8443
     );
     assert!(Target::wss("not a url").is_err());
+    let error = Target::wss("http://coordinator.example").unwrap_err();
+    assert!(error.to_string().contains("https://"), "{error}");
 }
 
 // -- Retry delay --
@@ -169,7 +171,15 @@ impl TestServer {
         let cert = generated.cert.der().clone();
         let key =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()));
+        Self::start_with(behavior, client_key, cert, key)
+    }
 
+    fn start_with(
+        behavior: Behavior,
+        client_key: VerifyingKey,
+        cert: CertificateDer<'static>,
+        key: PrivateKeyDer<'static>,
+    ) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -448,4 +458,30 @@ async fn racing_skips_an_address_that_never_answers() {
 
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_ne!(addr, black_hole.local_addr().unwrap());
+}
+
+#[tokio::test]
+async fn quic_trusts_a_coordinator_signed_by_a_ca_from_the_ca_file() {
+    let ca = crate::test_ca::TestCa::new();
+    let (cert, cert_key) = ca.leaf("localhost");
+    let key = SigningKey::generate(&mut OsRng);
+    let server = TestServer::start_with(Behavior::Pong, key.verifying_key(), cert, cert_key);
+    let ca_file = ca.pem_file();
+
+    let with_ca = crate::coordinator::trusted_roots(ca_file.to_str().unwrap()).unwrap();
+    let connected = quic::Transport::new(&key, server.target(), with_ca)
+        .unwrap()
+        .connect(&fast_timings())
+        .await;
+    assert!(connected.is_ok(), "rejected although the CA is in ca_file");
+
+    let public_only = crate::coordinator::trusted_roots("").unwrap();
+    let connected = quic::Transport::new(&key, server.target(), public_only)
+        .unwrap()
+        .connect(&fast_timings())
+        .await;
+    assert!(
+        matches!(connected, Err(SessionEnd::ConnectFailed(_))),
+        "accepted a certificate from an untrusted CA"
+    );
 }

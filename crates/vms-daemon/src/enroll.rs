@@ -12,6 +12,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::cli::EnrollArgs;
+use crate::coordinator;
 use crate::identity::{self, SiteIdentity};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,8 +104,9 @@ pub async fn enroll(
 }
 
 /// Runs the `enroll` subcommand: generates a new key, enrolls it, and only
-/// then replaces the identity file.
-pub async fn run(args: EnrollArgs, identity_path: &Path) -> anyhow::Result<()> {
+/// then replaces the identity file. `ca_file` is `[coordinator] ca_file`, so
+/// enrollment trusts the same certificates as the control channel later.
+pub async fn run(args: EnrollArgs, identity_path: &Path, ca_file: &str) -> anyhow::Result<()> {
     if !args.force && identity::load(identity_path)?.is_some() {
         anyhow::bail!(
             "{} already holds a site identity. Pass --force to enroll again with a new key",
@@ -113,8 +115,9 @@ pub async fn run(args: EnrollArgs, identity_path: &Path) -> anyhow::Result<()> {
     }
 
     let coordinator_url = args.coordinator.trim_end_matches('/').to_string();
+    coordinator::https_url(&coordinator_url)?;
     let key = SigningKey::generate(&mut OsRng);
-    let client = reqwest::Client::builder().timeout(TIMEOUT).build()?;
+    let client = coordinator::http_client(coordinator::trusted_roots(ca_file)?, TIMEOUT)?;
     let be_id = enroll(&client, &coordinator_url, &args.code, &key).await?;
 
     identity::save(
@@ -138,8 +141,13 @@ pub async fn run(args: EnrollArgs, identity_path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signature, VerifyingKey};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use std::path::PathBuf;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{
+        AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+    };
+
+    use crate::test_ca::TestCa;
 
     struct Captured {
         request_line: String,
@@ -152,44 +160,88 @@ mod tests {
         status: u16,
         body: impl Into<String>,
     ) -> (String, tokio::sync::oneshot::Receiver<Captured>) {
-        let body = body.into();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let body = body.into();
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(socket);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).await.unwrap();
-            let mut content_length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).await.unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    content_length = value.trim().parse().unwrap();
-                }
-            }
-            let mut request_body = vec![0; content_length];
-            reader.read_exact(&mut request_body).await.unwrap();
-            let response = format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            reader
-                .get_mut()
-                .write_all(response.as_bytes())
-                .await
-                .unwrap();
-            let _ = tx.send(Captured {
-                request_line: request_line.trim_end().to_string(),
-                body: serde_json::from_slice(&request_body).unwrap(),
-            });
+            answer(socket, status, body, tx).await;
         });
         (url, rx)
+    }
+
+    /// Like [`spawn_coordinator`], over HTTPS with the given certificate, at
+    /// `https://localhost:<port>`.
+    async fn spawn_tls_coordinator(
+        status: u16,
+        body: impl Into<String>,
+        cert: CertificateDer<'static>,
+        key: PrivateKeyDer<'static>,
+    ) -> (String, tokio::sync::oneshot::Receiver<Captured>) {
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let tls = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "https://localhost:{}",
+            listener.local_addr().unwrap().port()
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let body = body.into();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            // A client that rejects the certificate ends the handshake here.
+            let Ok(socket) = acceptor.accept(socket).await else {
+                return;
+            };
+            answer(socket, status, body, tx).await;
+        });
+        (url, rx)
+    }
+
+    async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
+        socket: S,
+        status: u16,
+        body: String,
+        tx: tokio::sync::oneshot::Sender<Captured>,
+    ) {
+        let mut reader = BufReader::new(socket);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        let mut request_body = vec![0; content_length];
+        reader.read_exact(&mut request_body).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        reader
+            .get_mut()
+            .write_all(response.as_bytes())
+            .await
+            .unwrap();
+        let _ = reader.get_mut().shutdown().await;
+        let _ = tx.send(Captured {
+            request_line: request_line.trim_end().to_string(),
+            body: serde_json::from_slice(&request_body).unwrap(),
+        });
     }
 
     fn decode(value: &serde_json::Value) -> Vec<u8> {
@@ -265,13 +317,28 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
+    /// An HTTPS stand-in from a fresh test CA, and a `ca_file` that trusts it.
+    async fn spawn_trusted_coordinator(status: u16, body: impl Into<String>) -> (String, PathBuf) {
+        let ca = TestCa::new();
+        let (cert, key) = ca.leaf("localhost");
+        let (url, _captured) = spawn_tls_coordinator(status, body, cert, key).await;
+        (url, ca.pem_file())
+    }
+
     #[tokio::test]
     async fn a_successful_run_writes_the_identity() {
         let be_id = Uuid::new_v4();
-        let (url, _captured) = spawn_coordinator(200, format!(r#"{{"be_id":"{be_id}"}}"#)).await;
+        let (url, ca_file) =
+            spawn_trusted_coordinator(200, format!(r#"{{"be_id":"{be_id}"}}"#)).await;
         let path = scratch_identity_path();
 
-        run(args(&format!("{url}/"), false), &path).await.unwrap();
+        run(
+            args(&format!("{url}/"), false),
+            &path,
+            ca_file.to_str().unwrap(),
+        )
+        .await
+        .unwrap();
 
         let written = identity::load(&path).unwrap().unwrap();
         assert_eq!(written.be_id, be_id);
@@ -283,7 +350,7 @@ mod tests {
         let path = scratch_identity_path();
         let before = existing_identity(&path);
 
-        let result = run(args("http://127.0.0.1:9", false), &path).await;
+        let result = run(args("https://127.0.0.1:9", false), &path, "").await;
 
         assert!(result.unwrap_err().to_string().contains("--force"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -291,13 +358,48 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_enrollment_leaves_the_existing_identity_untouched() {
-        let (url, _captured) = spawn_coordinator(401, r#"{"error":"no"}"#).await;
+        let (url, ca_file) = spawn_trusted_coordinator(401, r#"{"error":"no"}"#).await;
         let path = scratch_identity_path();
         let before = existing_identity(&path);
 
-        let result = run(args(&url, true), &path).await;
+        let result = run(args(&url, true), &path, ca_file.to_str().unwrap()).await;
 
-        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn enrollment_trusts_a_coordinator_signed_by_a_ca_from_the_ca_file() {
+        let ca = TestCa::new();
+        let ca_file = ca.pem_file();
+        let be_id = Uuid::new_v4();
+
+        let (cert, key) = ca.leaf("localhost");
+        let (url, _captured) =
+            spawn_tls_coordinator(200, format!(r#"{{"be_id":"{be_id}"}}"#), cert, key).await;
+        let path = scratch_identity_path();
+        run(args(&url, false), &path, ca_file.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(identity::load(&path).unwrap().unwrap().be_id, be_id);
+
+        let (cert, key) = ca.leaf("localhost");
+        let (url, _captured) =
+            spawn_tls_coordinator(200, format!(r#"{{"be_id":"{be_id}"}}"#), cert, key).await;
+        let path = scratch_identity_path();
+        let error = run(args(&url, false), &path, "").await.unwrap_err();
+        assert!(error.to_string().contains("cannot reach"), "{error:#}");
+        assert!(identity::load(&path).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_http_coordinator_url_is_rejected_before_any_request() {
+        let (url, _captured) = spawn_coordinator(200, r#"{"be_id":"x"}"#).await;
+        let path = scratch_identity_path();
+
+        let error = run(args(&url, false), &path, "").await.unwrap_err();
+
+        assert!(error.to_string().contains("https://"), "{error:#}");
+        assert!(identity::load(&path).unwrap().is_none());
     }
 }

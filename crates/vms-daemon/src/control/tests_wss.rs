@@ -54,6 +54,15 @@ impl WsServer {
         let cert = generated.cert.der().clone();
         let key =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()));
+        Self::start_with(behavior, site_key, cert, key).await
+    }
+
+    async fn start_with(
+        behavior: Behavior,
+        site_key: VerifyingKey,
+        cert: CertificateDer<'static>,
+        key: PrivateKeyDer<'static>,
+    ) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let tls = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -405,5 +414,32 @@ async fn the_websocket_goes_through_the_outbound_proxy() {
 
     assert!(result.is_ok(), "login through the proxy failed");
     assert_eq!(tunnels.load(Ordering::SeqCst), 1);
+    assert_eq!(server.logins(), 1);
+}
+
+#[tokio::test]
+async fn the_websocket_trusts_a_coordinator_signed_by_a_ca_from_the_ca_file() {
+    let ca = crate::test_ca::TestCa::new();
+    let (cert, cert_key) = ca.leaf("localhost");
+    let key = SigningKey::generate(&mut OsRng);
+    let server = WsServer::start_with(Behavior::Pong, key.verifying_key(), cert, cert_key).await;
+    let ca_file = ca.pem_file();
+
+    let with_ca = crate::coordinator::trusted_roots(ca_file.to_str().unwrap()).unwrap();
+    let connected = wss::Transport::new(&key, server.target(), None, with_ca)
+        .unwrap()
+        .connect(&fast_timings())
+        .await;
+    assert!(connected.is_ok(), "rejected although the CA is in ca_file");
+
+    let public_only = crate::coordinator::trusted_roots("").unwrap();
+    let connected = wss::Transport::new(&key, server.target(), None, public_only)
+        .unwrap()
+        .connect(&fast_timings())
+        .await;
+    assert!(
+        matches!(connected, Err(SessionEnd::ConnectFailed(_))),
+        "accepted a certificate from an untrusted CA"
+    );
     assert_eq!(server.logins(), 1);
 }

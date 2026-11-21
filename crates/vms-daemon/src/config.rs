@@ -155,6 +155,12 @@ pub struct CoordinatorConfig {
     /// or VMS_COORDINATOR__CONTROL_ADDR env var.
     #[serde(default)]
     pub control_addr: String,
+    /// PEM file with extra CA certificates to trust for the Coordinator, for a
+    /// Coordinator whose certificate comes from a private or company CA. They
+    /// are added to the public roots. Empty trusts the public roots only. Set
+    /// via config file or VMS_COORDINATOR__CA_FILE env var.
+    #[serde(default)]
+    pub ca_file: String,
 }
 
 /// Where the site identity from `vms-daemon enroll` is kept.
@@ -270,6 +276,7 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_AUTH__JWKS_URL`       | `auth.jwks_url`             |
 /// | `VMS_COORDINATOR__BE_ID`   | `coordinator.be_id`         |
 /// | `VMS_COORDINATOR__CONTROL_ADDR` | `coordinator.control_addr` |
+/// | `VMS_COORDINATOR__CA_FILE` | `coordinator.ca_file` |
 /// | `VMS_IDENTITY__PATH`       | `identity.path`             |
 /// | `VMS_NETWORK__OUTBOUND_PROXY_URL` | `network.outbound_proxy_url` |
 /// | `VMS_LOG_LEVEL`            | `log_level`                 |
