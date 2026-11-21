@@ -165,15 +165,7 @@ impl SessionManager {
                 sdp_mid: _,
                 sdp_mline_index,
             } => self.add_candidate(&session_id, sdp_mline_index, candidate),
-            Message::SessionClose { session_id, reason } => {
-                if self.remove(&session_id).is_some() {
-                    tracing::info!(
-                        session_id,
-                        reason,
-                        "WebRTC session closed by the Coordinator"
-                    );
-                }
-            }
+            Message::SessionClose { session_id, reason } => self.close(&session_id, &reason),
             _ => {}
         }
     }
@@ -301,6 +293,16 @@ impl SessionManager {
         match (&entry.media, entry.remote_set) {
             (Some(media), true) => media.add_candidate(mline_index, &candidate),
             _ => entry.pending.push((mline_index, candidate)),
+        }
+    }
+
+    fn close(&self, session_id: &str, reason: &str) {
+        if self.remove(session_id).is_some() {
+            tracing::info!(
+                session_id,
+                reason,
+                "WebRTC session closed by the Coordinator"
+            );
         }
     }
 
