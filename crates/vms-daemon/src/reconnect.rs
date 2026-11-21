@@ -116,6 +116,45 @@ mod tests {
         assert_eq!(backoff.next_delay().as_millis() as u64, 20);
     }
 
+    /// Waits out each delay like the reconnect loop does, so the clock keeps
+    /// moving while every attempt fails.
+    async fn failing_delays(backoff: &mut Backoff, count: usize) -> Vec<u64> {
+        let mut delays = Vec::new();
+        for _ in 0..count {
+            let delay = backoff.next_delay();
+            delays.push(delay.as_secs());
+            tokio::time::advance(delay).await;
+        }
+        delays
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failures_after_a_stable_connection_escalate_again() {
+        let mut backoff = Backoff::new(
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+        );
+        backoff.record_connected();
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        assert_eq!(failing_delays(&mut backoff, 4).await, [1, 2, 4, 8]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_outage_without_any_connection_keeps_escalating() {
+        let mut backoff = Backoff::new(
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(
+            failing_delays(&mut backoff, 8).await,
+            [1, 2, 4, 8, 16, 32, 60, 60]
+        );
+    }
+
     #[test]
     fn jitter_stays_within_twenty_percent_and_never_negative() {
         let base = Duration::from_secs(10);
