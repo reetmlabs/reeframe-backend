@@ -345,3 +345,112 @@ impl SessionManager {
 fn stop_in_background(media: Arc<Media>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || media.stop())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vms_core::{AuthClaims, VmsError};
+
+    /// Accepts only the token "valid".
+    struct FixedToken;
+
+    #[async_trait::async_trait]
+    impl AuthProvider for FixedToken {
+        async fn verify_token(&self, token: &str) -> Result<AuthClaims, VmsError> {
+            if token != "valid" {
+                return Err(VmsError::Unauthorized("bad token".into()));
+            }
+            Ok(AuthClaims {
+                user_id: uuid::Uuid::nil(),
+                username: "test".into(),
+                roles: vec!["viewer".into()],
+                expires_at: i64::MAX,
+            })
+        }
+
+        fn provider_name(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    fn manager(max_sessions: usize) -> (SessionManager, mpsc::UnboundedReceiver<Message>) {
+        let (outbound, outbound_rx) = mpsc::unbounded_channel();
+        let config = Config {
+            max_sessions,
+            ..Config::default()
+        };
+        let manager = SessionManager::new(config, Arc::new(FixedToken), outbound).unwrap();
+        (manager, outbound_rx)
+    }
+
+    const OFFER: &str = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n\
+                         m=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\n\
+                         a=recvonly\r\na=rtpmap:102 H264/90000\r\n\
+                         a=fmtp:102 packetization-mode=1;profile-level-id=42e01f\r\n";
+
+    fn offer(session_id: &str, sdp: &str, token: &str) -> Message {
+        Message::SessionOffer {
+            session_id: session_id.into(),
+            sdp: sdp.into(),
+            ice_servers: Vec::new(),
+            site_token: token.into(),
+        }
+    }
+
+    async fn error_code(outbound: &mut mpsc::UnboundedReceiver<Message>) -> String {
+        match tokio::time::timeout(Duration::from_secs(2), outbound.recv()).await {
+            Ok(Some(Message::SessionError {
+                session_id, code, ..
+            })) => {
+                assert_eq!(session_id, "s1");
+                code
+            }
+            other => panic!("expected a session_error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_offer_with_an_invalid_site_token_is_refused() {
+        let (manager, mut outbound) = manager(16);
+
+        manager.handle(offer("s1", OFFER, "forged"));
+
+        assert_eq!(
+            error_code(&mut outbound).await,
+            session_error::INVALID_TOKEN
+        );
+        assert_eq!(manager.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_offer_beyond_max_sessions_is_refused() {
+        let (manager, mut outbound) = manager(1);
+        manager
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("busy".into(), Entry::default());
+
+        manager.handle(offer("s1", OFFER, "valid"));
+
+        assert_eq!(
+            error_code(&mut outbound).await,
+            session_error::TOO_MANY_SESSIONS
+        );
+        assert_eq!(manager.session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_offer_is_refused() {
+        let (manager, mut outbound) = manager(16);
+
+        manager.handle(offer("s1", "this is not SDP", "valid"));
+
+        assert_eq!(
+            error_code(&mut outbound).await,
+            session_error::INVALID_OFFER
+        );
+        assert_eq!(manager.session_count(), 0);
+    }
+}

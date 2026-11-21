@@ -69,3 +69,43 @@ fn fmtp_of(media: &gst_sdp::SDPMediaRef, pt: u32) -> Option<String> {
         .map_while(|i| media.attribute_val_n("fmtp", i))
         .find_map(|fmtp| fmtp.strip_prefix(&prefix).map(str::to_owned))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offer_with(video_formats: &str) -> String {
+        format!(
+            "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n\
+             m=video 9 UDP/TLS/RTP/SAVPF 96 102 127\r\nc=IN IP4 0.0.0.0\r\n\
+             a=mid:0\r\na=recvonly\r\n{video_formats}"
+        )
+    }
+
+    fn init() {
+        gst::init().unwrap();
+    }
+
+    #[test]
+    fn the_baseline_packetization_mode_1_format_is_picked() {
+        init();
+        let text = offer_with(
+            "a=rtpmap:96 VP8/90000\r\n\
+             a=rtpmap:102 H264/90000\r\n\
+             a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f\r\n\
+             a=rtpmap:127 H264/90000\r\n\
+             a=fmtp:127 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n",
+        );
+        assert_eq!(parse(&text).unwrap().h264_payload_type, 127);
+    }
+
+    #[test]
+    fn garbage_and_offers_without_h264_video_are_rejected() {
+        init();
+        assert!(parse("not sdp at all").is_err());
+        assert!(parse(&offer_with("a=rtpmap:96 VP8/90000\r\n")).is_err());
+        let audio_only = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n\
+                          m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n";
+        assert!(parse(audio_only).is_err());
+    }
+}

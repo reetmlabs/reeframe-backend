@@ -15,3 +15,7 @@ tokio-util        = { workspace = true }
 tracing           = { workspace = true }
 anyhow            = { workspace = true }
 percent-encoding  = "2"
+
+[dev-dependencies]
+async-trait = { workspace = true }
+uuid        = { workspace = true }

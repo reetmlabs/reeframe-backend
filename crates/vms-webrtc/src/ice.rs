@@ -48,3 +48,50 @@ pub(crate) fn urls(servers: &[IceServer]) -> IceUrls {
     }
     urls
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(urls: &[&str], credentials: Option<(&str, &str)>) -> IceServer {
+        IceServer {
+            urls: urls.iter().map(|url| url.to_string()).collect(),
+            username: credentials.map(|(user, _)| user.to_owned()),
+            credential: credentials.map(|(_, pass)| pass.to_owned()),
+        }
+    }
+
+    #[test]
+    fn stun_and_turn_urls_get_webrtcbin_form_with_escaped_credentials() {
+        let urls = urls(&[
+            server(&["stun:stun.example:3478", "stun:second.example"], None),
+            server(
+                &[
+                    "turn:turn.example:3478?transport=udp",
+                    "turn:turn.example:3478?transport=tcp",
+                    "turns:turn.example:5349?transport=tcp",
+                ],
+                Some(("1732170000:site", "c3/x+y=")),
+            ),
+        ]);
+
+        assert_eq!(urls.stun.as_deref(), Some("stun://stun.example:3478"));
+        assert_eq!(
+            urls.turn,
+            [
+                "turn://1732170000%3Asite:c3%2Fx%2By%3D@turn.example:3478?transport=udp",
+                "turn://1732170000%3Asite:c3%2Fx%2By%3D@turn.example:3478?transport=tcp",
+                "turns://1732170000%3Asite:c3%2Fx%2By%3D@turn.example:5349?transport=tcp",
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_without_credentials_and_unknown_schemes_are_skipped() {
+        let urls = urls(&[
+            server(&["turn:turn.example:3478"], None),
+            server(&["https://example.com"], Some(("u", "p"))),
+        ]);
+        assert_eq!(urls, IceUrls::default());
+    }
+}
