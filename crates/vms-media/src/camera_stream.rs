@@ -430,6 +430,24 @@ fn tee_name(camera_id: Uuid) -> String {
     format!("cam_{}_tee", camera_id.as_simple())
 }
 
+/// Bring an element added to a camera pipeline to the state the pipeline is
+/// heading for. Camera pipelines only target `Null` or `Playing`, but while an
+/// async sink like `splitmuxsink` prerolls the pipeline reports `Paused`, and a
+/// branch synced to that waits for a preroll that its own full queue prevents.
+pub(crate) fn sync_branch_state(el: &gstreamer::Element) -> Result<(), gstreamer::glib::BoolError> {
+    let parent_state = el
+        .parent()
+        .and_then(|p| p.downcast::<gstreamer::Element>().ok())
+        .map(|p| p.current_state());
+    match parent_state {
+        Some(gstreamer::State::Paused | gstreamer::State::Playing) => el
+            .set_state(gstreamer::State::Playing)
+            .map(|_| ())
+            .map_err(|e| gstreamer::glib::bool_error!("set {} to Playing: {e}", el.name())),
+        _ => el.sync_state_with_parent(),
+    }
+}
+
 /// How long to wait for the video codec to link into `tee`. SDP negotiation
 /// normally takes under a second.
 const CODEC_WIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -613,11 +631,8 @@ fn link_recording_branch(
     downstream_first.extend(recparse);
     downstream_first.push(queue);
     for el in downstream_first {
-        el.sync_state_with_parent().map_err(|e| {
-            VmsError::Media(format!(
-                "attach recording branch: sync_state_with_parent: {e}"
-            ))
-        })?;
+        sync_branch_state(el)
+            .map_err(|e| VmsError::Media(format!("attach recording branch: sync state: {e}")))?;
     }
 
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {

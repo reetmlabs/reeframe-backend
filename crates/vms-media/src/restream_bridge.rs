@@ -249,7 +249,7 @@ pub fn attach(
 
     // Sink first, tee last, so no buffer reaches an element still in `Null`.
     for el in [appsink.upcast_ref::<gstreamer::Element>(), &queue] {
-        el.sync_state_with_parent()
+        crate::camera_stream::sync_branch_state(el)
             .map_err(|e| VmsError::Media(format!("sync restream bridge element: {e}")))?;
     }
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {

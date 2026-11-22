@@ -1269,7 +1269,7 @@ fn snapshot_from_tee(
         &decodebin,
         &queue,
     ] {
-        el.sync_state_with_parent()
+        crate::camera_stream::sync_branch_state(el)
             .map_err(|e| VmsError::Media(format!("sync snapshot element: {e}")))?;
     }
 

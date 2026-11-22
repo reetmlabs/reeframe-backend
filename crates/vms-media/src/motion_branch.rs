@@ -332,7 +332,7 @@ pub fn attach(
         &rate,
         &queue,
     ] {
-        el.sync_state_with_parent()
+        crate::camera_stream::sync_branch_state(el)
             .map_err(|e| VmsError::Media(format!("sync motion element: {e}")))?;
     }
 
@@ -502,8 +502,7 @@ fn link_decoder(
     decoder
         .link(rate)
         .map_err(|e| VmsError::Media(format!("motion link {factory}->videorate: {e}")))?;
-    decoder
-        .sync_state_with_parent()
+    crate::camera_stream::sync_branch_state(&decoder)
         .map_err(|e| VmsError::Media(format!("sync motion {factory}: {e}")))?;
     let decoder_sink = decoder
         .static_pad("sink")
