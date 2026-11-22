@@ -80,6 +80,7 @@ pub async fn update_retention_policy(
                 motion_detection_enabled: None,
                 thumbnails_enabled: None,
                 live_view_stream: None,
+                motion_detection_mode: None,
             },
         )
         .await?;

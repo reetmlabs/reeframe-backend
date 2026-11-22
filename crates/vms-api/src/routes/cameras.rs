@@ -2,10 +2,10 @@ use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vms_db::{
-    entities::camera::{self, LiveViewStream, RingBufferStorage},
+    entities::camera::{self, LiveViewStream, MotionDetectionMode, RingBufferStorage},
     repos::camera::{CreateCamera, UpdateCamera},
 };
-use vms_media::StreamQuality;
+use vms_media::{MotionMode, StreamQuality};
 
 use crate::{
     error::{parse_body, parse_id, ApiError},
@@ -44,6 +44,8 @@ pub struct CameraDto {
     /// Whether motion detection runs while the camera is live. A pipeline
     /// with an `Event` trigger on this camera keeps it running anyway.
     pub motion_detection_enabled: bool,
+    /// Which frames motion detection decodes: `keyframes` (default) or `full`.
+    pub motion_detection_mode: MotionDetectionMode,
     /// Whether scrub-preview thumbnails are captured while the camera records.
     pub thumbnails_enabled: bool,
     /// Which stream live view restreams by default (`sub` falls back to `main`
@@ -85,6 +87,7 @@ impl CameraDto {
             recording,
             desired_recording: m.desired_recording,
             motion_detection_enabled: m.motion_detection_enabled,
+            motion_detection_mode: m.motion_detection_mode,
             thumbnails_enabled: m.thumbnails_enabled,
             live_view_stream: m.live_view_stream,
             main_restream_url,
@@ -112,6 +115,7 @@ pub struct CreateCameraBody {
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
     pub motion_detection_enabled: Option<bool>,
+    pub motion_detection_mode: Option<MotionDetectionMode>,
     pub thumbnails_enabled: Option<bool>,
     pub live_view_stream: Option<LiveViewStream>,
 }
@@ -133,6 +137,7 @@ pub struct UpdateCameraBody {
     pub ring_buffer_storage: Option<RingBufferStorage>,
     pub enabled: Option<bool>,
     pub motion_detection_enabled: Option<bool>,
+    pub motion_detection_mode: Option<MotionDetectionMode>,
     pub thumbnails_enabled: Option<bool>,
     pub live_view_stream: Option<LiveViewStream>,
 }
@@ -209,9 +214,16 @@ pub async fn create_camera(
         motion_detection_enabled: body.motion_detection_enabled.unwrap_or(false),
         thumbnails_enabled: body.thumbnails_enabled.unwrap_or(false),
         live_view_stream: body.live_view_stream.unwrap_or(LiveViewStream::Sub),
+        motion_detection_mode: body
+            .motion_detection_mode
+            .unwrap_or(MotionDetectionMode::Keyframes),
     };
 
     let camera = state.camera_repo.create(input).await?;
+    state
+        .media_manager
+        .set_motion_detection_mode(camera.id, media_motion_mode(camera.motion_detection_mode))
+        .await;
     state
         .media_manager
         .set_motion_detection_enabled(camera.id, camera.motion_detection_enabled)
@@ -282,6 +294,7 @@ pub async fn update_camera(
         motion_detection_enabled: body.motion_detection_enabled,
         thumbnails_enabled: body.thumbnails_enabled,
         live_view_stream: body.live_view_stream,
+        motion_detection_mode: body.motion_detection_mode,
     };
 
     let camera = state.camera_repo.update(id, input).await?;
@@ -293,6 +306,12 @@ pub async fn update_camera(
                 .set_stream_urls(id, &rtsp_url, sub_rtsp_url.as_deref())
                 .await;
         }
+    }
+    if body.motion_detection_mode.is_some() {
+        state
+            .media_manager
+            .set_motion_detection_mode(id, media_motion_mode(camera.motion_detection_mode))
+            .await;
     }
     if body.motion_detection_enabled.is_some() {
         state
@@ -406,6 +425,14 @@ fn parse_stream_quality(req: &mut Request) -> Result<Option<StreamQuality>, ApiE
         Some(other) => Err(ApiError::bad_request(format!(
             "invalid quality '{other}', expected 'main' or 'sub'"
         ))),
+    }
+}
+
+/// The media-layer motion mode for a camera's stored setting.
+pub fn media_motion_mode(mode: MotionDetectionMode) -> MotionMode {
+    match mode {
+        MotionDetectionMode::Keyframes => MotionMode::Keyframes,
+        MotionDetectionMode::Full => MotionMode::Full,
     }
 }
 
@@ -536,6 +563,7 @@ mod live_view_quality_tests {
             motion_detection_enabled: false,
             thumbnails_enabled: false,
             live_view_stream,
+            motion_detection_mode: MotionDetectionMode::Keyframes,
         }
     }
 

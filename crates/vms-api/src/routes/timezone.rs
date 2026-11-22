@@ -77,6 +77,7 @@ pub async fn update_camera_timezone(
                 motion_detection_enabled: None,
                 thumbnails_enabled: None,
                 live_view_stream: None,
+                motion_detection_mode: None,
             },
         )
         .await?;

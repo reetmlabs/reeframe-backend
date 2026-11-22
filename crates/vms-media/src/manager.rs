@@ -214,6 +214,9 @@ pub struct MediaManager {
     /// Cameras a pipeline needs motion events from, which keeps motion
     /// running even when the camera's own switch is off.
     motion_required: Mutex<HashSet<Uuid>>,
+    /// Each camera's motion detection mode. A camera missing here uses the
+    /// default.
+    motion_modes: Mutex<HashMap<Uuid, MotionMode>>,
     thumbnails: Mutex<HashMap<Uuid, ThumbnailHandle>>,
     /// Each camera's `thumbnails_enabled`. A camera missing here counts as
     /// disabled, matching the column default.
@@ -260,6 +263,7 @@ impl MediaManager {
             motion: Mutex::new(HashMap::new()),
             motion_enabled: Mutex::new(HashMap::new()),
             motion_required: Mutex::new(HashSet::new()),
+            motion_modes: Mutex::new(HashMap::new()),
             thumbnails: Mutex::new(HashMap::new()),
             thumbnails_enabled: Mutex::new(HashMap::new()),
         })
@@ -762,6 +766,21 @@ impl MediaManager {
         self.reconcile_analytics(camera_id).await;
     }
 
+    /// Apply a camera's motion detection mode. A running motion branch is
+    /// rebuilt in the new mode while the camera's streams keep running.
+    pub async fn set_motion_detection_mode(&self, camera_id: Uuid, mode: MotionMode) {
+        let previous = self.motion_modes.lock().unwrap().insert(camera_id, mode);
+        if previous.unwrap_or_default() == mode {
+            return;
+        }
+        let handle = self.motion.lock().unwrap().remove(&camera_id);
+        if let Some(h) = handle {
+            h.stop_and_wait_for_removal().await;
+            tracing::info!(camera_id = %camera_id, ?mode, "Rebuilding motion detection branch");
+            self.reconcile_analytics(camera_id).await;
+        }
+    }
+
     /// Apply a camera's `thumbnails_enabled` setting. Thumbnails are only
     /// captured while the camera records.
     pub async fn set_thumbnails_enabled(&self, camera_id: Uuid, enabled: bool) {
@@ -911,7 +930,12 @@ impl MediaManager {
             pipeline,
             tee_name,
             camera_id,
-            MotionMode::default(),
+            self.motion_modes
+                .lock()
+                .unwrap()
+                .get(&camera_id)
+                .copied()
+                .unwrap_or_default(),
             self.event_tx.clone(),
         )?;
         self.motion.lock().unwrap().insert(camera_id, handle);

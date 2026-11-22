@@ -3051,6 +3051,7 @@ mod tests {
             motion_detection_enabled: Set(true),
             thumbnails_enabled: Set(false),
             live_view_stream: Set(crate::entities::camera::LiveViewStream::Sub),
+            motion_detection_mode: Set(crate::entities::camera::MotionDetectionMode::Keyframes),
         }
         .insert(&repo.db)
         .await
@@ -3308,6 +3309,7 @@ mod tests {
             motion_detection_enabled: Set(true),
             thumbnails_enabled: Set(false),
             live_view_stream: Set(crate::entities::camera::LiveViewStream::Sub),
+            motion_detection_mode: Set(crate::entities::camera::MotionDetectionMode::Keyframes),
         }
         .insert(&repo.db)
         .await

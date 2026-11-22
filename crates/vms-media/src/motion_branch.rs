@@ -90,13 +90,33 @@ impl MotionHandle {
     }
 
     /// Detach the GStreamer elements, signal the analyzer task to stop, and
-    /// wait for it to exit.
+    /// wait for it to exit. The elements are removed from the pipeline shortly
+    /// after this returns.
     pub async fn stop(self) {
-        if let Err(e) = detach(&self.pipeline, self.camera_id) {
-            tracing::warn!(camera_id = %self.camera_id, error = %e, "Failed to detach motion branch");
+        self.stop_inner().await;
+    }
+
+    /// Like [`stop`](Self::stop), but also waits until the elements are out of
+    /// the pipeline, so a new branch for the camera can be attached right away.
+    pub async fn stop_and_wait_for_removal(self) {
+        if let Some(removal) = self.stop_inner().await {
+            tokio::task::spawn_blocking(move || removal.join())
+                .await
+                .ok();
         }
+    }
+
+    async fn stop_inner(self) -> Option<std::thread::JoinHandle<()>> {
+        let removal = match detach(&self.pipeline, self.camera_id) {
+            Ok(removal) => removal,
+            Err(e) => {
+                tracing::warn!(camera_id = %self.camera_id, error = %e, "Failed to detach motion branch");
+                None
+            }
+        };
         let _ = self.shutdown_tx.send(());
         self.task.await.ok();
+        removal
     }
 }
 
@@ -293,12 +313,15 @@ pub fn attach(
 ///
 /// Uses the same blocking pad probe as [`crate::ring_buffer_branch::detach`].
 /// The tee is found through the queue's peer pad, so this works for whichever
-/// tee (main or sub) `attach` used. Returns immediately; cleanup is
-/// asynchronous. Safe to call while `Playing`, and a no-op if no branch is
-/// attached.
-fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsError> {
+/// tee (main or sub) `attach` used. Returns immediately with the thread that
+/// finishes the removal. Safe to call while `Playing`, and a no-op if no branch
+/// is attached.
+fn detach(
+    pipeline: &gstreamer::Pipeline,
+    camera_id: Uuid,
+) -> Result<Option<std::thread::JoinHandle<()>>, VmsError> {
     let Some(queue) = pipeline.by_name(&queue_name(camera_id)) else {
-        return Ok(());
+        return Ok(None);
     };
 
     let names = [
@@ -344,7 +367,7 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
 
     let pipeline_clone2 = pipeline.clone();
     let tee_src_clone = tee_src.clone();
-    std::thread::spawn(move || {
+    let removal = std::thread::spawn(move || {
         let fired = rx.recv_timeout(Duration::from_secs(5)).is_ok();
         if fired {
             tracing::info!(camera_id = %camera_id, "Motion detection branch detached");
@@ -375,7 +398,7 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
         tee.release_request_pad(&tee_src_clone);
     });
 
-    Ok(())
+    Ok(Some(removal))
 }
 
 /// Build the software decoder for `caps` and link it between the queue's

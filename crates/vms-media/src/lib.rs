@@ -41,7 +41,7 @@ pub(crate) mod thumbnail_branch;
 
 pub use export::{export_range, ExportChunk};
 pub use manager::{MediaConfig, MediaManager};
-pub use motion::{MotionAnalyzer, MotionSignal};
+pub use motion::{MotionAnalyzer, MotionMode, MotionSignal};
 pub use onvif::{discover, resolve_streams, DiscoveredDevice, ResolvedStreams};
 pub use recording_path::resolve_recording_file;
 pub use restream::{RestreamServer, StreamQuality};
