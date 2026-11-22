@@ -1723,6 +1723,97 @@ mod attach_tests {
 
         assert!(wait_for_codec_wired(&pipeline, camera_id).await.is_err());
     }
+
+    /// A live H264 source at 20 fps with a keyframe every 2 s feeding the
+    /// camera's tee, plus a counter of buffers that reach the tee and a
+    /// channel that fires on the first keyframe.
+    fn live_gop_pipeline(
+        camera_id: Uuid,
+    ) -> (
+        gstreamer::Pipeline,
+        Arc<std::sync::atomic::AtomicU64>,
+        std::sync::mpsc::Receiver<()>,
+    ) {
+        gstreamer::init().ok();
+        let src = gstreamer::parse::bin_from_description(
+            "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=20/1 \
+             ! x264enc key-int-max=40 tune=zerolatency speed-preset=ultrafast ! h264parse",
+            true,
+        )
+        .unwrap();
+        let pipeline = pipeline_with_tee(camera_id);
+        let tee = pipeline.by_name(&tee_name(camera_id)).unwrap();
+        tee.set_property("allow-not-linked", true);
+        let caps_filter = tee
+            .static_pad("sink")
+            .unwrap()
+            .peer()
+            .unwrap()
+            .parent_element()
+            .unwrap();
+        pipeline.add(&src).unwrap();
+        src.link(&caps_filter).unwrap();
+
+        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (key_tx, key_rx) = std::sync::mpsc::sync_channel(1);
+        let count_in_probe = count.clone();
+        let tee_sink = pipeline
+            .by_name(&tee_name(camera_id))
+            .unwrap()
+            .static_pad("sink")
+            .unwrap();
+        tee_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            count_in_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(buf) = info.buffer() {
+                if !buf.flags().contains(gstreamer::BufferFlags::DELTA_UNIT) {
+                    let _ = key_tx.try_send(());
+                }
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+        (pipeline, count, key_rx)
+    }
+
+    /// Recording waits for a full GOP before it prerolls. A restream branch
+    /// attached in that window must still run, or its queue fills and blocks
+    /// the tee for good.
+    #[test]
+    fn branches_attached_while_recording_prerolls_keep_the_tee_flowing() {
+        let camera_id = Uuid::new_v4();
+        let (pipeline, count, key_rx) = live_gop_pipeline(camera_id);
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Skip the first keyframe so the next one comes a full GOP later.
+        let _ = key_rx.try_recv();
+        key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let scratch = ScratchDir::new();
+        attach_recording_branch(camera_id, &pipeline, &naming, &tx, &scratch.0, 60).unwrap();
+        let mounts = gstreamer_rtsp_server::RTSPMountPoints::new();
+        let _bridge = crate::restream_bridge::attach(
+            &pipeline,
+            &tee_name(camera_id),
+            camera_id,
+            "restream",
+            &mounts,
+            "/test",
+            "H264",
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_secs(4));
+        let before = count.load(std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_secs(2));
+        let after = count.load(std::sync::atomic::Ordering::SeqCst);
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        assert!(
+            after - before >= 20,
+            "tee stalled: {before} -> {after} buffers"
+        );
+    }
 }
 
 #[cfg(test)]
