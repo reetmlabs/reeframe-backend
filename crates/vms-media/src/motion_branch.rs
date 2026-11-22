@@ -532,10 +532,12 @@ fn link_decoder(
             if let Some(full) = switched {
                 long_keyframe_interval.store(full, Ordering::Relaxed);
             }
+            // `Handled` lets the binding free the buffer. With `Drop`, GStreamer
+            // also unrefs the pointer the binding already cleared and logs a critical.
             if pass {
                 gstreamer::PadProbeReturn::Ok
             } else {
-                gstreamer::PadProbeReturn::Drop
+                gstreamer::PadProbeReturn::Handled
             }
         });
     }
