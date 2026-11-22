@@ -30,6 +30,7 @@ pub mod manager;
 pub mod motion;
 pub(crate) mod motion_branch;
 pub mod onvif;
+pub mod plugin_check;
 pub mod recording_path;
 pub mod restream;
 pub(crate) mod restream_bridge;
