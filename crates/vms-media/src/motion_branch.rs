@@ -737,6 +737,61 @@ mod tests {
         pipeline.set_state(gstreamer::State::Null).unwrap();
     }
 
+    /// Feeds a GOP of `gop` frames at 25 fps starting at `start` through the
+    /// gate and returns how many buffers passed and the last switch seen.
+    fn feed_gop(gate: &mut KeyframeGate, start: Duration, gop: u32) -> (u32, Option<bool>) {
+        let mut passed = 0;
+        let mut switched = None;
+        for i in 0..gop {
+            let ts = start + Duration::from_millis(40) * i;
+            let (pass, s) = gate.admit(i == 0, Some(ts));
+            passed += u32::from(pass);
+            switched = switched.or(s);
+        }
+        (passed, switched)
+    }
+
+    #[test]
+    fn gate_passes_only_keyframes_at_a_short_interval() {
+        let mut gate = KeyframeGate::default();
+        for n in 0..5u32 {
+            let (passed, switched) = feed_gop(&mut gate, Duration::from_secs(2 * u64::from(n)), 50);
+            assert_eq!((passed, switched), (1, None), "GOP {n}");
+        }
+    }
+
+    #[test]
+    fn gate_decodes_every_frame_while_keyframes_are_far_apart() {
+        let mut gate = KeyframeGate::default();
+        // 10 s GOPs: the first interval is known at the second keyframe.
+        assert_eq!(feed_gop(&mut gate, Duration::ZERO, 250), (1, None));
+        assert_eq!(
+            feed_gop(&mut gate, Duration::from_secs(10), 250),
+            (250, Some(true))
+        );
+        assert_eq!(
+            feed_gop(&mut gate, Duration::from_secs(20), 250),
+            (250, None)
+        );
+
+        // Back to 2 s GOPs. The keyframe at 30 s still ends a 10 s interval, so
+        // keyframes only resume with the next one.
+        assert_eq!(feed_gop(&mut gate, Duration::from_secs(30), 50), (50, None));
+        assert_eq!(
+            feed_gop(&mut gate, Duration::from_secs(32), 50),
+            (1, Some(false))
+        );
+        assert_eq!(feed_gop(&mut gate, Duration::from_secs(34), 50), (1, None));
+    }
+
+    #[test]
+    fn gate_ignores_buffers_without_timestamps() {
+        let mut gate = KeyframeGate::default();
+        assert_eq!(gate.admit(true, None), (true, None));
+        assert_eq!(gate.admit(false, None), (false, None));
+        assert_eq!(gate.admit(true, None), (true, None));
+    }
+
     #[test]
     fn every_restream_codec_has_a_software_decoder_candidate() {
         for caps in ["video/x-h264", "video/x-h265", "image/jpeg", "video/x-av1"] {
