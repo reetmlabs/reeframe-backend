@@ -13,6 +13,7 @@ use vms_core::{RecordingChunkEvent, VmsError};
 
 use crate::camera_stream;
 use crate::camera_stream::{build_camera_stream, spawn_monitor, ChunkNaming};
+use crate::motion::MotionMode;
 use crate::motion_branch::{self, MotionHandle};
 use crate::restream::{RestreamServer, StreamQuality};
 use crate::ring_buffer::RingBuffer;
@@ -213,6 +214,9 @@ pub struct MediaManager {
     /// Cameras a pipeline needs motion events from, which keeps motion
     /// running even when the camera's own switch is off.
     motion_required: Mutex<HashSet<Uuid>>,
+    /// Each camera's motion detection mode. A camera missing here uses the
+    /// default.
+    motion_modes: Mutex<HashMap<Uuid, MotionMode>>,
     thumbnails: Mutex<HashMap<Uuid, ThumbnailHandle>>,
     /// Each camera's `thumbnails_enabled`. A camera missing here counts as
     /// disabled, matching the column default.
@@ -259,6 +263,7 @@ impl MediaManager {
             motion: Mutex::new(HashMap::new()),
             motion_enabled: Mutex::new(HashMap::new()),
             motion_required: Mutex::new(HashSet::new()),
+            motion_modes: Mutex::new(HashMap::new()),
             thumbnails: Mutex::new(HashMap::new()),
             thumbnails_enabled: Mutex::new(HashMap::new()),
         })
@@ -761,6 +766,31 @@ impl MediaManager {
         self.reconcile_analytics(camera_id).await;
     }
 
+    /// Apply a camera's motion detection mode. A running motion branch is
+    /// rebuilt in the new mode while the camera's streams keep running.
+    pub async fn set_motion_detection_mode(&self, camera_id: Uuid, mode: MotionMode) {
+        let previous = self.motion_modes.lock().unwrap().insert(camera_id, mode);
+        if previous.unwrap_or_default() == mode {
+            return;
+        }
+        let handle = self.motion.lock().unwrap().remove(&camera_id);
+        if let Some(h) = handle {
+            h.stop_and_wait_for_removal().await;
+            tracing::info!(camera_id = %camera_id, ?mode, "Rebuilding motion detection branch");
+            self.reconcile_analytics(camera_id).await;
+        }
+    }
+
+    /// The motion detection mode in use for a camera, or `None` while motion
+    /// detection is not running.
+    pub fn effective_motion_mode(&self, camera_id: Uuid) -> Option<MotionMode> {
+        self.motion
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .map(MotionHandle::effective_mode)
+    }
+
     /// Apply a camera's `thumbnails_enabled` setting. Thumbnails are only
     /// captured while the camera records.
     pub async fn set_thumbnails_enabled(&self, camera_id: Uuid, enabled: bool) {
@@ -906,7 +936,18 @@ impl MediaManager {
                 return Ok(());
             }
         }
-        let handle = motion_branch::attach(pipeline, tee_name, camera_id, self.event_tx.clone())?;
+        let handle = motion_branch::attach(
+            pipeline,
+            tee_name,
+            camera_id,
+            self.motion_modes
+                .lock()
+                .unwrap()
+                .get(&camera_id)
+                .copied()
+                .unwrap_or_default(),
+            self.event_tx.clone(),
+        )?;
         self.motion.lock().unwrap().insert(camera_id, handle);
         Ok(())
     }

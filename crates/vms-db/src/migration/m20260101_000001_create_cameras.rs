@@ -89,4 +89,5 @@ pub enum Camera {
     MotionDetectionEnabled,
     ThumbnailsEnabled,
     LiveViewStream,
+    MotionDetectionMode,
 }

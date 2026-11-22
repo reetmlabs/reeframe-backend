@@ -24,7 +24,9 @@ mod users;
 mod webhooks;
 
 pub use auth::{AccessTokenResponse, AuthResponse, LoginBody, RefreshBody, SetupBody, UserDto};
-pub use cameras::{live_view_quality, CameraDto, CreateCameraBody, UpdateCameraBody};
+pub use cameras::{
+    live_view_quality, media_motion_mode, CameraDto, CreateCameraBody, UpdateCameraBody,
+};
 pub use contact_lists::{ContactListDto, CreateContactListBody, UpdateContactListBody};
 pub use contacts::{ContactDto, CreateContactBody, UpdateContactBody};
 pub use destinations::{CreateDestinationBody, DestinationDto, UpdateDestinationBody};

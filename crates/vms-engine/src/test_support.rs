@@ -47,6 +47,7 @@ pub(crate) async fn recording_repo_with_camera() -> (RecordingRepo, Uuid) {
             motion_detection_enabled: false,
             thumbnails_enabled: false,
             live_view_stream: LiveViewStream::Sub,
+            motion_detection_mode: vms_db::entities::camera::MotionDetectionMode::Keyframes,
         })
         .await
         .unwrap();

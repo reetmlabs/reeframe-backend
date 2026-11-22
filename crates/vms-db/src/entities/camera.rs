@@ -11,6 +11,19 @@ pub enum RingBufferStorage {
     Disk,
 }
 
+/// Which frames motion detection decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum MotionDetectionMode {
+    /// Keyframes only: much cheaper, reacts within one or two keyframe intervals.
+    #[sea_orm(string_value = "keyframes")]
+    Keyframes,
+    /// Every frame, analyzed at up to 2 fps.
+    #[sea_orm(string_value = "full")]
+    Full,
+}
+
 /// Which stream live view restreams by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[sea_orm(rs_type = "String", db_type = "Text")]
@@ -71,6 +84,7 @@ pub struct Model {
     /// Whether scrub-preview thumbnails are captured while the camera records.
     pub thumbnails_enabled: bool,
     pub live_view_stream: LiveViewStream,
+    pub motion_detection_mode: MotionDetectionMode,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

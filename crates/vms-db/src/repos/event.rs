@@ -107,6 +107,7 @@ mod tests {
             motion_detection_enabled: true,
             thumbnails_enabled: false,
             live_view_stream: crate::entities::camera::LiveViewStream::Sub,
+            motion_detection_mode: crate::entities::camera::MotionDetectionMode::Keyframes,
         })
         .await
         .unwrap()

@@ -5,7 +5,7 @@ use vms_core::VmsError;
 use super::{db_err, now};
 use crate::{
     crypto::Crypto,
-    entities::camera::{self, ActiveModel, LiveViewStream, RingBufferStorage},
+    entities::camera::{self, ActiveModel, LiveViewStream, MotionDetectionMode, RingBufferStorage},
 };
 
 // -- Input types --
@@ -27,6 +27,7 @@ pub struct CreateCamera {
     pub motion_detection_enabled: bool,
     pub thumbnails_enabled: bool,
     pub live_view_stream: LiveViewStream,
+    pub motion_detection_mode: MotionDetectionMode,
 }
 
 pub struct UpdateCamera {
@@ -55,6 +56,7 @@ pub struct UpdateCamera {
     pub motion_detection_enabled: Option<bool>,
     pub thumbnails_enabled: Option<bool>,
     pub live_view_stream: Option<LiveViewStream>,
+    pub motion_detection_mode: Option<MotionDetectionMode>,
 }
 
 // -- Repository --
@@ -102,6 +104,7 @@ impl CameraRepo {
             motion_detection_enabled: Set(input.motion_detection_enabled),
             thumbnails_enabled: Set(input.thumbnails_enabled),
             live_view_stream: Set(input.live_view_stream),
+            motion_detection_mode: Set(input.motion_detection_mode),
         };
         model.insert(&self.db).await.map_err(db_err)
     }
@@ -203,6 +206,9 @@ impl CameraRepo {
         }
         if let Some(v) = input.live_view_stream {
             active.live_view_stream = Set(v);
+        }
+        if let Some(v) = input.motion_detection_mode {
+            active.motion_detection_mode = Set(v);
         }
 
         active.updated_at = Set(now());

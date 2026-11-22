@@ -14,10 +14,18 @@
 //! MOTION_FRAME_HEIGHT) -> appsink`. The decoder is picked from the tee's caps
 //! when they first reach the queue. It is pinned to a software decoder because
 //! `decodebin` may pick a hardware one, and a hardware decoder rejecting the
-//! stream's profile errors out the whole camera pipeline. Every frame still has
-//! to be decoded (inter frames need their references), but `videorate` drops
-//! all but [`SAMPLE_RATE_FPS`] per second before conversion and scaling.
+//! stream's profile errors out the whole camera pipeline.
+//!
+//! In [`MotionMode::Keyframes`] a probe on the decoder's sink pad drops every
+//! delta frame, so only keyframes are decoded. `skip-frame` on the libav
+//! decoders has no keyframe-only setting. While the stream's keyframes are more
+//! than [`LONG_KEYFRAME_INTERVAL`] apart, the probe lets every frame through,
+//! so motion is still sampled often enough. In [`MotionMode::Full`] every frame
+//! is decoded (inter frames need their references), and `videorate` drops all
+//! but [`SAMPLE_RATE_FPS`] per second before conversion and scaling.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gstreamer::prelude::*;
@@ -26,11 +34,49 @@ use uuid::Uuid;
 use vms_core::event::{Event, TopicKey};
 use vms_core::VmsError;
 
-use crate::motion::{MotionAnalyzer, MotionSignal, MOTION_FRAME_HEIGHT, MOTION_FRAME_WIDTH};
+use crate::motion::{
+    MotionAnalyzer, MotionMode, MotionSignal, MOTION_FRAME_HEIGHT, MOTION_FRAME_WIDTH,
+};
 
-/// Frames per second handed to the analyzer. `MotionAnalyzer` counts frames,
-/// not time, so its frozen-feed and hysteresis windows assume this rate.
+/// Frames per second handed to the analyzer at most. `MotionAnalyzer` works
+/// on frame timestamps, so a lower rate changes only how quickly it reacts.
 const SAMPLE_RATE_FPS: i32 = 2;
+
+/// Keyframe interval above which keyframes mode decodes every frame instead.
+const LONG_KEYFRAME_INTERVAL: Duration = Duration::from_secs(4);
+
+/// Decides which encoded buffers reach the decoder in keyframes mode.
+///
+/// It measures the interval between keyframes and switches to every frame
+/// while that interval is too long. Switches happen at a keyframe, so the
+/// decoder always starts from a reference.
+#[derive(Default)]
+struct KeyframeGate {
+    last_keyframe: Option<Duration>,
+    full: bool,
+}
+
+impl KeyframeGate {
+    /// Whether a buffer goes to the decoder, and the new value of "decoding
+    /// every frame" if this buffer changed it.
+    fn admit(&mut self, keyframe: bool, timestamp: Option<Duration>) -> (bool, Option<bool>) {
+        if !keyframe {
+            return (self.full, None);
+        }
+        let mut switched = None;
+        if let Some(now) = timestamp {
+            if let Some(interval) = self.last_keyframe.and_then(|last| now.checked_sub(last)) {
+                let full = interval > LONG_KEYFRAME_INTERVAL;
+                if full != self.full {
+                    self.full = full;
+                    switched = Some(full);
+                }
+            }
+            self.last_keyframe = Some(now);
+        }
+        (true, switched)
+    }
+}
 
 /// Software decoders to try for each tee codec, in order of preference.
 fn decoder_candidates(caps_name: &str) -> &'static [&'static str] {
@@ -73,6 +119,10 @@ fn sink_name(id: Uuid) -> String {
 pub struct MotionHandle {
     pipeline: gstreamer::Pipeline,
     camera_id: Uuid,
+    mode: MotionMode,
+    /// Set while keyframes mode decodes every frame because keyframes are too
+    /// far apart.
+    long_keyframe_interval: Arc<AtomicBool>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -83,14 +133,44 @@ impl MotionHandle {
         &self.pipeline
     }
 
-    /// Detach the GStreamer elements, signal the analyzer task to stop, and
-    /// wait for it to exit.
-    pub async fn stop(self) {
-        if let Err(e) = detach(&self.pipeline, self.camera_id) {
-            tracing::warn!(camera_id = %self.camera_id, error = %e, "Failed to detach motion branch");
+    /// The mode actually in use, which is `Full` while a keyframes-mode
+    /// camera's keyframes are too far apart.
+    pub fn effective_mode(&self) -> MotionMode {
+        if self.long_keyframe_interval.load(Ordering::Relaxed) {
+            MotionMode::Full
+        } else {
+            self.mode
         }
+    }
+
+    /// Detach the GStreamer elements, signal the analyzer task to stop, and
+    /// wait for it to exit. The elements are removed from the pipeline shortly
+    /// after this returns.
+    pub async fn stop(self) {
+        self.stop_inner().await;
+    }
+
+    /// Like [`stop`](Self::stop), but also waits until the elements are out of
+    /// the pipeline, so a new branch for the camera can be attached right away.
+    pub async fn stop_and_wait_for_removal(self) {
+        if let Some(removal) = self.stop_inner().await {
+            tokio::task::spawn_blocking(move || removal.join())
+                .await
+                .ok();
+        }
+    }
+
+    async fn stop_inner(self) -> Option<std::thread::JoinHandle<()>> {
+        let removal = match detach(&self.pipeline, self.camera_id) {
+            Ok(removal) => removal,
+            Err(e) => {
+                tracing::warn!(camera_id = %self.camera_id, error = %e, "Failed to detach motion branch");
+                None
+            }
+        };
         let _ = self.shutdown_tx.send(());
         self.task.await.ok();
+        removal
     }
 }
 
@@ -102,11 +182,13 @@ impl MotionHandle {
 /// (`TopicKey::Camera`). That is the same `EventBus` bridge channel the
 /// `vms-sources` adapters use, so this crate needs no `vms-engine` dependency.
 ///
-/// Safe to call while the pipeline is `Playing`.
+/// `mode` picks which frames are decoded. Safe to call while the pipeline is
+/// `Playing`.
 pub fn attach(
     pipeline: &gstreamer::Pipeline,
     tee_name: &str,
     camera_id: Uuid,
+    mode: MotionMode,
     event_tx: mpsc::UnboundedSender<Event>,
 ) -> Result<MotionHandle, VmsError> {
     let tee = pipeline.by_name(tee_name).ok_or_else(|| {
@@ -181,6 +263,8 @@ pub fn attach(
     let queue_src = queue
         .static_pad("src")
         .ok_or_else(|| VmsError::Media("motion queue has no src pad".into()))?;
+    let long_keyframe_interval = Arc::new(AtomicBool::new(false));
+    let decoder_long_interval = long_keyframe_interval.clone();
     let pipeline_weak = pipeline.downgrade();
     let rate_weak = rate.downgrade();
     queue_src.add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
@@ -196,7 +280,15 @@ pub fn attach(
         let (Some(pipeline), Some(rate)) = (pipeline_weak.upgrade(), rate_weak.upgrade()) else {
             return gstreamer::PadProbeReturn::Remove;
         };
-        if let Err(e) = link_decoder(&pipeline, pad, &rate, caps_event.caps(), camera_id) {
+        if let Err(e) = link_decoder(
+            &pipeline,
+            pad,
+            &rate,
+            caps_event.caps(),
+            camera_id,
+            mode,
+            decoder_long_interval.clone(),
+        ) {
             tracing::warn!(camera_id = %camera_id, error = %e, "Motion detection has no decoder for this stream");
         }
         gstreamer::PadProbeReturn::Remove
@@ -207,7 +299,9 @@ pub fn attach(
     // under load, and `try_send` on a small bounded channel sheds them again
     // if the analyzer task falls behind. A slow consumer never stalls the
     // streaming thread.
-    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(2);
+    // Frames without a timestamp use the time since attach instead.
+    let started = std::time::Instant::now();
+    let (frame_tx, mut frame_rx) = mpsc::channel::<(Vec<u8>, Duration)>(2);
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -218,7 +312,10 @@ pub fn attach(
                 let map = buffer
                     .map_readable()
                     .map_err(|_| gstreamer::FlowError::Error)?;
-                let _ = frame_tx.try_send(map.as_slice().to_vec());
+                let timestamp = buffer
+                    .pts()
+                    .map_or_else(|| started.elapsed(), Duration::from);
+                let _ = frame_tx.try_send((map.as_slice().to_vec(), timestamp));
                 Ok(gstreamer::FlowSuccess::Ok)
             })
             .build(),
@@ -256,8 +353,8 @@ pub fn attach(
         loop {
             tokio::select! {
                 frame = frame_rx.recv() => {
-                    let Some(frame) = frame else { break };
-                    for signal in analyzer.process_frame(&frame) {
+                    let Some((frame, timestamp)) = frame else { break };
+                    for signal in analyzer.process_frame(&frame, timestamp) {
                         let event = signal_to_event(camera_id, signal);
                         let _ = event_tx.send(event);
                     }
@@ -271,6 +368,8 @@ pub fn attach(
     Ok(MotionHandle {
         pipeline: pipeline.clone(),
         camera_id,
+        mode,
+        long_keyframe_interval,
         shutdown_tx,
         task,
     })
@@ -280,12 +379,15 @@ pub fn attach(
 ///
 /// Uses the same blocking pad probe as [`crate::ring_buffer_branch::detach`].
 /// The tee is found through the queue's peer pad, so this works for whichever
-/// tee (main or sub) `attach` used. Returns immediately; cleanup is
-/// asynchronous. Safe to call while `Playing`, and a no-op if no branch is
-/// attached.
-fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsError> {
+/// tee (main or sub) `attach` used. Returns immediately with the thread that
+/// finishes the removal. Safe to call while `Playing`, and a no-op if no branch
+/// is attached.
+fn detach(
+    pipeline: &gstreamer::Pipeline,
+    camera_id: Uuid,
+) -> Result<Option<std::thread::JoinHandle<()>>, VmsError> {
     let Some(queue) = pipeline.by_name(&queue_name(camera_id)) else {
-        return Ok(());
+        return Ok(None);
     };
 
     let names = [
@@ -331,7 +433,7 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
 
     let pipeline_clone2 = pipeline.clone();
     let tee_src_clone = tee_src.clone();
-    std::thread::spawn(move || {
+    let removal = std::thread::spawn(move || {
         let fired = rx.recv_timeout(Duration::from_secs(5)).is_ok();
         if fired {
             tracing::info!(camera_id = %camera_id, "Motion detection branch detached");
@@ -362,7 +464,7 @@ fn detach(pipeline: &gstreamer::Pipeline, camera_id: Uuid) -> Result<(), VmsErro
         tee.release_request_pad(&tee_src_clone);
     });
 
-    Ok(())
+    Ok(Some(removal))
 }
 
 /// Build the software decoder for `caps` and link it between the queue's
@@ -373,6 +475,8 @@ fn link_decoder(
     rate: &gstreamer::Element,
     caps: &gstreamer::CapsRef,
     camera_id: Uuid,
+    mode: MotionMode,
+    long_keyframe_interval: Arc<AtomicBool>,
 ) -> Result<(), VmsError> {
     let caps_name = caps
         .structure(0)
@@ -404,6 +508,39 @@ fn link_decoder(
     let decoder_sink = decoder
         .static_pad("sink")
         .ok_or_else(|| VmsError::Media(format!("motion {factory} has no sink pad")))?;
+    if mode == MotionMode::Keyframes {
+        let gate = Mutex::new(KeyframeGate::default());
+        decoder_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            let Some(buffer) = info.buffer() else {
+                return gstreamer::PadProbeReturn::Ok;
+            };
+            let keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+            let timestamp = buffer.pts().or(buffer.dts()).map(Duration::from);
+            let (pass, switched) = gate.lock().unwrap().admit(keyframe, timestamp);
+            match switched {
+                Some(true) => tracing::warn!(
+                    camera_id = %camera_id,
+                    "Keyframes are more than {}s apart, motion detection decodes every frame",
+                    LONG_KEYFRAME_INTERVAL.as_secs(),
+                ),
+                Some(false) => tracing::info!(
+                    camera_id = %camera_id,
+                    "Keyframe interval is short again, motion detection decodes keyframes only",
+                ),
+                None => {}
+            }
+            if let Some(full) = switched {
+                long_keyframe_interval.store(full, Ordering::Relaxed);
+            }
+            // `Handled` lets the binding free the buffer. With `Drop`, GStreamer
+            // also unrefs the pointer the binding already cleared and logs a critical.
+            if pass {
+                gstreamer::PadProbeReturn::Ok
+            } else {
+                gstreamer::PadProbeReturn::Handled
+            }
+        });
+    }
     queue_src
         .link(&decoder_sink)
         .map_err(|e| VmsError::Media(format!("motion link queue->{factory}: {e:?}")))?;
@@ -439,9 +576,19 @@ mod tests {
 
     use super::*;
 
-    /// Plays 3 s of live 25 fps H.264 into a tee with the motion branch
-    /// attached and returns how many frames reached the appsink.
-    async fn frames_reaching_appsink() -> usize {
+    /// Buffer counts from 3 s of the motion branch on a live stream.
+    struct BranchCounts {
+        /// Keyframes that entered the branch.
+        keyframes: usize,
+        /// Frames the decoder produced.
+        decoded: usize,
+        /// Frames that reached the appsink.
+        analyzed: usize,
+    }
+
+    /// Plays 3 s of live 25 fps H.264 with a keyframe every second into a tee
+    /// with the motion branch attached in `mode`.
+    async fn run_branch(mode: MotionMode) -> BranchCounts {
         gstreamer::init().unwrap();
         let camera_id = Uuid::new_v4();
         let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
@@ -455,39 +602,196 @@ mod tests {
         .downcast::<gstreamer::Pipeline>()
         .unwrap();
 
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let handle = attach(&pipeline, &tee_name, camera_id, event_tx).unwrap();
+        // The decoder is created once caps flow, so count its output from
+        // the moment it is added.
+        let decoded = Arc::new(AtomicUsize::new(0));
+        let decoded_counter = decoded.clone();
+        let decoder = decode_name(camera_id);
+        pipeline.connect_element_added(move |_, element| {
+            if element.name() != decoder.as_str() {
+                return;
+            }
+            let counter = decoded_counter.clone();
+            element.static_pad("src").unwrap().add_probe(
+                gstreamer::PadProbeType::BUFFER,
+                move |_, _| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    gstreamer::PadProbeReturn::Ok
+                },
+            );
+        });
 
-        let count = Arc::new(AtomicUsize::new(0));
-        let counter = count.clone();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let handle = attach(&pipeline, &tee_name, camera_id, mode, event_tx).unwrap();
+
+        let keyframes = Arc::new(AtomicUsize::new(0));
+        let keyframe_counter = keyframes.clone();
+        pipeline
+            .by_name(&queue_name(camera_id))
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+                if info
+                    .buffer()
+                    .is_some_and(|b| !b.flags().contains(gstreamer::BufferFlags::DELTA_UNIT))
+                {
+                    keyframe_counter.fetch_add(1, Ordering::SeqCst);
+                }
+                gstreamer::PadProbeReturn::Ok
+            });
+
+        let analyzed = Arc::new(AtomicUsize::new(0));
+        let analyzed_counter = analyzed.clone();
         pipeline
             .by_name(&sink_name(camera_id))
             .unwrap()
             .static_pad("sink")
             .unwrap()
             .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
-                counter.fetch_add(1, Ordering::SeqCst);
+                analyzed_counter.fetch_add(1, Ordering::SeqCst);
                 gstreamer::PadProbeReturn::Ok
             });
 
         pipeline.set_state(gstreamer::State::Playing).unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let frames = count.load(Ordering::SeqCst);
-
         handle.stop().await;
         pipeline.set_state(gstreamer::State::Null).unwrap();
-        frames
+        BranchCounts {
+            keyframes: keyframes.load(Ordering::SeqCst),
+            decoded: decoded.load(Ordering::SeqCst),
+            analyzed: analyzed.load(Ordering::SeqCst),
+        }
     }
 
     #[tokio::test]
     async fn only_the_sample_rate_reaches_the_analyzer() {
-        let frames = frames_reaching_appsink().await;
+        let frames = run_branch(MotionMode::Full).await.analyzed;
         // 3 s at SAMPLE_RATE_FPS, plus slack for startup and the first frame.
         assert!(
             (3..=8).contains(&frames),
             "expected about {} frames at {SAMPLE_RATE_FPS} fps over 3 s, got {frames}",
             3 * SAMPLE_RATE_FPS
         );
+    }
+
+    #[tokio::test]
+    async fn keyframes_mode_decodes_only_keyframes() {
+        let counts = run_branch(MotionMode::Keyframes).await;
+        assert!(
+            counts.keyframes >= 2,
+            "expected a keyframe per second, got {}",
+            counts.keyframes
+        );
+        assert!(
+            counts.decoded <= counts.keyframes && counts.decoded + 1 >= counts.keyframes,
+            "decoded {} frames from {} keyframes",
+            counts.decoded,
+            counts.keyframes
+        );
+    }
+
+    #[tokio::test]
+    async fn full_mode_decodes_every_frame() {
+        let counts = run_branch(MotionMode::Full).await;
+        assert!(
+            counts.decoded > 10 * counts.keyframes,
+            "decoded {} frames from {} keyframes",
+            counts.decoded,
+            counts.keyframes
+        );
+    }
+
+    #[tokio::test]
+    async fn a_branch_can_be_reattached_in_another_mode_while_playing() {
+        gstreamer::init().unwrap();
+        let camera_id = Uuid::new_v4();
+        let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
+        let pipeline = gstreamer::parse::launch(&format!(
+            "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=25/1 \
+             ! x264enc tune=zerolatency key-int-max=25 ! h264parse \
+             ! tee name={tee_name} allow-not-linked=true"
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let first = attach(
+            &pipeline,
+            &tee_name,
+            camera_id,
+            MotionMode::Keyframes,
+            event_tx.clone(),
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        first.stop_and_wait_for_removal().await;
+
+        let second = attach(&pipeline, &tee_name, camera_id, MotionMode::Full, event_tx).unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            pipeline.by_name(&decode_name(camera_id)).is_some(),
+            "new branch is decoding"
+        );
+        second.stop().await;
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+    }
+
+    /// Feeds a GOP of `gop` frames at 25 fps starting at `start` through the
+    /// gate and returns how many buffers passed and the last switch seen.
+    fn feed_gop(gate: &mut KeyframeGate, start: Duration, gop: u32) -> (u32, Option<bool>) {
+        let mut passed = 0;
+        let mut switched = None;
+        for i in 0..gop {
+            let ts = start + Duration::from_millis(40) * i;
+            let (pass, s) = gate.admit(i == 0, Some(ts));
+            passed += u32::from(pass);
+            switched = switched.or(s);
+        }
+        (passed, switched)
+    }
+
+    #[test]
+    fn gate_passes_only_keyframes_at_a_short_interval() {
+        let mut gate = KeyframeGate::default();
+        for n in 0..5u32 {
+            let (passed, switched) = feed_gop(&mut gate, Duration::from_secs(2 * u64::from(n)), 50);
+            assert_eq!((passed, switched), (1, None), "GOP {n}");
+        }
+    }
+
+    #[test]
+    fn gate_decodes_every_frame_while_keyframes_are_far_apart() {
+        let mut gate = KeyframeGate::default();
+        // 10 s GOPs: the first interval is known at the second keyframe.
+        assert_eq!(feed_gop(&mut gate, Duration::ZERO, 250), (1, None));
+        assert_eq!(
+            feed_gop(&mut gate, Duration::from_secs(10), 250),
+            (250, Some(true))
+        );
+        assert_eq!(
+            feed_gop(&mut gate, Duration::from_secs(20), 250),
+            (250, None)
+        );
+
+        // Back to 2 s GOPs. The keyframe at 30 s still ends a 10 s interval, so
+        // keyframes only resume with the next one.
+        assert_eq!(feed_gop(&mut gate, Duration::from_secs(30), 50), (50, None));
+        assert_eq!(
+            feed_gop(&mut gate, Duration::from_secs(32), 50),
+            (1, Some(false))
+        );
+        assert_eq!(feed_gop(&mut gate, Duration::from_secs(34), 50), (1, None));
+    }
+
+    #[test]
+    fn gate_ignores_buffers_without_timestamps() {
+        let mut gate = KeyframeGate::default();
+        assert_eq!(gate.admit(true, None), (true, None));
+        assert_eq!(gate.admit(false, None), (false, None));
+        assert_eq!(gate.admit(true, None), (true, None));
     }
 
     #[test]

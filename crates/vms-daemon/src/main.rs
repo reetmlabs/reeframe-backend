@@ -443,6 +443,12 @@ async fn main() -> anyhow::Result<()> {
     // with motion detection its camera has turned off.
     for cam in camera_repo.list().await.unwrap_or_default() {
         media_manager
+            .set_motion_detection_mode(
+                cam.id,
+                vms_api::routes::media_motion_mode(cam.motion_detection_mode),
+            )
+            .await;
+        media_manager
             .set_motion_detection_enabled(cam.id, cam.motion_detection_enabled)
             .await;
         media_manager

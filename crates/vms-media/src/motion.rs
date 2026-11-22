@@ -5,7 +5,13 @@
 //! it is attached to a camera's stream.
 //!
 //! [`MotionAnalyzer`] is pure Rust with no GStreamer types, so it can be
-//! tested directly against synthetic pixel buffers.
+//! tested directly against synthetic pixel buffers and timestamps.
+//!
+//! Every rule is measured in stream time, not frames, so the analyzer behaves
+//! the same whether it sees keyframes only (about one frame per GOP) or a
+//! steady 2 fps.
+
+use std::time::Duration;
 
 /// Width of the downscaled grayscale frames analyzed for motion.
 ///
@@ -16,10 +22,11 @@ pub const MOTION_FRAME_WIDTH: u32 = 320;
 /// Height of the downscaled grayscale frames analyzed for motion.
 pub const MOTION_FRAME_HEIGHT: u32 = 180;
 
-/// Exponential-moving-average weight of each new frame in the background
-/// estimate. Lower values keep sustained motion from turning into background
-/// too quickly; higher values follow gradual lighting changes better.
-const BACKGROUND_ALPHA: f32 = 0.05;
+/// Time constant of the background estimate's exponential moving average.
+/// Shorter keeps up with lighting changes; longer keeps sustained motion from
+/// turning into background too quickly. At 2 fps this is a weight of about
+/// 0.05 per frame.
+const BACKGROUND_MEMORY: Duration = Duration::from_secs(10);
 
 /// A pixel is considered "changed" once it differs from the background
 /// estimate by more than this many grayscale levels (0-255).
@@ -37,15 +44,32 @@ const SCENE_CHANGE_RATIO_THRESHOLD: f64 = 0.45;
 /// the lens.
 const TAMPER_VARIANCE_THRESHOLD: f64 = 4.0;
 
-/// Consecutive processed frames that must be byte-for-byte identical before
-/// the feed is considered frozen. Sensor noise makes identical frames from a
-/// working camera very unlikely.
-const FROZEN_FRAME_COUNT: u32 = 10;
+/// How long frames must stay byte-for-byte identical before the feed counts
+/// as frozen. Sensor noise makes identical frames from a working camera very
+/// unlikely.
+const FROZEN_AFTER: Duration = Duration::from_secs(10);
 
-/// Consecutive frames a condition must hold before its "started" event fires,
-/// and must not hold before its "stopped" event fires. Debounces flicker
-/// around a threshold.
-const SUSTAIN_FRAMES: u32 = 2;
+/// Identical frames needed, at least, before the feed counts as frozen, so two
+/// frames far apart are not enough.
+const FROZEN_MIN_FRAMES: u32 = 3;
+
+/// How long a condition must hold before its "started" event fires. A single
+/// frame is enough when frames are further apart than this.
+const START_AFTER: Duration = Duration::from_secs(1);
+
+/// How long a condition must be absent before its "stopped" event fires.
+const STOP_AFTER: Duration = Duration::from_secs(3);
+
+/// Which frames of the stream the motion branch decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MotionMode {
+    /// Decode keyframes only. Cheapest, but reacts within one or two keyframe
+    /// intervals and can miss motion shorter than one interval.
+    #[default]
+    Keyframes,
+    /// Decode every frame and analyze up to 2 per second.
+    Full,
+}
 
 /// One detection produced by [`MotionAnalyzer::process_frame`].
 #[derive(Debug, Clone, PartialEq)]
@@ -72,24 +96,22 @@ pub enum MotionSignal {
 /// Rolling per-camera frame-difference analyzer.
 ///
 /// Feed it downscaled grayscale frames (`MOTION_FRAME_WIDTH` x
-/// `MOTION_FRAME_HEIGHT`, exactly `width * height` bytes) in capture order.
-/// Frames must all be the same size as declared at construction.
+/// `MOTION_FRAME_HEIGHT`, exactly `width * height` bytes) in capture order,
+/// each with its stream timestamp. Frames must all be the same size as
+/// declared at construction.
 pub struct MotionAnalyzer {
     width: u32,
     height: u32,
     background: Vec<f32>,
     background_initialized: bool,
     last_frame: Option<Vec<u8>>,
-    motion_over_count: u32,
-    motion_under_count: u32,
-    motion_active: bool,
-    scene_change_over_count: u32,
-    scene_change_under_count: u32,
-    scene_change_active: bool,
-    tamper_over_count: u32,
-    tamper_under_count: u32,
-    tamper_active: bool,
-    identical_frame_count: u32,
+    last_timestamp: Option<Duration>,
+    motion: Sustained,
+    scene_change: Sustained,
+    tamper: Sustained,
+    /// Timestamp of the first frame of the current run of identical frames.
+    identical_since: Duration,
+    identical_frames: u32,
     signal_lost_active: bool,
 }
 
@@ -101,42 +123,54 @@ impl MotionAnalyzer {
             background: vec![0.0; (width * height) as usize],
             background_initialized: false,
             last_frame: None,
-            motion_over_count: 0,
-            motion_under_count: 0,
-            motion_active: false,
-            scene_change_over_count: 0,
-            scene_change_under_count: 0,
-            scene_change_active: false,
-            tamper_over_count: 0,
-            tamper_under_count: 0,
-            tamper_active: false,
-            identical_frame_count: 0,
+            last_timestamp: None,
+            motion: Sustained::default(),
+            scene_change: Sustained::default(),
+            tamper: Sustained::default(),
+            identical_since: Duration::ZERO,
+            identical_frames: 0,
             signal_lost_active: false,
         }
     }
 
-    /// Process one grayscale frame, updating internal state and returning
-    /// any signals that fired as a result.
+    /// Process one grayscale frame taken at `timestamp` (any monotonic stream
+    /// time), updating internal state and returning any signals that fired.
     ///
     /// `frame` must be exactly `width * height` bytes (as passed to
     /// [`new`](Self::new)). A frame of any other size is ignored and returns
     /// no signals, so one malformed frame cannot panic the analyzer.
-    pub fn process_frame(&mut self, frame: &[u8]) -> Vec<MotionSignal> {
+    pub fn process_frame(&mut self, frame: &[u8], timestamp: Duration) -> Vec<MotionSignal> {
         let expected_len = (self.width * self.height) as usize;
         if frame.len() != expected_len {
             return Vec::new();
         }
 
+        // A timestamp going backwards means the stream restarted, so the
+        // timers restart from this frame.
+        if self.last_timestamp.is_some_and(|last| timestamp < last) {
+            self.motion.restart(timestamp);
+            self.scene_change.restart(timestamp);
+            self.tamper.restart(timestamp);
+            self.identical_since = timestamp;
+            self.identical_frames = 1;
+            self.last_timestamp = None;
+        }
+        let interval = self
+            .last_timestamp
+            .map_or(Duration::ZERO, |last| timestamp - last);
+        self.last_timestamp = Some(timestamp);
+
         let mut signals = Vec::new();
 
         // -- Frozen / signal-lost detection (independent of the background model) --
-        let is_identical_to_last = self.last_frame.as_deref() == Some(frame);
-        if is_identical_to_last {
-            self.identical_frame_count += 1;
+        if self.last_frame.as_deref() == Some(frame) {
+            self.identical_frames += 1;
         } else {
-            self.identical_frame_count = 0;
+            self.identical_since = timestamp;
+            self.identical_frames = 1;
         }
-        let frozen_now = self.identical_frame_count >= FROZEN_FRAME_COUNT;
+        let frozen_now = self.identical_frames >= FROZEN_MIN_FRAMES
+            && timestamp - self.identical_since >= FROZEN_AFTER;
         if frozen_now && !self.signal_lost_active {
             self.signal_lost_active = true;
             signals.push(MotionSignal::SignalLost);
@@ -149,19 +183,13 @@ impl MotionAnalyzer {
         // -- Variance (tamper/covered) --
         let variance = population_variance(frame);
         let tampered_this_frame = variance < TAMPER_VARIANCE_THRESHOLD;
-        update_hysteresis(
-            tampered_this_frame,
-            &mut self.tamper_over_count,
-            &mut self.tamper_under_count,
-            &mut self.tamper_active,
-            |a| {
-                signals.push(if a {
-                    MotionSignal::TamperDetected { variance }
-                } else {
-                    MotionSignal::TamperCleared
-                })
-            },
-        );
+        if let Some(active) = self.tamper.update(tampered_this_frame, timestamp) {
+            signals.push(if active {
+                MotionSignal::TamperDetected { variance }
+            } else {
+                MotionSignal::TamperCleared
+            });
+        }
 
         // -- Background diff (motion / scene change) --
         //
@@ -177,74 +205,74 @@ impl MotionAnalyzer {
             return signals;
         }
 
+        let alpha = background_alpha(interval);
         let mut changed = 0usize;
         for (bg, &px) in self.background.iter_mut().zip(frame.iter()) {
             if (*bg - px as f32).abs() > PIXEL_DIFF_THRESHOLD {
                 changed += 1;
             }
-            *bg += (px as f32 - *bg) * BACKGROUND_ALPHA;
+            *bg += (px as f32 - *bg) * alpha;
         }
         let changed_ratio = changed as f64 / expected_len as f64;
 
         let scene_change_this_frame = changed_ratio >= SCENE_CHANGE_RATIO_THRESHOLD;
-        update_hysteresis(
-            scene_change_this_frame,
-            &mut self.scene_change_over_count,
-            &mut self.scene_change_under_count,
-            &mut self.scene_change_active,
-            |a| {
-                if a {
-                    signals.push(MotionSignal::SceneChange { changed_ratio });
-                }
-            },
-        );
+        if self.scene_change.update(scene_change_this_frame, timestamp) == Some(true) {
+            signals.push(MotionSignal::SceneChange { changed_ratio });
+        }
 
         // A scene change (camera covered or moved) is not also reported as
         // motion.
         let motion_this_frame = !scene_change_this_frame && changed_ratio >= MOTION_RATIO_THRESHOLD;
-        update_hysteresis(
-            motion_this_frame,
-            &mut self.motion_over_count,
-            &mut self.motion_under_count,
-            &mut self.motion_active,
-            |a| {
-                signals.push(if a {
-                    MotionSignal::MotionStarted { changed_ratio }
-                } else {
-                    MotionSignal::MotionStopped
-                })
-            },
-        );
+        if let Some(active) = self.motion.update(motion_this_frame, timestamp) {
+            signals.push(if active {
+                MotionSignal::MotionStarted { changed_ratio }
+            } else {
+                MotionSignal::MotionStopped
+            });
+        }
 
         signals
     }
 }
 
-/// Hysteresis shared by all detectors: `active` flips only after `condition`
-/// has held (or not held) for `SUSTAIN_FRAMES` consecutive calls, and
-/// `on_flip` is called with the new state when it does.
-fn update_hysteresis(
-    condition: bool,
-    over_count: &mut u32,
-    under_count: &mut u32,
-    active: &mut bool,
-    mut on_flip: impl FnMut(bool),
-) {
-    if condition {
-        *over_count += 1;
-        *under_count = 0;
-    } else {
-        *under_count += 1;
-        *over_count = 0;
+/// Hysteresis shared by all detectors, measured in stream time.
+///
+/// A frame stands for the time since the previous frame, so a condition has
+/// held since the last frame that did not show it. That makes one frame enough
+/// once frames are further apart than [`START_AFTER`].
+#[derive(Default)]
+struct Sustained {
+    active: bool,
+    /// Timestamp of the last frame whose condition matched `active`.
+    settled_at: Option<Duration>,
+}
+
+impl Sustained {
+    /// Feed one frame's condition and return the new state if it flipped.
+    fn update(&mut self, condition: bool, timestamp: Duration) -> Option<bool> {
+        let settled_at = *self.settled_at.get_or_insert(timestamp);
+        if condition == self.active {
+            self.settled_at = Some(timestamp);
+            return None;
+        }
+        let needed = if self.active { STOP_AFTER } else { START_AFTER };
+        if timestamp.saturating_sub(settled_at) < needed {
+            return None;
+        }
+        self.active = condition;
+        self.settled_at = Some(timestamp);
+        Some(condition)
     }
 
-    if !*active && *over_count >= SUSTAIN_FRAMES {
-        *active = true;
-        on_flip(true);
-    } else if *active && *under_count >= SUSTAIN_FRAMES {
-        *active = false;
-        on_flip(false);
+    fn restart(&mut self, timestamp: Duration) {
+        self.settled_at = Some(timestamp);
     }
+}
+
+/// Weight of a new frame in the background estimate, so the estimate's memory
+/// is [`BACKGROUND_MEMORY`] whatever the frame interval.
+fn background_alpha(interval: Duration) -> f32 {
+    1.0 - (-interval.as_secs_f32() / BACKGROUND_MEMORY.as_secs_f32()).exp()
 }
 
 /// Population variance of a byte slice's values (as grayscale levels²).
@@ -271,6 +299,9 @@ mod tests {
     const W: u32 = 4;
     const H: u32 = 4;
 
+    /// Frame interval of the 2 fps sampling in full mode.
+    const FULL_INTERVAL: Duration = Duration::from_millis(500);
+
     fn flat_frame(value: u8) -> Vec<u8> {
         vec![value; (W * H) as usize]
     }
@@ -279,143 +310,251 @@ mod tests {
         (0..W * H).map(|i| if i % 2 == 0 { a } else { b }).collect()
     }
 
+    /// Feeds frames to an analyzer at a fixed interval and collects signals.
+    struct Feed {
+        analyzer: MotionAnalyzer,
+        now: Duration,
+        interval: Duration,
+    }
+
+    impl Feed {
+        fn new(interval: Duration) -> Self {
+            Self {
+                analyzer: MotionAnalyzer::new(W, H),
+                now: Duration::ZERO,
+                interval,
+            }
+        }
+
+        /// Feed `frame` `count` times and return every signal produced.
+        fn feed(&mut self, frame: &[u8], count: u32) -> Vec<MotionSignal> {
+            let mut signals = Vec::new();
+            for _ in 0..count {
+                signals.extend(self.analyzer.process_frame(frame, self.now));
+                self.now += self.interval;
+            }
+            signals
+        }
+    }
+
+    fn has_motion_started(signals: &[MotionSignal]) -> bool {
+        signals
+            .iter()
+            .any(|s| matches!(s, MotionSignal::MotionStarted { .. }))
+    }
+
+    /// The two-pixel change used by the motion tests: motion range, below the
+    /// scene-change ratio.
+    fn moved(background: &[u8]) -> Vec<u8> {
+        let mut moved = background.to_vec();
+        moved[0] = 220;
+        moved[1] = 220;
+        moved
+    }
+
     #[test]
     fn wrong_size_frame_is_a_noop() {
         let mut analyzer = MotionAnalyzer::new(W, H);
-        let signals = analyzer.process_frame(&[0u8; 3]);
+        let signals = analyzer.process_frame(&[0u8; 3], Duration::ZERO);
         assert!(signals.is_empty());
     }
 
     #[test]
     fn steady_scene_reports_no_motion() {
-        let mut analyzer = MotionAnalyzer::new(W, H);
-        let frame = checkerboard(50, 60); // some texture, but unchanging
-        for _ in 0..10 {
-            let signals = analyzer.process_frame(&frame);
-            assert!(signals.iter().all(|s| !matches!(
-                s,
-                MotionSignal::MotionStarted { .. } | MotionSignal::SceneChange { .. }
-            )));
-        }
+        let mut feed = Feed::new(FULL_INTERVAL);
+        // Some texture, but unchanging, and fewer frames than the frozen window.
+        let signals = feed.feed(&checkerboard(50, 60), 10);
+        assert!(signals.iter().all(|s| !matches!(
+            s,
+            MotionSignal::MotionStarted { .. } | MotionSignal::SceneChange { .. }
+        )));
     }
 
     #[test]
     fn sustained_local_change_reports_motion_started_then_stopped() {
-        let mut analyzer = MotionAnalyzer::new(W, H);
+        let mut feed = Feed::new(FULL_INTERVAL);
         let background = flat_frame(50);
-        // Warm up the background estimate against a stable scene.
-        for _ in 0..20 {
-            analyzer.process_frame(&background);
-        }
+        feed.feed(&background, 20);
 
-        // Change 2 of 16 pixels a lot: motion range, below the scene-change ratio.
-        let mut moved = background.clone();
-        moved[0] = 220;
-        moved[1] = 220;
-
-        let mut started = false;
-        for _ in 0..SUSTAIN_FRAMES {
-            let signals = analyzer.process_frame(&moved);
-            if signals.contains(&MotionSignal::MotionStarted {
-                changed_ratio: 2.0 / 16.0,
-            }) {
-                started = true;
-            }
-        }
+        let signals = feed.feed(&moved(&background), 2);
         assert!(
-            started,
-            "expected MotionStarted after sustained local change"
+            signals.contains(&MotionSignal::MotionStarted {
+                changed_ratio: 2.0 / 16.0,
+            }),
+            "expected MotionStarted after sustained local change, got {signals:?}"
         );
 
-        // Back to background; motion should clear after the sustain window.
-        let mut stopped = false;
-        for _ in 0..SUSTAIN_FRAMES {
-            let signals = analyzer.process_frame(&background);
-            if signals.contains(&MotionSignal::MotionStopped) {
-                stopped = true;
-            }
-        }
-        assert!(stopped, "expected MotionStopped once the scene settles");
+        let signals = feed.feed(&background, 6);
+        assert!(
+            signals.contains(&MotionSignal::MotionStopped),
+            "expected MotionStopped once the scene settles, got {signals:?}"
+        );
     }
 
     #[test]
     fn frame_wide_change_reports_scene_change_not_motion() {
-        let mut analyzer = MotionAnalyzer::new(W, H);
-        let background = flat_frame(50);
-        for _ in 0..20 {
-            analyzer.process_frame(&background);
-        }
+        let mut feed = Feed::new(FULL_INTERVAL);
+        feed.feed(&flat_frame(50), 20);
 
-        let inverted = flat_frame(220); // every pixel changes, well past the scene-change ratio
-        let mut saw_scene_change = false;
-        let mut saw_motion_started = false;
-        for _ in 0..SUSTAIN_FRAMES {
-            for s in analyzer.process_frame(&inverted) {
-                match s {
-                    MotionSignal::SceneChange { .. } => saw_scene_change = true,
-                    MotionSignal::MotionStarted { .. } => saw_motion_started = true,
-                    _ => {}
-                }
-            }
-        }
+        // Every pixel changes, well past the scene-change ratio.
+        let signals = feed.feed(&flat_frame(220), 2);
         assert!(
-            saw_scene_change,
+            signals
+                .iter()
+                .any(|s| matches!(s, MotionSignal::SceneChange { .. })),
             "expected SceneChange for a frame-wide difference"
         );
         assert!(
-            !saw_motion_started,
+            !has_motion_started(&signals),
             "a scene change should not also report as motion"
         );
     }
 
     #[test]
     fn near_uniform_frame_reports_tamper() {
-        let mut analyzer = MotionAnalyzer::new(W, H);
-        // A perfectly flat frame has zero variance -> "covered".
-        let mut detected = false;
-        for _ in 0..SUSTAIN_FRAMES {
-            for s in analyzer.process_frame(&flat_frame(10)) {
-                if matches!(s, MotionSignal::TamperDetected { .. }) {
-                    detected = true;
-                }
-            }
-        }
-        assert!(detected);
+        let mut feed = Feed::new(FULL_INTERVAL);
+        // A perfectly flat frame has zero variance, so it counts as covered.
+        let signals = feed.feed(&flat_frame(10), 3);
+        assert!(signals
+            .iter()
+            .any(|s| matches!(s, MotionSignal::TamperDetected { .. })));
     }
 
     #[test]
     fn textured_frame_does_not_report_tamper() {
-        let mut analyzer = MotionAnalyzer::new(W, H);
-        let mut detected = false;
-        for _ in 0..SUSTAIN_FRAMES {
-            for s in analyzer.process_frame(&checkerboard(10, 240)) {
-                if matches!(s, MotionSignal::TamperDetected { .. }) {
-                    detected = true;
-                }
-            }
-        }
-        assert!(!detected);
+        let mut feed = Feed::new(FULL_INTERVAL);
+        let signals = feed.feed(&checkerboard(10, 240), 3);
+        assert!(!signals
+            .iter()
+            .any(|s| matches!(s, MotionSignal::TamperDetected { .. })));
     }
 
     #[test]
     fn identical_consecutive_frames_report_signal_lost_then_restored() {
-        let mut analyzer = MotionAnalyzer::new(W, H);
+        let mut feed = Feed::new(FULL_INTERVAL);
         let frame = checkerboard(30, 200);
 
-        let mut lost = false;
-        for _ in 0..(FROZEN_FRAME_COUNT + 1) {
-            for s in analyzer.process_frame(&frame) {
-                if s == MotionSignal::SignalLost {
-                    lost = true;
-                }
-            }
-        }
-        assert!(lost);
+        // 10 s of identical frames at 2 fps is 21 frames.
+        let signals = feed.feed(&frame, 21);
+        assert!(signals.contains(&MotionSignal::SignalLost));
 
         // A single differing byte breaks the identical-frame run.
         let mut changed = frame.clone();
         changed[0] = changed[0].wrapping_add(1);
-        let signals = analyzer.process_frame(&changed);
+        let signals = feed.feed(&changed, 1);
         assert!(signals.contains(&MotionSignal::SignalRestored));
+    }
+
+    /// Keyframe interval of a typical camera sub stream.
+    const KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn at_two_fps_motion_starts_after_one_second() {
+        let mut feed = Feed::new(FULL_INTERVAL);
+        let background = flat_frame(50);
+        feed.feed(&background, 20);
+        let moved = moved(&background);
+
+        assert!(
+            !has_motion_started(&feed.feed(&moved, 1)),
+            "0.5 s is too short"
+        );
+        assert!(has_motion_started(&feed.feed(&moved, 1)), "1 s is enough");
+    }
+
+    #[test]
+    fn with_frames_over_a_second_apart_one_frame_starts_motion() {
+        let mut feed = Feed::new(KEYFRAME_INTERVAL);
+        let background = flat_frame(50);
+        feed.feed(&background, 5);
+
+        assert!(has_motion_started(&feed.feed(&moved(&background), 1)));
+    }
+
+    #[test]
+    fn motion_stops_after_three_seconds_without_it() {
+        for (interval, frames_before_stop) in [(FULL_INTERVAL, 5), (KEYFRAME_INTERVAL, 1)] {
+            let mut feed = Feed::new(interval);
+            let background = flat_frame(50);
+            feed.feed(&background, 5);
+            // A change small enough to leave no trace in the background
+            // estimate once the scene is back, even after 4 s of it.
+            let mut moved = background.clone();
+            moved[0] = 100;
+            moved[1] = 100;
+            assert!(has_motion_started(&feed.feed(&moved, 2)));
+
+            let signals = feed.feed(&background, frames_before_stop);
+            assert!(
+                !signals.contains(&MotionSignal::MotionStopped),
+                "{interval:?}: stopped before 3 s"
+            );
+            let signals = feed.feed(&background, 1);
+            assert!(
+                signals.contains(&MotionSignal::MotionStopped),
+                "{interval:?}: not stopped after 3 s"
+            );
+        }
+    }
+
+    #[test]
+    fn tamper_follows_the_same_time_rules() {
+        let mut feed = Feed::new(KEYFRAME_INTERVAL);
+        feed.feed(&checkerboard(10, 240), 2);
+        let signals = feed.feed(&flat_frame(10), 1);
+        assert!(signals
+            .iter()
+            .any(|s| matches!(s, MotionSignal::TamperDetected { .. })));
+
+        assert!(!feed
+            .feed(&checkerboard(10, 240), 1)
+            .contains(&MotionSignal::TamperCleared));
+        assert!(feed
+            .feed(&checkerboard(10, 240), 1)
+            .contains(&MotionSignal::TamperCleared));
+    }
+
+    #[test]
+    fn feed_is_frozen_after_ten_seconds_of_identical_frames() {
+        let mut feed = Feed::new(KEYFRAME_INTERVAL);
+        let frame = checkerboard(30, 200);
+        // The 6th identical frame at 2 s intervals is 10 s after the first.
+        assert!(!feed.feed(&frame, 5).contains(&MotionSignal::SignalLost));
+        assert!(feed.feed(&frame, 1).contains(&MotionSignal::SignalLost));
+    }
+
+    #[test]
+    fn two_identical_frames_far_apart_are_not_a_frozen_feed() {
+        let mut feed = Feed::new(Duration::from_secs(30));
+        let signals = feed.feed(&checkerboard(30, 200), 2);
+        assert!(!signals.contains(&MotionSignal::SignalLost));
+        let signals = feed.feed(&checkerboard(30, 200), 1);
+        assert!(signals.contains(&MotionSignal::SignalLost));
+    }
+
+    #[test]
+    fn background_memory_is_the_same_at_any_frame_rate() {
+        // A weight of about 0.05 per frame at 2 fps.
+        assert!((background_alpha(FULL_INTERVAL) - 0.05).abs() < 0.002);
+
+        // What is left of an old background after 10 s, at 2 fps and with
+        // keyframes 2 s apart.
+        let left =
+            |interval: Duration, frames: i32| (1.0 - background_alpha(interval)).powi(frames);
+        assert!((left(FULL_INTERVAL, 20) - left(KEYFRAME_INTERVAL, 5)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn timestamp_going_backwards_restarts_the_timers() {
+        let mut feed = Feed::new(FULL_INTERVAL);
+        let background = flat_frame(50);
+        feed.feed(&background, 20);
+        let moved = moved(&background);
+        feed.feed(&moved, 1);
+
+        // A restarted stream: the next frame alone must not count as 1 s.
+        feed.now = Duration::ZERO;
+        assert!(!has_motion_started(&feed.feed(&moved, 1)));
+        assert!(has_motion_started(&feed.feed(&moved, 2)));
     }
 }
