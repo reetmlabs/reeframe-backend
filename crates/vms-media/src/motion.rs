@@ -433,4 +433,117 @@ mod tests {
         let signals = feed.feed(&changed, 1);
         assert!(signals.contains(&MotionSignal::SignalRestored));
     }
+
+    /// Keyframe interval of a typical camera sub stream.
+    const KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn at_two_fps_motion_starts_after_one_second() {
+        let mut feed = Feed::new(FULL_INTERVAL);
+        let background = flat_frame(50);
+        feed.feed(&background, 20);
+        let moved = moved(&background);
+
+        assert!(
+            !has_motion_started(&feed.feed(&moved, 1)),
+            "0.5 s is too short"
+        );
+        assert!(has_motion_started(&feed.feed(&moved, 1)), "1 s is enough");
+    }
+
+    #[test]
+    fn with_frames_over_a_second_apart_one_frame_starts_motion() {
+        let mut feed = Feed::new(KEYFRAME_INTERVAL);
+        let background = flat_frame(50);
+        feed.feed(&background, 5);
+
+        assert!(has_motion_started(&feed.feed(&moved(&background), 1)));
+    }
+
+    #[test]
+    fn motion_stops_after_three_seconds_without_it() {
+        for (interval, frames_before_stop) in [(FULL_INTERVAL, 5), (KEYFRAME_INTERVAL, 1)] {
+            let mut feed = Feed::new(interval);
+            let background = flat_frame(50);
+            feed.feed(&background, 5);
+            // A change small enough to leave no trace in the background
+            // estimate once the scene is back, even after 4 s of it.
+            let mut moved = background.clone();
+            moved[0] = 100;
+            moved[1] = 100;
+            assert!(has_motion_started(&feed.feed(&moved, 2)));
+
+            let signals = feed.feed(&background, frames_before_stop);
+            assert!(
+                !signals.contains(&MotionSignal::MotionStopped),
+                "{interval:?}: stopped before 3 s"
+            );
+            let signals = feed.feed(&background, 1);
+            assert!(
+                signals.contains(&MotionSignal::MotionStopped),
+                "{interval:?}: not stopped after 3 s"
+            );
+        }
+    }
+
+    #[test]
+    fn tamper_follows_the_same_time_rules() {
+        let mut feed = Feed::new(KEYFRAME_INTERVAL);
+        feed.feed(&checkerboard(10, 240), 2);
+        let signals = feed.feed(&flat_frame(10), 1);
+        assert!(signals
+            .iter()
+            .any(|s| matches!(s, MotionSignal::TamperDetected { .. })));
+
+        assert!(!feed
+            .feed(&checkerboard(10, 240), 1)
+            .contains(&MotionSignal::TamperCleared));
+        assert!(feed
+            .feed(&checkerboard(10, 240), 1)
+            .contains(&MotionSignal::TamperCleared));
+    }
+
+    #[test]
+    fn feed_is_frozen_after_ten_seconds_of_identical_frames() {
+        let mut feed = Feed::new(KEYFRAME_INTERVAL);
+        let frame = checkerboard(30, 200);
+        // The 6th identical frame at 2 s intervals is 10 s after the first.
+        assert!(!feed.feed(&frame, 5).contains(&MotionSignal::SignalLost));
+        assert!(feed.feed(&frame, 1).contains(&MotionSignal::SignalLost));
+    }
+
+    #[test]
+    fn two_identical_frames_far_apart_are_not_a_frozen_feed() {
+        let mut feed = Feed::new(Duration::from_secs(30));
+        let signals = feed.feed(&checkerboard(30, 200), 2);
+        assert!(!signals.contains(&MotionSignal::SignalLost));
+        let signals = feed.feed(&checkerboard(30, 200), 1);
+        assert!(signals.contains(&MotionSignal::SignalLost));
+    }
+
+    #[test]
+    fn background_memory_is_the_same_at_any_frame_rate() {
+        // A weight of about 0.05 per frame at 2 fps.
+        assert!((background_alpha(FULL_INTERVAL) - 0.05).abs() < 0.002);
+
+        // What is left of an old background after 10 s, at 2 fps and with
+        // keyframes 2 s apart.
+        let left =
+            |interval: Duration, frames: i32| (1.0 - background_alpha(interval)).powi(frames);
+        assert!((left(FULL_INTERVAL, 20) - left(KEYFRAME_INTERVAL, 5)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn timestamp_going_backwards_restarts_the_timers() {
+        let mut feed = Feed::new(FULL_INTERVAL);
+        let background = flat_frame(50);
+        feed.feed(&background, 20);
+        let moved = moved(&background);
+        feed.feed(&moved, 1);
+
+        // A restarted stream: the next frame alone must not count as 1 s.
+        feed.now = Duration::ZERO;
+        assert!(!has_motion_started(&feed.feed(&moved, 1)));
+        assert!(has_motion_started(&feed.feed(&moved, 2)));
+    }
 }
