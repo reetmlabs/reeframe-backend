@@ -17,7 +17,7 @@ This is the backend of Reeframe. The web UI and the optional multi-site Coordina
 - Each camera is opened once. Recording, the RTSP restream, pre-event clips, snapshots and analytics all share its main and sub streams.
 - Automation is built in. A pipeline like "on motion, cut a clip starting 10 s before the event and send it to Telegram" needs no glue code.
 - Events come in from Home Assistant, MQTT and webhooks, among others, and results go out to S3, SFTP, email, Slack, Telegram or a webhook.
-- Recording survives trouble: cameras reconnect with backoff and a circuit breaker, unfinished chunks are repaired after a crash, and recordings resume after a restart.
+- Recording survives trouble: cameras that drop or stop sending data reconnect with backoff and a circuit breaker, unfinished chunks are repaired after a crash, and recordings resume after a restart.
 - It's Apache-2.0, with no per-camera or per-channel fees.
 
 ### Resource usage
