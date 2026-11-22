@@ -1544,4 +1544,102 @@ mod tests {
         media.stop_restream(cam, StreamQuality::Main).await;
         assert!(!media.is_running(cam));
     }
+
+    /// Serves H264 over RTSP on a free local port. The first session stops
+    /// sending video after a few frames but stays open; later sessions stream
+    /// normally. Returns the stream URL.
+    fn camera_that_goes_quiet_once() -> String {
+        use gstreamer::prelude::*;
+        use gstreamer_rtsp_server::prelude::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        gstreamer::init().unwrap();
+        let context = gstreamer::glib::MainContext::new();
+        let server = gstreamer_rtsp_server::RTSPServer::new();
+        server.set_address("127.0.0.1");
+        server.set_service("0");
+        let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
+        factory.set_launch(
+            "( videotestsrc is-live=true ! video/x-raw,width=160,height=120,framerate=10/1 \
+             ! x264enc key-int-max=10 tune=zerolatency speed-preset=ultrafast \
+             ! rtph264pay name=pay0 pt=96 )",
+        );
+        let sessions = Arc::new(AtomicU32::new(0));
+        factory.connect_media_configure(move |_, media| {
+            if sessions.fetch_add(1, Ordering::SeqCst) > 0 {
+                return;
+            }
+            let bin = media.element().downcast::<gstreamer::Bin>().unwrap();
+            let pay_src = bin.by_name("pay0").unwrap().static_pad("src").unwrap();
+            let sent = AtomicU32::new(0);
+            let data = gstreamer::PadProbeType::BUFFER | gstreamer::PadProbeType::BUFFER_LIST;
+            pay_src.add_probe(data, move |_, _| {
+                if sent.fetch_add(1, Ordering::SeqCst) < 20 {
+                    gstreamer::PadProbeReturn::Ok
+                } else {
+                    gstreamer::PadProbeReturn::Handled
+                }
+            });
+        });
+        server.mount_points().unwrap().add_factory("/cam", factory);
+        server.attach(Some(&context)).unwrap();
+        let port = server.bound_port();
+        std::thread::spawn(move || {
+            let _server = server;
+            gstreamer::glib::MainLoop::new(Some(&context), false).run();
+        });
+        format!("rtsp://127.0.0.1:{port}/cam")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn camera_that_stops_sending_is_restarted() {
+        use gstreamer::prelude::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let dir = ScratchDir::new("stall-restart");
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (chunk_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = MediaConfig {
+            recording_dir: dir.0.clone(),
+            rtsp_bind: "127.0.0.1:0".into(),
+            stall_timeout: Duration::from_secs(2),
+            ..Default::default()
+        };
+        let media = MediaManager::new(config, event_tx, chunk_tx, live_tx).unwrap();
+        let cam = Uuid::new_v4();
+        let url = camera_that_goes_quiet_once();
+
+        media.hold_live(cam, &url, None).await.unwrap();
+        assert_eq!(live_rx.recv().await, Some(cam));
+        let restarted = tokio::time::timeout(Duration::from_secs(20), live_rx.recv()).await;
+        assert_eq!(
+            restarted,
+            Ok(Some(cam)),
+            "the quiet camera was never restarted"
+        );
+
+        let pipeline = media.cameras.lock().unwrap()[&cam].pipeline.clone();
+        let tee_sink = pipeline
+            .by_name(&super::main_tee_name(cam))
+            .unwrap()
+            .static_pad("sink")
+            .unwrap();
+        let buffers = Arc::new(AtomicU64::new(0));
+        let counted = buffers.clone();
+        tee_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            gstreamer::PadProbeReturn::Ok
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            buffers.load(Ordering::SeqCst) > 0,
+            "no data after the restart"
+        );
+
+        media.release_live(cam).await;
+    }
 }
