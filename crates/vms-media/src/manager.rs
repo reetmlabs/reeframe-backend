@@ -220,7 +220,7 @@ pub struct MediaManager {
 }
 
 impl MediaManager {
-    /// Create a new `MediaManager` and initialise GStreamer.
+    /// Create a new `MediaManager`, initialise GStreamer and reject a leaking gst-libav.
     ///
     /// `gstreamer::init()` is idempotent, so this is safe to call more than
     /// once.
@@ -237,6 +237,7 @@ impl MediaManager {
         pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     ) -> Result<Self, VmsError> {
         gstreamer::init().map_err(|e| VmsError::Media(format!("GStreamer init failed: {e}")))?;
+        crate::plugin_check::check_installed_libav()?;
         std::fs::create_dir_all(&config.recording_dir)?;
         cleanup_stale_tmp_files(&config.recording_dir);
         let restream = Arc::new(RestreamServer::new(
