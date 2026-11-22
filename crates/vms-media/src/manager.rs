@@ -13,6 +13,7 @@ use vms_core::{RecordingChunkEvent, VmsError};
 
 use crate::camera_stream;
 use crate::camera_stream::{build_camera_stream, spawn_monitor, ChunkNaming};
+use crate::motion::MotionMode;
 use crate::motion_branch::{self, MotionHandle};
 use crate::restream::{RestreamServer, StreamQuality};
 use crate::ring_buffer::RingBuffer;
@@ -906,7 +907,13 @@ impl MediaManager {
                 return Ok(());
             }
         }
-        let handle = motion_branch::attach(pipeline, tee_name, camera_id, self.event_tx.clone())?;
+        let handle = motion_branch::attach(
+            pipeline,
+            tee_name,
+            camera_id,
+            MotionMode::default(),
+            self.event_tx.clone(),
+        )?;
         self.motion.lock().unwrap().insert(camera_id, handle);
         Ok(())
     }

@@ -60,6 +60,17 @@ const START_AFTER: Duration = Duration::from_secs(1);
 /// How long a condition must be absent before its "stopped" event fires.
 const STOP_AFTER: Duration = Duration::from_secs(3);
 
+/// Which frames of the stream the motion branch decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MotionMode {
+    /// Decode keyframes only. Cheapest, but reacts within one or two keyframe
+    /// intervals and can miss motion shorter than one interval.
+    #[default]
+    Keyframes,
+    /// Decode every frame and analyze up to 2 per second.
+    Full,
+}
+
 /// One detection produced by [`MotionAnalyzer::process_frame`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum MotionSignal {

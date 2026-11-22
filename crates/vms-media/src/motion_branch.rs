@@ -14,9 +14,13 @@
 //! MOTION_FRAME_HEIGHT) -> appsink`. The decoder is picked from the tee's caps
 //! when they first reach the queue. It is pinned to a software decoder because
 //! `decodebin` may pick a hardware one, and a hardware decoder rejecting the
-//! stream's profile errors out the whole camera pipeline. Every frame still has
-//! to be decoded (inter frames need their references), but `videorate` drops
-//! all but [`SAMPLE_RATE_FPS`] per second before conversion and scaling.
+//! stream's profile errors out the whole camera pipeline.
+//!
+//! In [`MotionMode::Keyframes`] a probe on the decoder's sink pad drops every
+//! delta frame, so only keyframes are decoded. `skip-frame` on the libav
+//! decoders has no keyframe-only setting. In [`MotionMode::Full`] every frame
+//! is decoded (inter frames need their references), and `videorate` drops all
+//! but [`SAMPLE_RATE_FPS`] per second before conversion and scaling.
 
 use std::time::Duration;
 
@@ -26,7 +30,9 @@ use uuid::Uuid;
 use vms_core::event::{Event, TopicKey};
 use vms_core::VmsError;
 
-use crate::motion::{MotionAnalyzer, MotionSignal, MOTION_FRAME_HEIGHT, MOTION_FRAME_WIDTH};
+use crate::motion::{
+    MotionAnalyzer, MotionMode, MotionSignal, MOTION_FRAME_HEIGHT, MOTION_FRAME_WIDTH,
+};
 
 /// Frames per second handed to the analyzer at most. `MotionAnalyzer` works
 /// on frame timestamps, so a lower rate changes only how quickly it reacts.
@@ -102,11 +108,13 @@ impl MotionHandle {
 /// (`TopicKey::Camera`). That is the same `EventBus` bridge channel the
 /// `vms-sources` adapters use, so this crate needs no `vms-engine` dependency.
 ///
-/// Safe to call while the pipeline is `Playing`.
+/// `mode` picks which frames are decoded. Safe to call while the pipeline is
+/// `Playing`.
 pub fn attach(
     pipeline: &gstreamer::Pipeline,
     tee_name: &str,
     camera_id: Uuid,
+    mode: MotionMode,
     event_tx: mpsc::UnboundedSender<Event>,
 ) -> Result<MotionHandle, VmsError> {
     let tee = pipeline.by_name(tee_name).ok_or_else(|| {
@@ -196,7 +204,7 @@ pub fn attach(
         let (Some(pipeline), Some(rate)) = (pipeline_weak.upgrade(), rate_weak.upgrade()) else {
             return gstreamer::PadProbeReturn::Remove;
         };
-        if let Err(e) = link_decoder(&pipeline, pad, &rate, caps_event.caps(), camera_id) {
+        if let Err(e) = link_decoder(&pipeline, pad, &rate, caps_event.caps(), camera_id, mode) {
             tracing::warn!(camera_id = %camera_id, error = %e, "Motion detection has no decoder for this stream");
         }
         gstreamer::PadProbeReturn::Remove
@@ -378,6 +386,7 @@ fn link_decoder(
     rate: &gstreamer::Element,
     caps: &gstreamer::CapsRef,
     camera_id: Uuid,
+    mode: MotionMode,
 ) -> Result<(), VmsError> {
     let caps_name = caps
         .structure(0)
@@ -409,6 +418,16 @@ fn link_decoder(
     let decoder_sink = decoder
         .static_pad("sink")
         .ok_or_else(|| VmsError::Media(format!("motion {factory} has no sink pad")))?;
+    if mode == MotionMode::Keyframes {
+        decoder_sink.add_probe(gstreamer::PadProbeType::BUFFER, |_, info| {
+            match info.buffer() {
+                Some(buffer) if buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT) => {
+                    gstreamer::PadProbeReturn::Drop
+                }
+                _ => gstreamer::PadProbeReturn::Ok,
+            }
+        });
+    }
     queue_src
         .link(&decoder_sink)
         .map_err(|e| VmsError::Media(format!("motion link queue->{factory}: {e:?}")))?;
@@ -461,7 +480,7 @@ mod tests {
         .unwrap();
 
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let handle = attach(&pipeline, &tee_name, camera_id, event_tx).unwrap();
+        let handle = attach(&pipeline, &tee_name, camera_id, MotionMode::Full, event_tx).unwrap();
 
         let count = Arc::new(AtomicUsize::new(0));
         let counter = count.clone();
