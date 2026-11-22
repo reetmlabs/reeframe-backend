@@ -697,7 +697,12 @@ impl MediaManager {
             .map_err(|e| VmsError::Media(format!("start sub-stream {camera_id}: {e}")))?;
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let task = spawn_sub_monitor(camera_id, pipeline.clone(), shutdown_rx);
+        let task = spawn_sub_monitor(
+            camera_id,
+            pipeline.clone(),
+            self.config.stall_timeout,
+            shutdown_rx,
+        );
 
         self.sub_streams.lock().unwrap().insert(
             camera_id,

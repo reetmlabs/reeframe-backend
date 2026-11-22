@@ -10,7 +10,13 @@ use gstreamer::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
-use crate::camera_stream::{codec_for, ReconnectPolicy, WaitPlan};
+use crate::camera_stream::{
+    codec_for, stall_check_period, FlowWatchdog, ReconnectPolicy, WaitPlan,
+};
+
+fn tee_name(camera_id: Uuid) -> String {
+    format!("cam_{}_subtee", camera_id.as_simple())
+}
 
 /// Build a per-camera sub-stream pipeline: `rtspsrc -> [depay|parse] -> tee`.
 ///
@@ -33,7 +39,7 @@ pub(crate) fn build_sub_stream(
 
     // Consumers attach at runtime, so the tee must tolerate having none.
     let tee = gstreamer::ElementFactory::make("tee")
-        .name(format!("cam_{id}_subtee"))
+        .name(tee_name(camera_id))
         .property("allow-not-linked", true)
         .build()
         .map_err(|e| VmsError::Media(format!("sub-stream tee: {e}")))?;
@@ -151,11 +157,13 @@ pub(crate) fn build_sub_stream(
 /// Reconnect monitor for the sub-stream pipeline.
 ///
 /// Uses the same backoff and circuit breaker as `camera_stream::spawn_monitor`
-/// (see `ReconnectPolicy`). There is no splitmuxsink here, so a reconnect is a
-/// plain `Null` to `Playing` cycle.
+/// (see `ReconnectPolicy`), including the restart after `stall_timeout`
+/// without data. There is no splitmuxsink here, so a reconnect is a plain
+/// `Null` to `Playing` cycle.
 pub(crate) fn spawn_sub_monitor(
     camera_id: Uuid,
     gst_pipeline: gstreamer::Pipeline,
+    stall_timeout: std::time::Duration,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -165,6 +173,8 @@ pub(crate) fn spawn_sub_monitor(
         let bus = gst_pipeline.bus().expect("pipeline bus missing");
         let mut bus_stream = bus.stream();
         let mut policy = ReconnectPolicy::new();
+        let watchdog = FlowWatchdog::install(&gst_pipeline, &tee_name(camera_id));
+        let mut stall_check = tokio::time::interval(stall_check_period(stall_timeout));
 
         'outer: loop {
             let needs_reconnect = 'watch: loop {
@@ -193,6 +203,17 @@ pub(crate) fn spawn_sub_monitor(
                                 );
                             }
                             _ => {}
+                        }
+                    }
+                    _ = stall_check.tick() => {
+                        let idle = watchdog.as_ref().map_or(std::time::Duration::ZERO, FlowWatchdog::idle);
+                        if idle >= stall_timeout {
+                            tracing::warn!(
+                                camera_id = %camera_id,
+                                idle_secs = idle.as_secs(),
+                                "No data from the camera's sub stream, will reconnect",
+                            );
+                            break 'watch true;
                         }
                     }
                     _ = &mut shutdown_rx => break 'outer,
@@ -239,6 +260,9 @@ pub(crate) fn spawn_sub_monitor(
                     Ok(_) => {
                         tracing::info!(camera_id = %camera_id, "Sub-stream restarted");
                         policy.record_attempt();
+                        if let Some(w) = &watchdog {
+                            w.reset();
+                        }
                         break 'reconnect;
                     }
                     Err(e) => {
