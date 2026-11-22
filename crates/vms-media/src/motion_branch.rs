@@ -612,6 +612,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_branch_can_be_reattached_in_another_mode_while_playing() {
+        gstreamer::init().unwrap();
+        let camera_id = Uuid::new_v4();
+        let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
+        let pipeline = gstreamer::parse::launch(&format!(
+            "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=25/1 \
+             ! x264enc tune=zerolatency key-int-max=25 ! h264parse \
+             ! tee name={tee_name} allow-not-linked=true"
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let first = attach(
+            &pipeline,
+            &tee_name,
+            camera_id,
+            MotionMode::Keyframes,
+            event_tx.clone(),
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        first.stop_and_wait_for_removal().await;
+
+        let second = attach(&pipeline, &tee_name, camera_id, MotionMode::Full, event_tx).unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            pipeline.by_name(&decode_name(camera_id)).is_some(),
+            "new branch is decoding"
+        );
+        second.stop().await;
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+    }
+
     #[test]
     fn every_restream_codec_has_a_software_decoder_candidate() {
         for caps in ["video/x-h264", "video/x-h265", "image/jpeg", "video/x-av1"] {
