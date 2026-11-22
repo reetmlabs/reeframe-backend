@@ -91,6 +91,35 @@ jobs:
             gstreamer1.0-libav \
             gstreamer1.0-nice
 
+      # Ubuntu 24.04 ships gst-libav 1.24.1, which leaks memory per decoded frame
+      # and fails the daemon's startup check, so build the fixed 1.24.2 once and cache it.
+      - name: Cache gst-libav 1.24.2
+        id: gst-libav-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/gst-libav
+          key: gst-libav-1.24.2-ubuntu-24.04-v1
+
+      - name: Build gst-libav 1.24.2
+        if: steps.gst-libav-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends meson ninja-build \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev
+          curl -sSfL https://gstreamer.freedesktop.org/src/gst-libav/gst-libav-1.24.2.tar.xz | tar xJ -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/gst-libav-1.24.2"
+          meson setup build --buildtype=release -Ddoc=disabled -Dtests=disabled
+          ninja -C build
+          mkdir -p ~/gst-libav
+          cp build/ext/libav/libgstlibav.so ~/gst-libav/
+
+      - name: Install gst-libav 1.24.2
+        run: |
+          PLUGINS=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
+          sudo dpkg-divert --divert $PLUGINS/libgstlibav.so.distrib --rename --add $PLUGINS/libgstlibav.so
+          sudo install -m644 ~/gst-libav/libgstlibav.so $PLUGINS/
+          rm -rf ~/.cache/gstreamer-1.0
+          gst-inspect-1.0 libav | grep -E 'Version +1\.24\.2$'
+
       # Caches the registry and target dir, keyed on Cargo.lock and the toolchain
       - uses: Swatinem/rust-cache@v2
 
