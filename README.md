@@ -119,7 +119,7 @@ To connect the backend to a Reeframe Coordinator, create an enrollment code for 
 
 ## Building from source
 
-Requires stable Rust and GStreamer 1.20 or newer. On Debian or Ubuntu:
+Requires stable Rust and GStreamer 1.20 or newer, with gst-libav 1.24.2 or newer if your GStreamer is 1.24 (see below). On Debian or Ubuntu:
 
 ```bash
 sudo apt install pkg-config libssl-dev \
@@ -130,6 +130,32 @@ sudo apt install pkg-config libssl-dev \
 
 cargo build --release
 VMS_ENCRYPTION_KEY=... VMS_AUTH__JWT_SECRET=... ./target/release/vms-daemon
+```
+
+### gst-libav 1.24.2 or newer
+
+gst-libav 1.24.0 and 1.24.1 leak memory on every decoded video frame, so the daemon refuses to start with them. Debian bookworm (1.22) is fine. Ubuntu 24.04 ships 1.24.1 with GStreamer core 1.24.2, so build gst-libav 1.24.2 from the release tarball and install it in place of the packaged plugin:
+
+```bash
+sudo apt install meson ninja-build libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev
+curl -LO https://gstreamer.freedesktop.org/src/gst-libav/gst-libav-1.24.2.tar.xz
+tar xf gst-libav-1.24.2.tar.xz && cd gst-libav-1.24.2
+meson setup build --buildtype=release -Ddoc=disabled -Dtests=disabled
+ninja -C build
+
+PLUGINS=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
+sudo dpkg-divert --divert $PLUGINS/libgstlibav.so.distrib --rename --add $PLUGINS/libgstlibav.so
+sudo install -m644 build/ext/libav/libgstlibav.so $PLUGINS/
+rm -rf ~/.cache/gstreamer-1.0
+gst-inspect-1.0 libav | grep Version   # 1.24.2
+```
+
+The diversion keeps apt from overwriting the plugin. To go back to the packaged one:
+
+```bash
+sudo rm $PLUGINS/libgstlibav.so
+sudo dpkg-divert --rename --remove $PLUGINS/libgstlibav.so
+rm -rf ~/.cache/gstreamer-1.0
 ```
 
 ## Configuration
