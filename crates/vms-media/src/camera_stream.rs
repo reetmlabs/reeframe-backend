@@ -972,6 +972,57 @@ impl ReconnectPolicy {
     }
 }
 
+// -- Data-flow watchdog --
+
+/// Records when a buffer last reached a pipeline's tee. A pipeline blocked
+/// downstream, or fed by an RTSP session that went quiet, posts no bus
+/// message, so the reconnect monitors poll this instead.
+pub(crate) struct FlowWatchdog {
+    started: std::time::Instant,
+    last_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl FlowWatchdog {
+    /// Watch buffers on the sink pad of `pipeline`'s element `tee_name`.
+    /// `None` if the pipeline has no such element.
+    pub(crate) fn install(pipeline: &gstreamer::Pipeline, tee_name: &str) -> Option<Self> {
+        let sink = pipeline.by_name(tee_name)?.static_pad("sink")?;
+        let started = std::time::Instant::now();
+        let last_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let last_in_probe = last_ms.clone();
+        sink.add_probe(
+            gstreamer::PadProbeType::BUFFER | gstreamer::PadProbeType::BUFFER_LIST,
+            move |_, _| {
+                last_in_probe.store(
+                    started.elapsed().as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                gstreamer::PadProbeReturn::Ok
+            },
+        );
+        Some(Self { started, last_ms })
+    }
+
+    /// Start a new quiet period, as if a buffer had just arrived.
+    pub(crate) fn reset(&self) {
+        self.last_ms.store(
+            self.started.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Time since the last buffer or [`Self::reset`].
+    pub(crate) fn idle(&self) -> Duration {
+        let last = Duration::from_millis(self.last_ms.load(std::sync::atomic::Ordering::Relaxed));
+        self.started.elapsed().saturating_sub(last)
+    }
+}
+
+/// How often a monitor checks its [`FlowWatchdog`] against `stall_timeout`.
+pub(crate) fn stall_check_period(stall_timeout: Duration) -> Duration {
+    (stall_timeout / 4).max(Duration::from_millis(100))
+}
+
 // -- Reconnect monitor task --
 
 /// Spawn a tokio task that watches the GStreamer bus and reconnects on error/EOS.
@@ -984,6 +1035,9 @@ impl ReconnectPolicy {
 /// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
 /// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
 /// file is finalized on disk.
+///
+/// A pipeline whose tee receives no buffer for `stall_timeout` is restarted
+/// the same way as one that posted an error.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_monitor(
     camera_id: Uuid,
@@ -991,6 +1045,7 @@ pub(crate) fn spawn_monitor(
     naming: Arc<ChunkNaming>,
     recording_dir: PathBuf,
     chunk_duration_secs: u64,
+    stall_timeout: Duration,
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -1002,9 +1057,11 @@ pub(crate) fn spawn_monitor(
         let bus = gst_pipeline.bus().expect("pipeline bus missing");
         let mut bus_stream = bus.stream();
         let mut policy = ReconnectPolicy::new();
+        let watchdog = FlowWatchdog::install(&gst_pipeline, &tee_name(camera_id));
+        let mut stall_check = tokio::time::interval(stall_check_period(stall_timeout));
 
         'outer: loop {
-            // -- Watch bus until Error/EOS or shutdown --
+            // -- Watch bus until Error/EOS, a stall or shutdown --
             let needs_reconnect = 'watch: loop {
                 tokio::select! {
                     maybe_msg = bus_stream.next() => {
@@ -1038,6 +1095,17 @@ pub(crate) fn spawn_monitor(
                                 handle_fragment_closed(camera_id, elem, &naming, &chunk_event_tx);
                             }
                             _ => {}
+                        }
+                    }
+                    _ = stall_check.tick() => {
+                        let idle = watchdog.as_ref().map_or(Duration::ZERO, FlowWatchdog::idle);
+                        if idle >= stall_timeout {
+                            tracing::warn!(
+                                camera_id = %camera_id,
+                                idle_secs = idle.as_secs(),
+                                "No data from the camera, will reconnect",
+                            );
+                            break 'watch true;
                         }
                     }
                     _ = &mut shutdown_rx => break 'outer,
@@ -1126,6 +1194,9 @@ pub(crate) fn spawn_monitor(
                     Ok(_) => {
                         tracing::info!(camera_id = %camera_id, "Camera stream restarted");
                         policy.record_attempt();
+                        if let Some(w) = &watchdog {
+                            w.reset();
+                        }
                         // Lets the task that owns recording intent resume
                         // recording as soon as the stream is back.
                         let _ = pipeline_live_tx.send(camera_id);

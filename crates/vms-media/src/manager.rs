@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use gstreamer::prelude::*;
@@ -38,6 +39,9 @@ pub struct MediaConfig {
     /// Minimum spacing between timeline thumbnail captures, in seconds
     /// (default: 30).
     pub thumbnail_interval_secs: u64,
+    /// How long a camera pipeline may receive no data before it is restarted
+    /// (default: 20 s).
+    pub stall_timeout: Duration,
 }
 
 impl Default for MediaConfig {
@@ -49,6 +53,7 @@ impl Default for MediaConfig {
             rtsp_public_host: None,
             rtsp_public_port: None,
             thumbnail_interval_secs: 30,
+            stall_timeout: Duration::from_secs(20),
         }
     }
 }
@@ -337,6 +342,7 @@ impl MediaManager {
                 naming.clone(),
                 self.config.recording_dir.clone(),
                 self.config.chunk_duration_secs,
+                self.config.stall_timeout,
                 self.chunk_event_tx.clone(),
                 self.pipeline_live_tx.clone(),
                 shutdown_rx,
