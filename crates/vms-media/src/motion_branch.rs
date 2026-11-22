@@ -463,9 +463,19 @@ mod tests {
 
     use super::*;
 
-    /// Plays 3 s of live 25 fps H.264 into a tee with the motion branch
-    /// attached and returns how many frames reached the appsink.
-    async fn frames_reaching_appsink() -> usize {
+    /// Buffer counts from 3 s of the motion branch on a live stream.
+    struct BranchCounts {
+        /// Keyframes that entered the branch.
+        keyframes: usize,
+        /// Frames the decoder produced.
+        decoded: usize,
+        /// Frames that reached the appsink.
+        analyzed: usize,
+    }
+
+    /// Plays 3 s of live 25 fps H.264 with a keyframe every second into a tee
+    /// with the motion branch attached in `mode`.
+    async fn run_branch(mode: MotionMode) -> BranchCounts {
         gstreamer::init().unwrap();
         let camera_id = Uuid::new_v4();
         let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
@@ -479,38 +489,103 @@ mod tests {
         .downcast::<gstreamer::Pipeline>()
         .unwrap();
 
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let handle = attach(&pipeline, &tee_name, camera_id, MotionMode::Full, event_tx).unwrap();
+        // The decoder is created once caps flow, so count its output from
+        // the moment it is added.
+        let decoded = Arc::new(AtomicUsize::new(0));
+        let decoded_counter = decoded.clone();
+        let decoder = decode_name(camera_id);
+        pipeline.connect_element_added(move |_, element| {
+            if element.name() != decoder.as_str() {
+                return;
+            }
+            let counter = decoded_counter.clone();
+            element.static_pad("src").unwrap().add_probe(
+                gstreamer::PadProbeType::BUFFER,
+                move |_, _| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    gstreamer::PadProbeReturn::Ok
+                },
+            );
+        });
 
-        let count = Arc::new(AtomicUsize::new(0));
-        let counter = count.clone();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let handle = attach(&pipeline, &tee_name, camera_id, mode, event_tx).unwrap();
+
+        let keyframes = Arc::new(AtomicUsize::new(0));
+        let keyframe_counter = keyframes.clone();
+        pipeline
+            .by_name(&queue_name(camera_id))
+            .unwrap()
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+                if info
+                    .buffer()
+                    .is_some_and(|b| !b.flags().contains(gstreamer::BufferFlags::DELTA_UNIT))
+                {
+                    keyframe_counter.fetch_add(1, Ordering::SeqCst);
+                }
+                gstreamer::PadProbeReturn::Ok
+            });
+
+        let analyzed = Arc::new(AtomicUsize::new(0));
+        let analyzed_counter = analyzed.clone();
         pipeline
             .by_name(&sink_name(camera_id))
             .unwrap()
             .static_pad("sink")
             .unwrap()
             .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
-                counter.fetch_add(1, Ordering::SeqCst);
+                analyzed_counter.fetch_add(1, Ordering::SeqCst);
                 gstreamer::PadProbeReturn::Ok
             });
 
         pipeline.set_state(gstreamer::State::Playing).unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let frames = count.load(Ordering::SeqCst);
-
         handle.stop().await;
         pipeline.set_state(gstreamer::State::Null).unwrap();
-        frames
+        BranchCounts {
+            keyframes: keyframes.load(Ordering::SeqCst),
+            decoded: decoded.load(Ordering::SeqCst),
+            analyzed: analyzed.load(Ordering::SeqCst),
+        }
     }
 
     #[tokio::test]
     async fn only_the_sample_rate_reaches_the_analyzer() {
-        let frames = frames_reaching_appsink().await;
+        let frames = run_branch(MotionMode::Full).await.analyzed;
         // 3 s at SAMPLE_RATE_FPS, plus slack for startup and the first frame.
         assert!(
             (3..=8).contains(&frames),
             "expected about {} frames at {SAMPLE_RATE_FPS} fps over 3 s, got {frames}",
             3 * SAMPLE_RATE_FPS
+        );
+    }
+
+    #[tokio::test]
+    async fn keyframes_mode_decodes_only_keyframes() {
+        let counts = run_branch(MotionMode::Keyframes).await;
+        assert!(
+            counts.keyframes >= 2,
+            "expected a keyframe per second, got {}",
+            counts.keyframes
+        );
+        assert!(
+            counts.decoded <= counts.keyframes && counts.decoded + 1 >= counts.keyframes,
+            "decoded {} frames from {} keyframes",
+            counts.decoded,
+            counts.keyframes
+        );
+    }
+
+    #[tokio::test]
+    async fn full_mode_decodes_every_frame() {
+        let counts = run_branch(MotionMode::Full).await;
+        assert!(
+            counts.decoded > 10 * counts.keyframes,
+            "decoded {} frames from {} keyframes",
+            counts.decoded,
+            counts.keyframes
         );
     }
 
