@@ -85,10 +85,17 @@ These are fields on the camera itself, set with `POST /cameras` or `PATCH /camer
 | Field | Default | |
 |---|---|---|
 | `motion_detection_enabled` | `false` | Run motion, scene-change and tamper detection whenever the camera is live. A pipeline with an event trigger on the camera turns it on regardless. |
+| `motion_detection_mode` | `keyframes` | `keyframes` decodes only the stream's keyframes, `full` decodes every frame and analyzes up to 2 per second. See below. |
 | `thumbnails_enabled` | `false` | Capture scrub-preview thumbnails while the camera records |
 | `live_view_stream` | `sub` | `sub` restreams the sub stream, falling back to main when there is none. `main` always restreams the main stream. |
 | `sub_rtsp_url` | unset | Low-resolution stream used for live view and analytics. Recording always uses `rtsp_url`. |
 
 Changes apply right away to a running camera. Changing `rtsp_url`, `sub_rtsp_url` or the credentials reconnects it.
+
+### Motion detection mode
+
+`keyframes` decodes one frame per keyframe interval instead of every frame, so it needs far less CPU. It reacts within one or two keyframe intervals and can miss motion shorter than one interval. For faster detection, use `full`, ideally with the camera's sub stream set to 2 to 5 fps so decoding every frame stays cheap.
+
+While a camera's keyframes are more than 4 s apart, `keyframes` decodes every frame instead and logs a warning. The read-only `effective_motion_mode` field on the camera shows the mode in use, or `null` while motion detection is not running. Changing the mode rebuilds only the motion detection branch; the camera's streams keep running.
 
 Retention and time zone can be overridden per camera with `PATCH /cameras/{id}/retention-policy` and `PATCH /cameras/{id}/timezone`.

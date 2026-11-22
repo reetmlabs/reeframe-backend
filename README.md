@@ -70,7 +70,7 @@ Pipelines reload without a restart, and each camera only runs what its enabled p
 - Chunked MP4 recording with retention by age and by disk usage, and daily coverage summaries per camera time zone
 - Built-in RTSP restream for live view, serving the sub stream by default
 - In-memory pre-event buffer for clips that start before the event
-- Optional motion, scene-change and tamper detection, and optional scrub-preview thumbnails
+- Optional motion, scene-change and tamper detection on keyframes, or on every frame for faster reaction ([docs/configuration.md](docs/configuration.md#motion-detection-mode)), and optional scrub-preview thumbnails
 - Playback and export over HTTP
 - Local users with JWT and API keys, or tokens issued by the Reeframe Coordinator
 - SQLite by default, MySQL and PostgreSQL supported, with migrations applied on startup
