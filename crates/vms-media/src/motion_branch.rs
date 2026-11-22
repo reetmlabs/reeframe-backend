@@ -18,10 +18,14 @@
 //!
 //! In [`MotionMode::Keyframes`] a probe on the decoder's sink pad drops every
 //! delta frame, so only keyframes are decoded. `skip-frame` on the libav
-//! decoders has no keyframe-only setting. In [`MotionMode::Full`] every frame
+//! decoders has no keyframe-only setting. While the stream's keyframes are more
+//! than [`LONG_KEYFRAME_INTERVAL`] apart, the probe lets every frame through,
+//! so motion is still sampled often enough. In [`MotionMode::Full`] every frame
 //! is decoded (inter frames need their references), and `videorate` drops all
 //! but [`SAMPLE_RATE_FPS`] per second before conversion and scaling.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gstreamer::prelude::*;
@@ -37,6 +41,42 @@ use crate::motion::{
 /// Frames per second handed to the analyzer at most. `MotionAnalyzer` works
 /// on frame timestamps, so a lower rate changes only how quickly it reacts.
 const SAMPLE_RATE_FPS: i32 = 2;
+
+/// Keyframe interval above which keyframes mode decodes every frame instead.
+const LONG_KEYFRAME_INTERVAL: Duration = Duration::from_secs(4);
+
+/// Decides which encoded buffers reach the decoder in keyframes mode.
+///
+/// It measures the interval between keyframes and switches to every frame
+/// while that interval is too long. Switches happen at a keyframe, so the
+/// decoder always starts from a reference.
+#[derive(Default)]
+struct KeyframeGate {
+    last_keyframe: Option<Duration>,
+    full: bool,
+}
+
+impl KeyframeGate {
+    /// Whether a buffer goes to the decoder, and the new value of "decoding
+    /// every frame" if this buffer changed it.
+    fn admit(&mut self, keyframe: bool, timestamp: Option<Duration>) -> (bool, Option<bool>) {
+        if !keyframe {
+            return (self.full, None);
+        }
+        let mut switched = None;
+        if let Some(now) = timestamp {
+            if let Some(interval) = self.last_keyframe.and_then(|last| now.checked_sub(last)) {
+                let full = interval > LONG_KEYFRAME_INTERVAL;
+                if full != self.full {
+                    self.full = full;
+                    switched = Some(full);
+                }
+            }
+            self.last_keyframe = Some(now);
+        }
+        (true, switched)
+    }
+}
 
 /// Software decoders to try for each tee codec, in order of preference.
 fn decoder_candidates(caps_name: &str) -> &'static [&'static str] {
@@ -79,6 +119,10 @@ fn sink_name(id: Uuid) -> String {
 pub struct MotionHandle {
     pipeline: gstreamer::Pipeline,
     camera_id: Uuid,
+    mode: MotionMode,
+    /// Set while keyframes mode decodes every frame because keyframes are too
+    /// far apart.
+    long_keyframe_interval: Arc<AtomicBool>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -87,6 +131,16 @@ impl MotionHandle {
     /// The pipeline this branch is attached to.
     pub(crate) fn pipeline(&self) -> &gstreamer::Pipeline {
         &self.pipeline
+    }
+
+    /// The mode actually in use, which is `Full` while a keyframes-mode
+    /// camera's keyframes are too far apart.
+    pub fn effective_mode(&self) -> MotionMode {
+        if self.long_keyframe_interval.load(Ordering::Relaxed) {
+            MotionMode::Full
+        } else {
+            self.mode
+        }
     }
 
     /// Detach the GStreamer elements, signal the analyzer task to stop, and
@@ -209,6 +263,8 @@ pub fn attach(
     let queue_src = queue
         .static_pad("src")
         .ok_or_else(|| VmsError::Media("motion queue has no src pad".into()))?;
+    let long_keyframe_interval = Arc::new(AtomicBool::new(false));
+    let decoder_long_interval = long_keyframe_interval.clone();
     let pipeline_weak = pipeline.downgrade();
     let rate_weak = rate.downgrade();
     queue_src.add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
@@ -224,7 +280,15 @@ pub fn attach(
         let (Some(pipeline), Some(rate)) = (pipeline_weak.upgrade(), rate_weak.upgrade()) else {
             return gstreamer::PadProbeReturn::Remove;
         };
-        if let Err(e) = link_decoder(&pipeline, pad, &rate, caps_event.caps(), camera_id, mode) {
+        if let Err(e) = link_decoder(
+            &pipeline,
+            pad,
+            &rate,
+            caps_event.caps(),
+            camera_id,
+            mode,
+            decoder_long_interval.clone(),
+        ) {
             tracing::warn!(camera_id = %camera_id, error = %e, "Motion detection has no decoder for this stream");
         }
         gstreamer::PadProbeReturn::Remove
@@ -304,6 +368,8 @@ pub fn attach(
     Ok(MotionHandle {
         pipeline: pipeline.clone(),
         camera_id,
+        mode,
+        long_keyframe_interval,
         shutdown_tx,
         task,
     })
@@ -410,6 +476,7 @@ fn link_decoder(
     caps: &gstreamer::CapsRef,
     camera_id: Uuid,
     mode: MotionMode,
+    long_keyframe_interval: Arc<AtomicBool>,
 ) -> Result<(), VmsError> {
     let caps_name = caps
         .structure(0)
@@ -442,12 +509,33 @@ fn link_decoder(
         .static_pad("sink")
         .ok_or_else(|| VmsError::Media(format!("motion {factory} has no sink pad")))?;
     if mode == MotionMode::Keyframes {
-        decoder_sink.add_probe(gstreamer::PadProbeType::BUFFER, |_, info| {
-            match info.buffer() {
-                Some(buffer) if buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT) => {
-                    gstreamer::PadProbeReturn::Drop
-                }
-                _ => gstreamer::PadProbeReturn::Ok,
+        let gate = Mutex::new(KeyframeGate::default());
+        decoder_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            let Some(buffer) = info.buffer() else {
+                return gstreamer::PadProbeReturn::Ok;
+            };
+            let keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+            let timestamp = buffer.pts().or(buffer.dts()).map(Duration::from);
+            let (pass, switched) = gate.lock().unwrap().admit(keyframe, timestamp);
+            match switched {
+                Some(true) => tracing::warn!(
+                    camera_id = %camera_id,
+                    "Keyframes are more than {}s apart, motion detection decodes every frame",
+                    LONG_KEYFRAME_INTERVAL.as_secs(),
+                ),
+                Some(false) => tracing::info!(
+                    camera_id = %camera_id,
+                    "Keyframe interval is short again, motion detection decodes keyframes only",
+                ),
+                None => {}
+            }
+            if let Some(full) = switched {
+                long_keyframe_interval.store(full, Ordering::Relaxed);
+            }
+            if pass {
+                gstreamer::PadProbeReturn::Ok
+            } else {
+                gstreamer::PadProbeReturn::Drop
             }
         });
     }

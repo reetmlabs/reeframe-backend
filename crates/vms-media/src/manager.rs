@@ -781,6 +781,16 @@ impl MediaManager {
         }
     }
 
+    /// The motion detection mode in use for a camera, or `None` while motion
+    /// detection is not running.
+    pub fn effective_motion_mode(&self, camera_id: Uuid) -> Option<MotionMode> {
+        self.motion
+            .lock()
+            .unwrap()
+            .get(&camera_id)
+            .map(MotionHandle::effective_mode)
+    }
+
     /// Apply a camera's `thumbnails_enabled` setting. Thumbnails are only
     /// captured while the camera records.
     pub async fn set_thumbnails_enabled(&self, camera_id: Uuid, enabled: bool) {

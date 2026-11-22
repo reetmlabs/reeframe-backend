@@ -46,6 +46,10 @@ pub struct CameraDto {
     pub motion_detection_enabled: bool,
     /// Which frames motion detection decodes: `keyframes` (default) or `full`.
     pub motion_detection_mode: MotionDetectionMode,
+    /// Read-only. The mode motion detection actually uses, `null` while it is
+    /// not running. A `keyframes` camera shows `full` while its keyframes are
+    /// more than 4 s apart.
+    pub effective_motion_mode: Option<MotionDetectionMode>,
     /// Whether scrub-preview thumbnails are captured while the camera records.
     pub thumbnails_enabled: bool,
     /// Which stream live view restreams by default (`sub` falls back to `main`
@@ -69,6 +73,7 @@ impl CameraDto {
         recording: bool,
         main_restream_url: Option<String>,
         sub_restream_url: Option<String>,
+        effective_motion_mode: Option<MotionMode>,
     ) -> Self {
         Self {
             id: m.id,
@@ -88,6 +93,7 @@ impl CameraDto {
             desired_recording: m.desired_recording,
             motion_detection_enabled: m.motion_detection_enabled,
             motion_detection_mode: m.motion_detection_mode,
+            effective_motion_mode: effective_motion_mode.map(stored_motion_mode),
             thumbnails_enabled: m.thumbnails_enabled,
             live_view_stream: m.live_view_stream,
             main_restream_url,
@@ -180,7 +186,15 @@ pub async fn list_cameras(depot: &mut Depot) -> Result<Json<Vec<CameraDto>>, Api
             let recording = state.media_manager.is_recording(m.id);
             let main_restream_url = state.media_manager.restream_url(m.id, StreamQuality::Main);
             let sub_restream_url = state.media_manager.restream_url(m.id, StreamQuality::Sub);
-            CameraDto::from_model(m, live, recording, main_restream_url, sub_restream_url)
+            let effective_motion_mode = state.media_manager.effective_motion_mode(m.id);
+            CameraDto::from_model(
+                m,
+                live,
+                recording,
+                main_restream_url,
+                sub_restream_url,
+                effective_motion_mode,
+            )
         })
         .collect();
     Ok(Json(dtos))
@@ -233,8 +247,14 @@ pub async fn create_camera(
         .set_thumbnails_enabled(camera.id, camera.thumbnails_enabled)
         .await;
     res.status_code(StatusCode::CREATED);
+    let effective_motion_mode = state.media_manager.effective_motion_mode(camera.id);
     Ok(Json(CameraDto::from_model(
-        camera, false, false, None, None,
+        camera,
+        false,
+        false,
+        None,
+        None,
+        effective_motion_mode,
     )))
 }
 
@@ -258,6 +278,7 @@ pub async fn get_camera(req: &mut Request, depot: &mut Depot) -> Result<Json<Cam
         recording,
         main_restream_url,
         sub_restream_url,
+        state.media_manager.effective_motion_mode(id),
     )))
 }
 
@@ -335,6 +356,7 @@ pub async fn update_camera(
         recording,
         main_restream_url,
         sub_restream_url,
+        state.media_manager.effective_motion_mode(id),
     )))
 }
 
@@ -433,6 +455,13 @@ pub fn media_motion_mode(mode: MotionDetectionMode) -> MotionMode {
     match mode {
         MotionDetectionMode::Keyframes => MotionMode::Keyframes,
         MotionDetectionMode::Full => MotionMode::Full,
+    }
+}
+
+fn stored_motion_mode(mode: MotionMode) -> MotionDetectionMode {
+    match mode {
+        MotionMode::Keyframes => MotionDetectionMode::Keyframes,
+        MotionMode::Full => MotionDetectionMode::Full,
     }
 }
 
