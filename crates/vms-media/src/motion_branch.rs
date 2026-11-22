@@ -28,8 +28,8 @@ use vms_core::VmsError;
 
 use crate::motion::{MotionAnalyzer, MotionSignal, MOTION_FRAME_HEIGHT, MOTION_FRAME_WIDTH};
 
-/// Frames per second handed to the analyzer. `MotionAnalyzer` counts frames,
-/// not time, so its frozen-feed and hysteresis windows assume this rate.
+/// Frames per second handed to the analyzer at most. `MotionAnalyzer` works
+/// on frame timestamps, so a lower rate changes only how quickly it reacts.
 const SAMPLE_RATE_FPS: i32 = 2;
 
 /// Software decoders to try for each tee codec, in order of preference.
@@ -207,7 +207,9 @@ pub fn attach(
     // under load, and `try_send` on a small bounded channel sheds them again
     // if the analyzer task falls behind. A slow consumer never stalls the
     // streaming thread.
-    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(2);
+    // Frames without a timestamp use the time since attach instead.
+    let started = std::time::Instant::now();
+    let (frame_tx, mut frame_rx) = mpsc::channel::<(Vec<u8>, Duration)>(2);
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -218,7 +220,10 @@ pub fn attach(
                 let map = buffer
                     .map_readable()
                     .map_err(|_| gstreamer::FlowError::Error)?;
-                let _ = frame_tx.try_send(map.as_slice().to_vec());
+                let timestamp = buffer
+                    .pts()
+                    .map_or_else(|| started.elapsed(), Duration::from);
+                let _ = frame_tx.try_send((map.as_slice().to_vec(), timestamp));
                 Ok(gstreamer::FlowSuccess::Ok)
             })
             .build(),
@@ -256,8 +261,8 @@ pub fn attach(
         loop {
             tokio::select! {
                 frame = frame_rx.recv() => {
-                    let Some(frame) = frame else { break };
-                    for signal in analyzer.process_frame(&frame) {
+                    let Some((frame, timestamp)) = frame else { break };
+                    for signal in analyzer.process_frame(&frame, timestamp) {
                         let event = signal_to_event(camera_id, signal);
                         let _ = event_tx.send(event);
                     }
