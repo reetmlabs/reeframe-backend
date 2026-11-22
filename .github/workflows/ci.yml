@@ -114,6 +114,7 @@ jobs:
 
       - name: Install gst-libav 1.24.2
         run: |
+          sudo apt-get install -y --no-install-recommends gstreamer1.0-tools
           PLUGINS=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
           sudo dpkg-divert --divert $PLUGINS/libgstlibav.so.distrib --rename --add $PLUGINS/libgstlibav.so
           sudo install -m644 ~/gst-libav/libgstlibav.so $PLUGINS/
