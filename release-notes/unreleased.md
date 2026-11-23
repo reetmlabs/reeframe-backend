@@ -17,6 +17,7 @@ The `rtsp.*` settings keep their names.
 ### What's new
 
 - `rtsp.public_host` and `rtsp.public_port` set the host and port in restream URLs, so they work from the LAN when the daemon runs in Docker.
+- `rtsp.client_threads` sets how many threads handle restream clients (default 4).
 
 ### Changed
 

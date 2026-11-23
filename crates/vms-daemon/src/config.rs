@@ -97,6 +97,20 @@ pub struct RtspConfig {
     /// Port advertised in restream URLs, when it differs from the bind port.
     /// Set via VMS_RTSP__PUBLIC_PORT.
     pub public_port: Option<u16>,
+    /// Threads that handle RTSP requests and send media to restream clients,
+    /// 1 to 64. Set via VMS_RTSP__CLIENT_THREADS.
+    #[serde(deserialize_with = "client_threads")]
+    pub client_threads: u16,
+}
+
+fn client_threads<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let threads = u16::deserialize(deserializer)?;
+    if !(1..=64).contains(&threads) {
+        return Err(serde::de::Error::custom(format!(
+            "rtsp.client_threads must be between 1 and 64, got {threads}"
+        )));
+    }
+    Ok(threads)
 }
 
 impl Default for RtspConfig {
@@ -105,6 +119,7 @@ impl Default for RtspConfig {
             bind: "0.0.0.0:8554".into(),
             public_host: None,
             public_port: None,
+            client_threads: 4,
         }
     }
 }
@@ -289,6 +304,7 @@ pub const CONFIG_FILE_PATH: &str = "reeframe.toml";
 /// | `VMS_RTSP__BIND`           | `rtsp.bind`                 |
 /// | `VMS_RTSP__PUBLIC_HOST`    | `rtsp.public_host`          |
 /// | `VMS_RTSP__PUBLIC_PORT`    | `rtsp.public_port`          |
+/// | `VMS_RTSP__CLIENT_THREADS` | `rtsp.client_threads`       |
 /// | `VMS_AUTH__MODE`           | `auth.mode`                 |
 /// | `VMS_AUTH__JWT_SECRET`     | `auth.jwt_secret`           |
 /// | `VMS_AUTH__JWKS_URL`       | `auth.jwks_url`             |

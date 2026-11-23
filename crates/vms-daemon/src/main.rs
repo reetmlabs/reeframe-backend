@@ -297,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
                 rtsp_bind: cfg.rtsp.bind.clone(),
                 rtsp_public_host: cfg.rtsp.public_host.clone(),
                 rtsp_public_port: cfg.rtsp.public_port,
+                rtsp_client_threads: cfg.rtsp.client_threads,
                 thumbnail_interval_secs: cfg.media.thumbnail_interval_secs,
                 ..Default::default()
             },

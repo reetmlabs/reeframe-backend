@@ -50,6 +50,7 @@ Generate each with `openssl rand -base64 32`.
 | `rtsp.bind` | `0.0.0.0:8554` | RTSP restream address |
 | `rtsp.public_host` | unset | Host put in `restream_url`. Unset, a `0.0.0.0` bind advertises the machine's outbound IP, which in Docker is the container's address. Set it to the host's LAN address or name. |
 | `rtsp.public_port` | unset | Port put in `restream_url`, when the published port differs from the bind port |
+| `rtsp.client_threads` | `4` | Threads that handle RTSP requests and send media to restream clients, 1 to 64. Any number of clients share them, so this limits neither viewers nor cameras. A client that connects holds its thread until the camera's next keyframe, so raise this when many clients connect at once. Any other value stops startup. |
 | `auth.mode` | `local` | `local` issues and checks its own tokens. `oidc` also accepts tokens issued by a Reeframe Coordinator. |
 | `auth.access_token_ttl_secs` | `900` | 15 minutes |
 | `auth.refresh_token_ttl_secs` | `2592000` | 30 days |
