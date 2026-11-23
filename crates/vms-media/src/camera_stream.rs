@@ -2248,6 +2248,96 @@ mod attach_tests {
         late_viewer_loses_no_frames("subrestream");
     }
 
+    /// Connects to `url`, plays, and returns how long PLAY took to be sent along
+    /// with the connection.
+    fn timed_play(port: u16, url: &str) -> (Duration, std::net::TcpStream) {
+        let start = std::time::Instant::now();
+        let stream = rtsp_play(port, url);
+        (start.elapsed(), stream)
+    }
+
+    /// Viewers of four cameras that connect at once wait for one keyframe at
+    /// most, and none of them loses a frame.
+    #[test]
+    fn simultaneous_restream_viewers_lose_no_frames() {
+        use crate::restream::{RestreamServer, StreamQuality};
+
+        gstreamer::init().unwrap();
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let server = RestreamServer::new(
+            &format!("127.0.0.1:{port}"),
+            None,
+            None,
+            crate::MediaConfig::default().rtsp_client_threads,
+        )
+        .unwrap();
+
+        let mut cameras = Vec::new();
+        for _ in 0..4 {
+            let camera_id = Uuid::new_v4();
+            let (pipeline, _, key_rx) = live_gop_pipeline_from(
+                camera_id,
+                "videotestsrc is-live=true pattern=snow ! video/x-raw,width=160,height=120,framerate=10/1 \
+                 ! x264enc key-int-max=40 bitrate=300 tune=zerolatency speed-preset=ultrafast \
+                 ! h264parse",
+            );
+            pipeline.set_state(gstreamer::State::Playing).unwrap();
+            key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            server
+                .start_restream(
+                    camera_id,
+                    StreamQuality::Main,
+                    &pipeline,
+                    &tee_name(camera_id),
+                    "H264",
+                )
+                .unwrap();
+            let url = server.restream_url(camera_id, StreamQuality::Main).unwrap();
+            cameras.push((camera_id, pipeline, url));
+        }
+
+        let viewers: Vec<_> = cameras
+            .iter()
+            .map(|(_, _, url)| {
+                let url = url.clone();
+                std::thread::spawn(move || timed_play(port, &url))
+            })
+            .collect();
+        let viewers: Vec<_> = viewers.into_iter().map(|v| v.join().unwrap()).collect();
+        let readers: Vec<_> = viewers
+            .iter()
+            .map(|(_, stream)| drain(stream.try_clone().unwrap()))
+            .collect();
+        std::thread::sleep(Duration::from_secs(8));
+
+        let dropped: Vec<_> = cameras
+            .iter()
+            .map(|(camera_id, _, _)| {
+                crate::branch_drop::branch_dropped_frames()
+                    .with_label_values(&[camera_id.to_string().as_str(), "restream"])
+                    .get()
+            })
+            .collect();
+        let waits: Vec<_> = viewers.iter().map(|(wait, _)| *wait).collect();
+        for (_, stream) in &viewers {
+            stream.shutdown(std::net::Shutdown::Both).ok();
+        }
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        for (_, pipeline, _) in &cameras {
+            pipeline.set_state(gstreamer::State::Null).unwrap();
+        }
+
+        assert_eq!(dropped, [0; 4], "frames were dropped, PLAY after {waits:?}");
+        assert!(
+            waits.iter().all(|w| *w < Duration::from_secs(7)),
+            "viewers waited for each other: {waits:?}"
+        );
+    }
+
     /// A viewer that connects and never plays leaves about 30 s of video in
     /// the media's appsrc.
     #[test]
