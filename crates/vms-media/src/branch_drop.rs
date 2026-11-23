@@ -184,12 +184,13 @@ pub(crate) fn make_leaky(queue: &gstreamer::Element, camera_id: Uuid, branch: &s
 mod tests {
     use super::*;
 
-    /// A `queue -> fakesink` pipeline whose queue cannot drain until the
-    /// returned probe is removed, and the PTS of every buffer the sink got.
+    /// A `queue -> fakesink` pipeline whose queue only drains one buffer per
+    /// token sent on `release`, or freely once `release` is dropped, and the
+    /// PTS of every buffer the sink got.
     struct StuckQueue {
         pipeline: gstreamer::Pipeline,
         queue: gstreamer::Element,
-        block: Option<gstreamer::PadProbeId>,
+        release: Option<std::sync::mpsc::Sender<()>>,
         received: Arc<Mutex<Vec<u64>>>,
     }
 
@@ -222,14 +223,19 @@ mod tests {
                     gstreamer::PadProbeReturn::Ok
                 },
             );
-            let block = queue.static_pad("src").unwrap().add_probe(
-                gstreamer::PadProbeType::BLOCK | gstreamer::PadProbeType::BUFFER,
-                |_, _| gstreamer::PadProbeReturn::Ok,
+            let (release, tokens) = std::sync::mpsc::channel::<()>();
+            let tokens = Mutex::new(tokens);
+            queue.static_pad("src").unwrap().add_probe(
+                gstreamer::PadProbeType::BUFFER,
+                move |_, _| {
+                    let _ = tokens.lock().unwrap().recv();
+                    gstreamer::PadProbeReturn::Ok
+                },
             );
             Self {
                 pipeline,
                 queue,
-                block,
+                release: Some(release),
                 received,
             }
         }
@@ -267,10 +273,20 @@ mod tests {
             assert!(flow.is_ok(), "pushing frame {n}: {flow:?}");
         }
 
+        /// Lets one buffer out of the queue and waits until its level drops
+        /// to `level`.
+        fn release_one(&self, level: u32) {
+            self.release.as_ref().unwrap().send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while self.queue.property::<u32>("current-level-buffers") > level {
+                assert!(Instant::now() < deadline, "the queue did not drain");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
         /// Lets the queue drain and waits until it is empty.
         fn unblock(&mut self) {
-            let id = self.block.take().unwrap();
-            self.queue.static_pad("src").unwrap().remove_probe(id);
+            self.release.take();
             let deadline = Instant::now() + Duration::from_secs(2);
             while self.queue.property::<u32>("current-level-buffers") > 0 {
                 assert!(Instant::now() < deadline, "the queue did not drain");
@@ -281,9 +297,7 @@ mod tests {
 
     impl Drop for StuckQueue {
         fn drop(&mut self) {
-            if let Some(id) = self.block.take() {
-                self.queue.static_pad("src").unwrap().remove_probe(id);
-            }
+            self.release.take();
             self.pipeline.set_state(gstreamer::State::Null).ok();
         }
     }
@@ -321,6 +335,26 @@ mod tests {
             .all(|w| w[1] == w[0] + 1));
         assert_eq!(received[received.len() - 2..], [21, 22], "got {received:?}");
         assert_eq!(dropped(camera_id, "restream"), while_stuck + 1);
+    }
+
+    #[test]
+    fn a_gated_queue_resumes_at_a_keyframe_once_it_is_not_full() {
+        let camera_id = Uuid::new_v4();
+        let mut stuck = StuckQueue::new(4);
+        install_keyframe_gate(&stuck.queue, camera_id, "recording");
+        stuck.start();
+
+        for n in 0..20 {
+            stuck.push(n, n % 10 == 0);
+        }
+        stuck.release_one(3);
+        stuck.push(20, false);
+        stuck.push(21, true);
+        stuck.unblock();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let received = stuck.received.lock().unwrap().clone();
+        assert_eq!(received, [0, 1, 2, 3, 4, 21]);
     }
 
     #[test]
