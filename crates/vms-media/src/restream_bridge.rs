@@ -15,9 +15,11 @@
 //! fires again after all viewers have left and a new one connects. The
 //! `unprepared` signal tells us when the cached `appsrc` handle is stale.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gstreamer::glib::translate::IntoGlib;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrc;
 use gstreamer_rtsp_server::prelude::*;
@@ -27,6 +29,10 @@ use vms_core::VmsError;
 /// How much video the restream media's `appsrc` may hold before the bridge
 /// stops pushing, for example while a viewer stops reading.
 const APPSRC_BACKLOG: Duration = Duration::from_secs(2);
+
+/// The same limit until the media has played and drained what it queued before
+/// that. Clients share a few threads, and each handshake waits for a keyframe.
+const CONNECTING_BACKLOG: Duration = Duration::from_secs(30);
 
 /// Handle to a running restream bridge: the tee tap on the source pipeline and
 /// the RTSP mount factory it feeds.
@@ -154,17 +160,19 @@ pub fn attach(
     // no reference frame and shows corrupt frames.
     //
     // `appsrc` queues without blocking, so its `max-bytes` is kept at about
-    // `APPSRC_BACKLOG` of video, measured from `bytes_seen`. Once that limit
-    // is measured (`limited`), frames are dropped (`behind`) while the appsrc
-    // holds more than it, up to the next keyframe that finds it back under.
-    // The first measurement comes after one second of the connection.
+    // `APPSRC_BACKLOG` of video (`CONNECTING_BACKLOG` until `caught_up`), from
+    // the rate measured after one second and then at each keyframe. Frames are
+    // dropped (`behind`) while the appsrc holds more than that, up to the next
+    // keyframe that finds it back under.
     struct AppsrcState {
         appsrc: AppSrc,
         started_at: std::time::Instant,
         seen_keyframe: bool,
         caps_set: bool,
         bytes_seen: u64,
-        limited: bool,
+        rate: Option<u64>,
+        playing: Arc<AtomicBool>,
+        caught_up: bool,
         behind: bool,
     }
     let appsrc_slot: Arc<Mutex<Option<AppsrcState>>> = Arc::new(Mutex::new(None));
@@ -184,19 +192,32 @@ pub fn attach(
             return;
         };
         appsrc.set_format(gstreamer::Format::Time);
+        let playing = Arc::new(AtomicBool::new(false));
+        let playing_for_state = playing.clone();
+        media.connect_new_state(move |_media, state| {
+            if state == gstreamer::State::Playing.into_glib() {
+                playing_for_state.store(true, Ordering::Relaxed);
+            }
+        });
         *slot_for_configure.lock().unwrap() = Some(AppsrcState {
-            appsrc,
+            appsrc: appsrc.clone(),
             started_at: std::time::Instant::now(),
             seen_keyframe: false,
             caps_set: false,
             bytes_seen: 0,
-            limited: false,
+            rate: None,
+            playing,
+            caught_up: false,
             behind: false,
         });
 
         let slot_for_unprepared = slot_for_configure.clone();
         media.connect_unprepared(move |_media| {
-            *slot_for_unprepared.lock().unwrap() = None;
+            // A newer media of the same mount may already own the slot.
+            let mut slot = slot_for_unprepared.lock().unwrap();
+            if slot.as_ref().is_some_and(|s| s.appsrc == appsrc) {
+                *slot = None;
+            }
         });
     });
 
@@ -225,11 +246,28 @@ pub fn attach(
                         let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
                         state.bytes_seen += buffer.size() as u64;
                         let elapsed = state.started_at.elapsed();
-                        if (is_keyframe || !state.limited) && elapsed >= Duration::from_secs(1) {
-                            let limit = state.bytes_seen as u128 * APPSRC_BACKLOG.as_millis()
-                                / elapsed.as_millis();
-                            state.appsrc.set_max_bytes(limit as u64);
-                            state.limited = true;
+                        if (is_keyframe || state.rate.is_none())
+                            && elapsed >= Duration::from_secs(1)
+                        {
+                            let rate = state.bytes_seen as u128 * 1000 / elapsed.as_millis();
+                            state.rate = Some(rate as u64);
+                        }
+                        let level = state.appsrc.current_level_bytes();
+                        let mut full = false;
+                        if let Some(rate) = state.rate {
+                            if !state.caught_up && state.playing.load(Ordering::Relaxed) {
+                                state.caught_up = level <= rate * APPSRC_BACKLOG.as_secs();
+                            }
+                            let backlog = if state.caught_up {
+                                APPSRC_BACKLOG
+                            } else {
+                                CONNECTING_BACKLOG
+                            };
+                            let limit = rate * backlog.as_secs();
+                            if state.appsrc.max_bytes() != limit {
+                                state.appsrc.set_max_bytes(limit);
+                            }
+                            full = level > limit;
                         }
                         if !state.seen_keyframe {
                             if !is_keyframe {
@@ -237,8 +275,6 @@ pub fn attach(
                             }
                             state.seen_keyframe = true;
                         }
-                        let full = state.limited
-                            && state.appsrc.current_level_bytes() > state.appsrc.max_bytes();
                         if full || (state.behind && !is_keyframe) {
                             state.behind = true;
                             reporter.dropped(1);

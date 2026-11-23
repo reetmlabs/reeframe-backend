@@ -36,6 +36,8 @@ pub struct MediaConfig {
     pub rtsp_public_host: Option<String>,
     /// Port advertised in restream URLs instead of the bind port.
     pub rtsp_public_port: Option<u16>,
+    /// Threads that handle RTSP restream clients (default: 4).
+    pub rtsp_client_threads: u16,
     /// Minimum spacing between timeline thumbnail captures, in seconds
     /// (default: 30).
     pub thumbnail_interval_secs: u64,
@@ -52,6 +54,7 @@ impl Default for MediaConfig {
             rtsp_bind: "0.0.0.0:8554".into(),
             rtsp_public_host: None,
             rtsp_public_port: None,
+            rtsp_client_threads: 4,
             thumbnail_interval_secs: 30,
             stall_timeout: Duration::from_secs(20),
         }
@@ -253,6 +256,7 @@ impl MediaManager {
             &config.rtsp_bind,
             config.rtsp_public_host.clone(),
             config.rtsp_public_port,
+            config.rtsp_client_threads,
         )?);
         Ok(Self {
             config,
