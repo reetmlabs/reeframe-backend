@@ -4,6 +4,8 @@
 //! the tee and with it every other branch, so a branch that cannot keep up
 //! drops frames instead. [`install_keyframe_gate`] drops whole runs of frames
 //! up to the next keyframe, for consumers that need decodable GOPs.
+//! [`make_leaky`] turns a queue into a plain `leaky=downstream` one, for
+//! consumers that only sample frames.
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -137,5 +139,16 @@ pub(crate) fn install_keyframe_gate(queue: &gstreamer::Element, camera_id: Uuid,
         }
         reporter.dropped(1);
         gstreamer::PadProbeReturn::Handled
+    });
+}
+
+/// Make `queue` drop its oldest frame instead of blocking when full, counting
+/// one dropped frame per `overrun`.
+pub(crate) fn make_leaky(queue: &gstreamer::Element, camera_id: Uuid, branch: &str) {
+    queue.set_property_from_str("leaky", "downstream");
+    let reporter = DropReporter::new(camera_id, branch);
+    queue.connect("overrun", false, move |_| {
+        reporter.dropped(1);
+        None
     });
 }
