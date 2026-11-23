@@ -2236,4 +2236,206 @@ mod recording_path_tests {
 
         assert!(camera_recording_dir(&dir.0, camera_id).is_dir());
     }
+
+    /// Top-level MP4 atoms of `path` in file order, as `(type, size)`. A size
+    /// of 0 means the atom runs to the end of the file.
+    fn top_level_atoms(path: &str) -> Vec<(String, usize)> {
+        let data = std::fs::read(path).unwrap();
+        let mut atoms = Vec::new();
+        let mut at = 0;
+        while at + 8 <= data.len() {
+            let mut size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+            let kind = String::from_utf8_lossy(&data[at + 4..at + 8]).into_owned();
+            if size == 1 {
+                size = u64::from_be_bytes(data[at + 8..at + 16].try_into().unwrap()) as usize;
+            }
+            atoms.push((kind, size));
+            if size < 8 {
+                break;
+            }
+            at += size;
+        }
+        atoms
+    }
+
+    fn has_moov_before_mdat(path: &str) -> bool {
+        let atoms = top_level_atoms(path);
+        let position = |kind| atoms.iter().position(|(k, _)| k == kind);
+        matches!((position("moov"), position("mdat")), (Some(moov), Some(mdat)) if moov < mdat)
+    }
+
+    /// Frames a demuxer reads from `path`. Unlike a decoder it needs only a
+    /// readable `moov`, so a file cut off mid-write also counts. Reading past
+    /// the end of a cut-off file may end in an error instead of EOS.
+    fn mp4_frames(path: &str) -> usize {
+        let pipeline = gstreamer::parse::launch(&format!(
+            "filesrc location={path} ! qtdemux ! fakesink name=sink sync=false"
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = frames.clone();
+        let sink = pipeline
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap();
+        sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            gstreamer::PadProbeReturn::Ok
+        });
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        pipeline.bus().unwrap().timed_pop_filtered(
+            gstreamer::ClockTime::from_seconds(10),
+            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
+        );
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        frames.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A pipeline feeding `frames` frames of 20 fps H264, with a keyframe
+    /// every 2 s, into a recording branch as fast as it can write them.
+    fn recording_pipeline(
+        dir: &ScratchDir,
+        frames: u32,
+        chunk_duration_secs: u64,
+    ) -> (
+        gstreamer::Pipeline,
+        gstreamer::Element,
+        mpsc::UnboundedReceiver<RecordingChunkEvent>,
+    ) {
+        gstreamer::init().ok();
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (queue, parse, splitmux) =
+            build_recording_branch(Uuid::new_v4(), &dir.0, chunk_duration_secs, &naming, &tx)
+                .unwrap();
+        let parse = parse.unwrap();
+        let src = gstreamer::parse::bin_from_description(
+            &format!(
+                "videotestsrc num-buffers={frames} \
+                 ! video/x-raw,width=64,height=48,framerate=20/1 \
+                 ! x264enc key-int-max=40 tune=zerolatency speed-preset=ultrafast ! h264parse"
+            ),
+            true,
+        )
+        .unwrap();
+        let pipeline = gstreamer::Pipeline::new();
+        pipeline
+            .add_many([src.upcast_ref(), &queue, &parse, &splitmux])
+            .unwrap();
+        gstreamer::Element::link_many([src.upcast_ref(), &queue, &parse, &splitmux]).unwrap();
+        // The source outruns the disk, and a full recording queue drops frames.
+        let paced = queue.downgrade();
+        let src_pad = src.static_pad("src").unwrap();
+        src_pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            while paced
+                .upgrade()
+                .is_some_and(|q| q.property::<u64>("current-level-time") > 5_000_000_000)
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+        (pipeline, splitmux, rx)
+    }
+
+    fn run_to_eos(pipeline: &gstreamer::Pipeline) {
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        let end = pipeline.bus().unwrap().timed_pop_filtered(
+            gstreamer::ClockTime::from_seconds(60),
+            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
+        );
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        let end = end.expect("the recording pipeline did not finish");
+        assert_eq!(end.type_(), gstreamer::MessageType::Eos, "{end:?}");
+    }
+
+    fn opened_paths(rx: &mut mpsc::UnboundedReceiver<RecordingChunkEvent>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                RecordingChunkEvent::Opened { file_path, .. } => Some(file_path),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn closed_chunks_have_moov_before_mdat() {
+        let dir = ScratchDir::new();
+        let (pipeline, _splitmux, mut rx) = recording_pipeline(&dir, 600, 10);
+        run_to_eos(&pipeline);
+
+        let chunks = opened_paths(&mut rx);
+        assert!(chunks.len() >= 3, "{chunks:?}");
+        for chunk in &chunks {
+            assert!(has_moov_before_mdat(chunk), "{:?}", top_level_atoms(chunk));
+        }
+        let frames: usize = chunks.iter().map(|chunk| mp4_frames(chunk)).sum();
+        assert_eq!(frames, 600);
+    }
+
+    /// A chunk that is about to run out of header space is closed and
+    /// recording goes on in another one, without losing frames.
+    #[test]
+    fn low_header_space_starts_a_new_chunk() {
+        let dir = ScratchDir::new();
+        let (pipeline, splitmux, mut rx) = recording_pipeline(&dir, 4800, 300);
+        splitmux
+            .property::<gstreamer::Element>("muxer")
+            .set_property("reserved-bytes-per-sec", 30u32);
+        run_to_eos(&pipeline);
+
+        let chunks = opened_paths(&mut rx);
+        let frames: Vec<usize> = chunks.iter().map(|chunk| mp4_frames(chunk)).collect();
+        assert!(chunks.len() >= 2, "{frames:?}");
+        assert_eq!(frames.iter().sum::<usize>(), 4800);
+        assert!(
+            frames[..frames.len() - 1].iter().all(|f| *f >= 600),
+            "a chunk was split right after it opened: {frames:?}"
+        );
+    }
+
+    /// The file of a chunk whose process dies mid-write plays up to the last
+    /// `moov` update. The copy taken mid-write stands in for that file.
+    #[test]
+    fn a_chunk_cut_off_mid_write_plays_up_to_its_last_moov_update() {
+        let dir = ScratchDir::new();
+        let (pipeline, splitmux, mut rx) = recording_pipeline(&dir, 6000, 300);
+        let (copy_tx, copy_rx) = std::sync::mpsc::channel();
+        let seen = std::sync::atomic::AtomicUsize::new(0);
+        let scratch = dir.0.clone();
+        // Pausing the input lets everything before it reach the file.
+        let sink_pad = splitmux
+            .static_pad("video")
+            .unwrap_or_else(|| splitmux.sink_pads().into_iter().next().unwrap());
+        sink_pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 900 {
+                std::thread::sleep(Duration::from_millis(500));
+                let chunk = std::fs::read_dir(&scratch)
+                    .unwrap()
+                    .flatten()
+                    .flat_map(|e| std::fs::read_dir(e.path()).into_iter().flatten().flatten())
+                    .next()
+                    .unwrap()
+                    .path();
+                let copy = scratch.join("cut_off.mp4");
+                std::fs::copy(chunk, &copy).unwrap();
+                copy_tx.send(copy).unwrap();
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+        run_to_eos(&pipeline);
+
+        let copy = copy_rx.try_recv().unwrap().to_string_lossy().to_string();
+        assert_eq!(top_level_atoms(&copy).last().unwrap(), &("mdat".into(), 0));
+        let frames = mp4_frames(&copy);
+        assert!(
+            (500..=901).contains(&frames),
+            "{frames} of 900 frames are playable"
+        );
+        assert_eq!(opened_paths(&mut rx).len(), 1);
+    }
 }
