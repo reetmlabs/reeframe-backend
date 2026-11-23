@@ -200,7 +200,7 @@ pub fn attach(
             }
         });
         *slot_for_configure.lock().unwrap() = Some(AppsrcState {
-            appsrc,
+            appsrc: appsrc.clone(),
             started_at: std::time::Instant::now(),
             seen_keyframe: false,
             caps_set: false,
@@ -213,7 +213,11 @@ pub fn attach(
 
         let slot_for_unprepared = slot_for_configure.clone();
         media.connect_unprepared(move |_media| {
-            *slot_for_unprepared.lock().unwrap() = None;
+            // A newer media of the same mount may already own the slot.
+            let mut slot = slot_for_unprepared.lock().unwrap();
+            if slot.as_ref().is_some_and(|s| s.appsrc == appsrc) {
+                *slot = None;
+            }
         });
     });
 
