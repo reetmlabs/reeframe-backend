@@ -154,15 +154,17 @@ pub fn attach(
     // no reference frame and shows corrupt frames.
     //
     // `appsrc` queues without blocking, so its `max-bytes` is kept at about
-    // `APPSRC_BACKLOG` of video, measured from `bytes_seen`. While the appsrc
-    // holds more than that, frames are dropped (`behind`) up to the next
-    // keyframe that finds it back under the limit.
+    // `APPSRC_BACKLOG` of video, measured from `bytes_seen`. Once that limit
+    // is measured (`limited`), frames are dropped (`behind`) while the appsrc
+    // holds more than it, up to the next keyframe that finds it back under.
+    // The first measurement comes after one second of the connection.
     struct AppsrcState {
         appsrc: AppSrc,
         started_at: std::time::Instant,
         seen_keyframe: bool,
         caps_set: bool,
         bytes_seen: u64,
+        limited: bool,
         behind: bool,
     }
     let appsrc_slot: Arc<Mutex<Option<AppsrcState>>> = Arc::new(Mutex::new(None));
@@ -188,6 +190,7 @@ pub fn attach(
             seen_keyframe: false,
             caps_set: false,
             bytes_seen: 0,
+            limited: false,
             behind: false,
         });
 
@@ -222,10 +225,11 @@ pub fn attach(
                         let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
                         state.bytes_seen += buffer.size() as u64;
                         let elapsed = state.started_at.elapsed();
-                        if is_keyframe && elapsed >= Duration::from_secs(1) {
+                        if (is_keyframe || !state.limited) && elapsed >= Duration::from_secs(1) {
                             let limit = state.bytes_seen as u128 * APPSRC_BACKLOG.as_millis()
                                 / elapsed.as_millis();
                             state.appsrc.set_max_bytes(limit as u64);
+                            state.limited = true;
                         }
                         if !state.seen_keyframe {
                             if !is_keyframe {
@@ -233,7 +237,8 @@ pub fn attach(
                             }
                             state.seen_keyframe = true;
                         }
-                        let full = state.appsrc.current_level_bytes() > state.appsrc.max_bytes();
+                        let full = state.limited
+                            && state.appsrc.current_level_bytes() > state.appsrc.max_bytes();
                         if full || (state.behind && !is_keyframe) {
                             state.behind = true;
                             reporter.dropped(1);
