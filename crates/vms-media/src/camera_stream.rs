@@ -339,6 +339,10 @@ const MOOV_UPDATE_PERIOD: Duration = Duration::from_secs(10);
 /// `stts` (8), `ctts` (8), `stsz` (4) and the rest of the sample tables.
 const RESERVED_MOOV_BYTES_PER_SEC: u32 = 24 * 60;
 
+/// Remaining header space, as reported by the muxer, below which the chunk is
+/// split at the next keyframe. `mp4mux` fails when the space runs out.
+const RESERVED_MOOV_LOW: gstreamer::ClockTime = gstreamer::ClockTime::from_seconds(45);
+
 /// The `mp4mux` that writes one recording's chunks.
 fn build_recording_muxer(
     camera_id: Uuid,
@@ -355,6 +359,58 @@ fn build_recording_muxer(
         .property("reserved-bytes-per-sec", RESERVED_MOOV_BYTES_PER_SEC)
         .build()
         .map_err(|e| VmsError::Media(format!("recording mp4mux: {e}")))
+}
+
+/// How far into a chunk the muxer's remaining-space estimate is trusted. It is
+/// far too low while only a few frames have been counted.
+const RESERVED_MOOV_SETTLE: gstreamer::ClockTime = gstreamer::ClockTime::from_seconds(30);
+
+/// Split the chunk when a keyframe leaving `queue` finds `muxer` low on header
+/// space, so the chunk closes before the space runs out. Asks once per chunk.
+fn split_when_header_is_low(
+    camera_id: Uuid,
+    naming: &Arc<ChunkNaming>,
+    queue: &gstreamer::Element,
+    muxer: &gstreamer::Element,
+    splitmux: &gstreamer::Element,
+) {
+    let Some(src) = queue.static_pad("src") else {
+        return;
+    };
+    let naming = naming.clone();
+    let (muxer, splitmux) = (muxer.downgrade(), splitmux.downgrade());
+    // The open chunk, when it was first seen, and whether it was asked to split.
+    let chunk: Mutex<(Option<String>, Option<gstreamer::ClockTime>, bool)> = Mutex::default();
+    src.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+        let (Some(buffer), Some(muxer), Some(splitmux)) =
+            (info.buffer(), muxer.upgrade(), splitmux.upgrade())
+        else {
+            return gstreamer::PadProbeReturn::Ok;
+        };
+        if buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT) {
+            return gstreamer::PadProbeReturn::Ok;
+        }
+        let path = naming.current_path();
+        let mut chunk = chunk.lock().unwrap();
+        if chunk.0 != path {
+            *chunk = (path, buffer.pts(), false);
+        }
+        let age = buffer
+            .pts()
+            .zip(chunk.1)
+            .map(|(now, start)| now.saturating_sub(start));
+        let settled = age.is_some_and(|age| age >= RESERVED_MOOV_SETTLE);
+        if settled
+            && !chunk.2
+            && muxer.property::<u64>("reserved-duration-remaining") < RESERVED_MOOV_LOW.nseconds()
+        {
+            chunk.2 = true;
+            drop(chunk);
+            tracing::warn!(camera_id = %camera_id, "Chunk header space is low, starting a new chunk");
+            splitmux.emit_by_name::<()>("split-now", &[]);
+        }
+        gstreamer::PadProbeReturn::Ok
+    });
 }
 
 /// Build the unattached recording branch, `queue -> [recparse ->]
@@ -423,6 +479,7 @@ fn build_recording_branch(
         .property("max-size-time", chunk_ns)
         .build()
         .map_err(|e| VmsError::Media(format!("splitmuxsink: {e}")))?;
+    split_when_header_is_low(camera_id, naming, &queue, &muxer, &splitmux);
 
     // -- Chunk-open naming + indexing --
     // `format-location-full` fires synchronously right before splitmuxsink
