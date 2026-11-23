@@ -1,16 +1,17 @@
 //! `GET /metrics`: Prometheus text-exposition scrape endpoint.
 //!
-//! `http_requests_total`, `pipeline_runs_total` and `event_bus_published_total`
-//! are counters incremented as requests, runs and events happen (see
-//! `MetricsMiddleware`, `PipelineExecutor`, `EventBus`). `resource_state` is a
+//! `http_requests_total`, `pipeline_runs_total`, `event_bus_published_total`
+//! and `vms_branch_dropped_frames_total` are counters incremented as requests,
+//! runs, events and dropped frames happen (see `MetricsMiddleware`,
+//! `PipelineExecutor`, `EventBus`, `vms_media::branch_drop`). `resource_state` is a
 //! point-in-time snapshot, so it is recomputed from `ResourceManager::all()` on
 //! every scrape.
 //!
 //! Mounted under `public_routes()` next to `GET /health` because a Prometheus
 //! scraper in a typical self-hosted deployment has no credentials to present.
 //! The labels are small fixed vocabularies (route patterns, resource types,
-//! topic kinds) with no camera or pipeline UUIDs or credentials, so nothing
-//! sensitive is exposed.
+//! topic kinds, branch names) plus camera UUIDs, with no credentials or
+//! camera addresses.
 
 use std::collections::HashMap;
 
