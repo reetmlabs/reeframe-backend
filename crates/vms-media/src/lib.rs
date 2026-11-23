@@ -24,6 +24,7 @@
 //! implies recording, and stopping recording never tears down live view. The
 //! pipeline closes once nothing needs it.
 
+pub mod branch_drop;
 pub(crate) mod camera_stream;
 pub mod export;
 pub mod manager;
