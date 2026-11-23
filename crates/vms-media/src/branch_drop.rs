@@ -194,3 +194,162 @@ pub(crate) fn make_leaky(queue: &gstreamer::Element, camera_id: Uuid, branch: &s
         None
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `queue -> fakesink` pipeline whose queue cannot drain until the
+    /// returned probe is removed, and the PTS of every buffer the sink got.
+    struct StuckQueue {
+        pipeline: gstreamer::Pipeline,
+        queue: gstreamer::Element,
+        block: Option<gstreamer::PadProbeId>,
+        received: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl StuckQueue {
+        fn new(max_buffers: u32) -> Self {
+            gstreamer::init().ok();
+            let pipeline = gstreamer::Pipeline::new();
+            let queue = gstreamer::ElementFactory::make("queue")
+                .property("max-size-buffers", max_buffers)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", 0u64)
+                .build()
+                .unwrap();
+            let sink = gstreamer::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
+            pipeline.add_many([&queue, &sink]).unwrap();
+            queue.link(&sink).unwrap();
+
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let in_probe = received.clone();
+            sink.static_pad("sink").unwrap().add_probe(
+                gstreamer::PadProbeType::BUFFER,
+                move |_, info| {
+                    if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
+                        in_probe.lock().unwrap().push(pts.mseconds() / 50);
+                    }
+                    gstreamer::PadProbeReturn::Ok
+                },
+            );
+            let block = queue.static_pad("src").unwrap().add_probe(
+                gstreamer::PadProbeType::BLOCK | gstreamer::PadProbeType::BUFFER,
+                |_, _| gstreamer::PadProbeReturn::Ok,
+            );
+            Self {
+                pipeline,
+                queue,
+                block,
+                received,
+            }
+        }
+
+        fn start(&self) {
+            self.pipeline.set_state(gstreamer::State::Playing).unwrap();
+            let sink = self.queue.static_pad("sink").unwrap();
+            sink.send_event(gstreamer::event::StreamStart::new("test"));
+            sink.send_event(gstreamer::event::Caps::new(
+                &gstreamer::Caps::builder("video/x-h264").build(),
+            ));
+            sink.send_event(gstreamer::event::Segment::new(
+                &gstreamer::FormattedSegment::<gstreamer::ClockTime>::new(),
+            ));
+        }
+
+        /// Pushes frame `n` (PTS `n * 50 ms`) and fails if the push blocks.
+        fn push(&self, n: u64, keyframe: bool) {
+            let mut buffer = gstreamer::Buffer::with_size(16).unwrap();
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gstreamer::ClockTime::from_mseconds(n * 50));
+                if !keyframe {
+                    buffer.set_flags(gstreamer::BufferFlags::DELTA_UNIT);
+                }
+            }
+            let sink = self.queue.static_pad("sink").unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(sink.chain(buffer));
+            });
+            let flow = done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|_| panic!("pushing frame {n} blocked"));
+            assert!(flow.is_ok(), "pushing frame {n}: {flow:?}");
+        }
+
+        /// Lets the queue drain and waits until it is empty.
+        fn unblock(&mut self) {
+            let id = self.block.take().unwrap();
+            self.queue.static_pad("src").unwrap().remove_probe(id);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while self.queue.property::<u32>("current-level-buffers") > 0 {
+                assert!(Instant::now() < deadline, "the queue did not drain");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for StuckQueue {
+        fn drop(&mut self) {
+            if let Some(id) = self.block.take() {
+                self.queue.static_pad("src").unwrap().remove_probe(id);
+            }
+            self.pipeline.set_state(gstreamer::State::Null).ok();
+        }
+    }
+
+    fn dropped(camera_id: Uuid, branch: &str) -> u64 {
+        branch_dropped_frames()
+            .with_label_values(&[camera_id.to_string().as_str(), branch])
+            .get()
+    }
+
+    #[test]
+    fn a_full_gated_queue_drops_frames_until_a_keyframe() {
+        let camera_id = Uuid::new_v4();
+        let mut stuck = StuckQueue::new(4);
+        install_keyframe_gate(&stuck.queue, camera_id, "restream", GapReport::Warn);
+        stuck.start();
+
+        for n in 0..20 {
+            stuck.push(n, n % 10 == 0);
+        }
+        let while_stuck = dropped(camera_id, "restream");
+        assert!(while_stuck >= 14, "dropped {while_stuck} frames");
+
+        stuck.unblock();
+        stuck.push(20, false);
+        stuck.push(21, true);
+        stuck.push(22, false);
+        std::thread::sleep(Duration::from_millis(200));
+
+        let received = stuck.received.lock().unwrap().clone();
+        assert_eq!(received[0], 0);
+        assert!(received
+            .windows(2)
+            .take(received.len() - 3)
+            .all(|w| w[1] == w[0] + 1));
+        assert_eq!(received[received.len() - 2..], [21, 22], "got {received:?}");
+        assert_eq!(dropped(camera_id, "restream"), while_stuck + 1);
+    }
+
+    #[test]
+    fn a_full_leaky_queue_counts_the_frames_it_drops() {
+        let camera_id = Uuid::new_v4();
+        let stuck = StuckQueue::new(2);
+        make_leaky(&stuck.queue, camera_id, "motion");
+        stuck.start();
+
+        for n in 0..10 {
+            stuck.push(n, n == 0);
+        }
+
+        assert!(dropped(camera_id, "motion") >= 6);
+        assert_eq!(dropped(camera_id, "thumbnail"), 0);
+    }
+}
