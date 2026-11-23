@@ -376,12 +376,7 @@ fn build_recording_branch(
         .property("max-size-bytes", 0u32)
         .build()
         .map_err(|e| VmsError::Media(format!("queue: {e}")))?;
-    crate::branch_drop::install_keyframe_gate(
-        &queue,
-        camera_id,
-        "recording",
-        crate::branch_drop::GapReport::Error,
-    );
+    crate::branch_drop::install_keyframe_gate(&queue, camera_id, "recording");
 
     let camera_dir = camera_recording_dir(recording_dir, camera_id);
     std::fs::create_dir_all(&camera_dir).map_err(|e| {

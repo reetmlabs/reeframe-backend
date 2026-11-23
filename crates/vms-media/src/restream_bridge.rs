@@ -8,7 +8,7 @@
 //! buffers into an `appsrc` inside the RTSP media's pipeline, obtained through
 //! `gstreamer_rtsp_server`'s `media-configure` signal.
 //!
-//! Shape: `tee -> queue -> appsink` on our side feeds
+//! Shape: `tee -> appsink` on our side feeds
 //! `appsrc name=src is-live=true format=time -> [parse] -> [pay] -> pay0` on the
 //! restream media's side, built from a launch string. With `set_shared(true)` one
 //! media pipeline serves every viewer of a mount, so `media-configure` only
@@ -28,7 +28,6 @@ use vms_core::VmsError;
 /// the RTSP mount factory it feeds.
 pub struct RestreamBridgeHandle {
     mount_path: String,
-    queue_name: String,
     sink_name: String,
 }
 
@@ -115,37 +114,18 @@ pub fn attach(
     })?;
 
     let id = camera_id.as_simple().to_string();
-    let queue_name = format!("cam_{id}_{branch_suffix}queue");
     let sink_name = format!("cam_{id}_{branch_suffix}sink");
 
-    let queue = gstreamer::ElementFactory::make("queue")
-        .name(&queue_name)
-        .property("max-size-buffers", 30u32)
-        .property("max-size-bytes", 0u32)
-        .property("max-size-time", 0u64)
-        .build()
-        .map_err(|e| VmsError::Media(format!("restream bridge queue: {e}")))?;
-    crate::branch_drop::install_keyframe_gate(
-        &queue,
-        camera_id,
-        branch_suffix,
-        crate::branch_drop::GapReport::Warn,
-    );
-
+    // The callback runs on the tee's streaming thread and never blocks, since
+    // `appsrc` queues without blocking.
     let appsink = gstreamer_app::AppSink::builder()
         .name(&sink_name)
-        .drop(true)
-        .max_buffers(30u32)
         .sync(false)
         .build();
 
     pipeline
-        .add_many([&queue, appsink.upcast_ref::<gstreamer::Element>()])
-        .map_err(|e| VmsError::Media(format!("restream bridge add_many: {e}")))?;
-
-    queue
-        .link(&appsink)
-        .map_err(|e| VmsError::Media(format!("link restreamqueue->appsink: {e}")))?;
+        .add(&appsink)
+        .map_err(|e| VmsError::Media(format!("restream bridge add appsink: {e}")))?;
 
     // -- Build the restream media factory --
     let launch = appsrc_launch_str(codec)
@@ -253,27 +233,24 @@ pub fn attach(
             .build(),
     );
 
-    // Sink first, tee last, so no buffer reaches an element still in `Null`.
-    for el in [appsink.upcast_ref::<gstreamer::Element>(), &queue] {
-        crate::camera_stream::sync_branch_state(el)
-            .map_err(|e| VmsError::Media(format!("sync restream bridge element: {e}")))?;
-    }
+    // Running before the tee is linked, so no buffer reaches an element in `Null`.
+    crate::camera_stream::sync_branch_state(appsink.upcast_ref())
+        .map_err(|e| VmsError::Media(format!("sync restream bridge appsink: {e}")))?;
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
         VmsError::Media(format!("tee src pad request failed for camera {camera_id}"))
     })?;
-    let queue_sink = queue
+    let appsink_sink = appsink
         .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("restream bridge queue has no sink pad".into()))?;
+        .ok_or_else(|| VmsError::Media("restream bridge appsink has no sink pad".into()))?;
     tee_src
-        .link(&queue_sink)
-        .map_err(|e| VmsError::Media(format!("link tee->restreamqueue: {e}")))?;
+        .link(&appsink_sink)
+        .map_err(|e| VmsError::Media(format!("link tee->restreamsink: {e}")))?;
 
     mounts.add_factory(mount_path, factory);
 
     tracing::info!(camera_id = %camera_id, mount_path, codec, "Restream bridge attached");
     Ok(RestreamBridgeHandle {
         mount_path: mount_path.to_owned(),
-        queue_name,
         sink_name,
     })
 }
@@ -294,19 +271,16 @@ pub fn detach(
 ) -> Result<(), VmsError> {
     mounts.remove_factory(&handle.mount_path);
 
-    let Some(queue) = pipeline.by_name(&handle.queue_name) else {
-        return Ok(());
-    };
     let Some(appsink) = pipeline.by_name(&handle.sink_name) else {
         return Ok(());
     };
 
-    let queue_sink = queue
+    let appsink_sink = appsink
         .static_pad("sink")
-        .ok_or_else(|| VmsError::Media("restream bridge queue has no sink pad".into()))?;
-    let tee_src = queue_sink
+        .ok_or_else(|| VmsError::Media("restream bridge appsink has no sink pad".into()))?;
+    let tee_src = appsink_sink
         .peer()
-        .ok_or_else(|| VmsError::Media("restream bridge queue sink has no peer pad".into()))?;
+        .ok_or_else(|| VmsError::Media("restream bridge appsink sink has no peer pad".into()))?;
     let tee = tee_src.parent_element().ok_or_else(|| {
         VmsError::Media("restream bridge tee src pad has no parent element".into())
     })?;
@@ -314,17 +288,12 @@ pub fn detach(
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
 
     let pipeline_clone = pipeline.clone();
-    let queue_sink_clone = queue_sink.clone();
-    let queue_clone = queue.clone();
+    let appsink_sink_clone = appsink_sink.clone();
     let appsink_clone = appsink.clone();
 
     let probe_id = tee_src.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
-        pad.unlink(&queue_sink_clone).ok();
-
-        queue_clone.set_state(gstreamer::State::Null).ok();
+        pad.unlink(&appsink_sink_clone).ok();
         appsink_clone.set_state(gstreamer::State::Null).ok();
-
-        pipeline_clone.remove(&queue_clone).ok();
         pipeline_clone.remove(&appsink_clone).ok();
 
         let _ = tx.send(());
@@ -340,8 +309,8 @@ pub fn detach(
         } else {
             // A BLOCK_DOWNSTREAM probe only fires when a buffer or event
             // crosses the pad, so it never fires if the camera connection is
-            // dead. Without forced removal, `queue`/`appsink` would stay in
-            // the pipeline under their fixed names and every later `attach()`
+            // dead. Without forced removal, `appsink` would stay in
+            // the pipeline under its fixed name and every later `attach()`
             // for this camera and quality would fail at `add_many` until the
             // pipeline is rebuilt. Five seconds with no frame means nothing
             // is flowing, so forcing the teardown is safe.
@@ -352,12 +321,10 @@ pub fn detach(
             if let Some(id) = probe_id {
                 tee_src_clone.remove_probe(id);
             }
-            if let Some(peer) = queue_sink.peer() {
-                peer.unlink(&queue_sink).ok();
+            if let Some(peer) = appsink_sink.peer() {
+                peer.unlink(&appsink_sink).ok();
             }
-            queue.set_state(gstreamer::State::Null).ok();
             appsink.set_state(gstreamer::State::Null).ok();
-            pipeline_clone2.remove(&queue).ok();
             pipeline_clone2.remove(&appsink).ok();
         }
         tee.release_request_pad(&tee_src_clone);

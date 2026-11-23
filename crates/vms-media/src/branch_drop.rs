@@ -1,11 +1,12 @@
 //! Frame dropping for tee branches that fall behind.
 //!
-//! Every tee branch starts with a `queue`. A queue that blocks when full stalls
-//! the tee and with it every other branch, so a branch that cannot keep up
-//! drops frames instead. [`install_keyframe_gate`] drops whole runs of frames
-//! up to the next keyframe, for consumers that need decodable GOPs.
-//! [`make_leaky`] turns a queue into a plain `leaky=downstream` one, for
-//! consumers that only sample frames.
+//! A tee branch that blocks stalls the tee and with it every other branch, so a
+//! branch that cannot keep up drops frames instead. [`install_keyframe_gate`]
+//! drops whole runs of frames at a queue up to the next keyframe, for consumers
+//! that need decodable GOPs. [`make_leaky`] turns a queue into a plain
+//! `leaky=downstream` one, for consumers that only sample frames. Appsinks
+//! attached straight to the tee drop frames in their own callbacks and report
+//! them through [`DropReporter`].
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -71,16 +72,6 @@ impl DropReporter {
     }
 }
 
-/// How a keyframe gate reports a run of dropped frames once it resumes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GapReport {
-    /// Only the rate-limited warning from [`DropReporter`].
-    Warn,
-    /// An error per run with the length of the gap, for branches where every
-    /// lost frame is lost data.
-    Error,
-}
-
 /// A queue's `max-size-*` limits, where 0 means unlimited.
 struct QueueLimits {
     buffers: u32,
@@ -124,16 +115,12 @@ struct DropRun {
 
 /// Drop frames at `queue`'s sink pad while the queue is full, up to the next
 /// keyframe that finds it at most half full, so the consumer only ever sees
-/// whole GOPs and the tee never blocks on this branch.
+/// whole GOPs and the tee never blocks on this branch. Each run of dropped
+/// frames is logged as an error with the length of the gap.
 ///
 /// Only the tee's streaming thread pushes into the queue, so a queue found not
 /// full here cannot fill before this buffer is queued.
-pub(crate) fn install_keyframe_gate(
-    queue: &gstreamer::Element,
-    camera_id: Uuid,
-    branch: &str,
-    report: GapReport,
-) {
+pub(crate) fn install_keyframe_gate(queue: &gstreamer::Element, camera_id: Uuid, branch: &str) {
     let Some(sink) = queue.static_pad("sink") else {
         return;
     };
@@ -151,19 +138,17 @@ pub(crate) fn install_keyframe_gate(
         match run.as_mut() {
             Some(current) => {
                 if keyframe && limits.fill(&queue) <= 0.5 {
-                    if report == GapReport::Error {
-                        let gap = buffer
-                            .pts()
-                            .zip(current.first_pts)
-                            .map(|(now, first)| now.saturating_sub(first));
-                        tracing::error!(
-                            camera_id = %camera_id,
-                            branch = %branch,
-                            frames = current.frames,
-                            gap_ms = gap.map(|g| g.mseconds()),
-                            "Branch fell behind, frames are missing",
-                        );
-                    }
+                    let gap = buffer
+                        .pts()
+                        .zip(current.first_pts)
+                        .map(|(now, first)| now.saturating_sub(first));
+                    tracing::error!(
+                        camera_id = %camera_id,
+                        branch = %branch,
+                        frames = current.frames,
+                        gap_ms = gap.map(|g| g.mseconds()),
+                        "Branch fell behind, frames are missing",
+                    );
                     *run = None;
                     return gstreamer::PadProbeReturn::Ok;
                 }
@@ -313,7 +298,7 @@ mod tests {
     fn a_full_gated_queue_drops_frames_until_a_keyframe() {
         let camera_id = Uuid::new_v4();
         let mut stuck = StuckQueue::new(4);
-        install_keyframe_gate(&stuck.queue, camera_id, "restream", GapReport::Warn);
+        install_keyframe_gate(&stuck.queue, camera_id, "restream");
         stuck.start();
 
         for n in 0..20 {
