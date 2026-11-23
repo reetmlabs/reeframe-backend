@@ -141,3 +141,23 @@ impl Metrics {
         String::from_utf8(buffer).expect("Prometheus text encoder always produces valid UTF-8")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_drops_are_rendered() {
+        let camera = uuid::Uuid::new_v4().to_string();
+        vms_media::branch_drop::branch_dropped_frames()
+            .with_label_values(&[camera.as_str(), "ring_buffer"])
+            .inc_by(3);
+
+        let text = Metrics::new().render();
+
+        let line = format!(
+            "vms_branch_dropped_frames_total{{branch=\"ring_buffer\",camera=\"{camera}\"}} 3"
+        );
+        assert!(text.contains(&line), "{text}");
+    }
+}
