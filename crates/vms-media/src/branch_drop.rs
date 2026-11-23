@@ -71,6 +71,16 @@ impl DropReporter {
     }
 }
 
+/// How a keyframe gate reports a run of dropped frames once it resumes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GapReport {
+    /// Only the rate-limited warning from [`DropReporter`].
+    Warn,
+    /// An error per run with the length of the gap, for branches where every
+    /// lost frame is lost data.
+    Error,
+}
+
 /// A queue's `max-size-*` limits, where 0 means unlimited.
 struct QueueLimits {
     buffers: u32,
@@ -106,36 +116,68 @@ impl QueueLimits {
     }
 }
 
+/// A run of frames dropped since the queue was last found full.
+struct DropRun {
+    first_pts: Option<gstreamer::ClockTime>,
+    frames: u64,
+}
+
 /// Drop frames at `queue`'s sink pad while the queue is full, up to the next
 /// keyframe that finds it at most half full, so the consumer only ever sees
 /// whole GOPs and the tee never blocks on this branch.
 ///
 /// Only the tee's streaming thread pushes into the queue, so a queue found not
 /// full here cannot fill before this buffer is queued.
-pub(crate) fn install_keyframe_gate(queue: &gstreamer::Element, camera_id: Uuid, branch: &str) {
+pub(crate) fn install_keyframe_gate(
+    queue: &gstreamer::Element,
+    camera_id: Uuid,
+    branch: &str,
+    report: GapReport,
+) {
     let Some(sink) = queue.static_pad("sink") else {
         return;
     };
     let limits = QueueLimits::of(queue);
     let reporter = DropReporter::new(camera_id, branch);
-    let dropping = Mutex::new(false);
+    let branch = branch.to_owned();
+    let run: Mutex<Option<DropRun>> = Mutex::new(None);
     let queue = queue.downgrade();
     sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
         let (Some(buffer), Some(queue)) = (info.buffer(), queue.upgrade()) else {
             return gstreamer::PadProbeReturn::Ok;
         };
         let keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
-        let mut dropping = dropping.lock().unwrap();
-        if *dropping {
-            if keyframe && limits.fill(&queue) <= 0.5 {
-                *dropping = false;
-                return gstreamer::PadProbeReturn::Ok;
+        let mut run = run.lock().unwrap();
+        match run.as_mut() {
+            Some(current) => {
+                if keyframe && limits.fill(&queue) <= 0.5 {
+                    if report == GapReport::Error {
+                        let gap = buffer
+                            .pts()
+                            .zip(current.first_pts)
+                            .map(|(now, first)| now.saturating_sub(first));
+                        tracing::error!(
+                            camera_id = %camera_id,
+                            branch = %branch,
+                            frames = current.frames,
+                            gap_ms = gap.map(|g| g.mseconds()),
+                            "Branch fell behind, frames are missing",
+                        );
+                    }
+                    *run = None;
+                    return gstreamer::PadProbeReturn::Ok;
+                }
+                current.frames += 1;
             }
-        } else {
-            if limits.fill(&queue) < 1.0 {
-                return gstreamer::PadProbeReturn::Ok;
+            None => {
+                if limits.fill(&queue) < 1.0 {
+                    return gstreamer::PadProbeReturn::Ok;
+                }
+                *run = Some(DropRun {
+                    first_pts: buffer.pts(),
+                    frames: 1,
+                });
             }
-            *dropping = true;
         }
         reporter.dropped(1);
         gstreamer::PadProbeReturn::Handled

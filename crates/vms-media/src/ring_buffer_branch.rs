@@ -59,7 +59,12 @@ pub fn attach(
         .property("max-size-time", 0u64)
         .build()
         .map_err(|e| VmsError::Media(format!("ring buffer queue: {e}")))?;
-    crate::branch_drop::install_keyframe_gate(&queue, camera_id, "ring_buffer");
+    crate::branch_drop::install_keyframe_gate(
+        &queue,
+        camera_id,
+        "ring_buffer",
+        crate::branch_drop::GapReport::Warn,
+    );
 
     // -- appsink --
     // The queue's keyframe gate drops frames while the ring buffer lock is held.
