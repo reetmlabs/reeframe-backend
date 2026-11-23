@@ -2438,4 +2438,117 @@ mod recording_path_tests {
         );
         assert_eq!(opened_paths(&mut rx).len(), 1);
     }
+
+    /// Serves `path` over HTTP with single-range support, one request per
+    /// connection, and counts the body bytes sent. Returns the port.
+    fn range_server(path: String, sent: Arc<std::sync::atomic::AtomicUsize>) -> u16 {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let data = Arc::new(std::fs::read(path).unwrap());
+            for mut stream in listener.incoming().flatten() {
+                let (data, sent) = (data.clone(), sent.clone());
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut start = 0;
+                    for line in reader.lines().map_while(Result::ok) {
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(range) = line.to_lowercase().strip_prefix("range: bytes=") {
+                            start = range.split('-').next().unwrap().parse().unwrap();
+                        }
+                    }
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\n\
+                         Content-Range: bytes {start}-{}/{}\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        data.len() - 1,
+                        data.len(),
+                        data.len() - start
+                    );
+                    if stream.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    for part in data[start..].chunks(4096) {
+                        if stream.write_all(part).is_err() {
+                            return;
+                        }
+                        sent.fetch_add(part.len(), std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// A chunk opens and seeks over HTTP range requests alone.
+    #[test]
+    fn a_chunk_seeks_over_http_ranges() {
+        let dir = ScratchDir::new();
+        let (recording, _splitmux, mut rx) = recording_pipeline(&dir, 1200, 300);
+        run_to_eos(&recording);
+        let chunk = opened_paths(&mut rx).remove(0);
+
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let port = range_server(chunk, sent.clone());
+        let pipeline = gstreamer::parse::launch(&format!(
+            "souphttpsrc location=http://127.0.0.1:{port}/chunk.mp4 ! qtdemux ! queue \
+             ! fakesink name=sink sync=false"
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+        pipeline.set_state(gstreamer::State::Paused).unwrap();
+        let (preroll, ..) = pipeline.state(gstreamer::ClockTime::from_seconds(10));
+        preroll.unwrap();
+        pipeline
+            .seek_simple(
+                gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+                gstreamer::ClockTime::from_seconds(50),
+            )
+            .unwrap();
+        let (preroll, ..) = pipeline.state(gstreamer::ClockTime::from_seconds(10));
+        preroll.unwrap();
+        let position = pipeline.query_position::<gstreamer::ClockTime>();
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+
+        let position = position.unwrap().seconds();
+        assert!((48..=51).contains(&position), "seek landed at {position} s");
+        assert!(sent.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    /// Exporting a range that trims its first and last chunk keeps the frames
+    /// in between.
+    #[test]
+    fn chunks_export_with_trimmed_ends() {
+        let dir = ScratchDir::new();
+        let (recording, _splitmux, mut rx) = recording_pipeline(&dir, 600, 10);
+        run_to_eos(&recording);
+        let paths = opened_paths(&mut rx);
+        let last = paths.len() - 1;
+        let chunks: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| crate::ExportChunk {
+                file_path: path.clone(),
+                trim_start_ns: (i == 0).then_some(4_000_000_000),
+                trim_stop_ns: (i == last).then_some(4_000_000_000),
+            })
+            .collect();
+        let output = dir.0.join("export.mp4");
+
+        crate::export_range(&chunks, "H264", &output).unwrap();
+
+        let all: usize = paths.iter().map(|path| mp4_frames(path)).sum();
+        let last_frames = mp4_frames(&paths[last]);
+        let expected = all - 80 - last_frames.saturating_sub(80);
+        let frames = mp4_frames(&output.to_string_lossy());
+        assert!(
+            frames.abs_diff(expected) <= 42,
+            "exported {frames} frames, expected about {expected}"
+        );
+    }
 }
