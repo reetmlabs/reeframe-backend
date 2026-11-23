@@ -2167,6 +2167,10 @@ mod attach_tests {
         };
         std::thread::sleep(Duration::from_secs(3));
 
+        let stalled_from = pushed.lock().unwrap().len();
+        let dropped_before_stall = crate::branch_drop::branch_dropped_frames()
+            .with_label_values(&[camera_id.to_string().as_str(), "restream"])
+            .get();
         reading.store(false, SeqCst);
         let mut levels = Vec::new();
         for _ in 0..48 {
@@ -2198,7 +2202,12 @@ mod attach_tests {
             "the stalled viewer never backed up into the appsrc"
         );
 
+        assert_eq!(
+            dropped_before_stall, 0,
+            "frames were skipped before the viewer stalled"
+        );
         let pushed = pushed.lock().unwrap();
+        assert!(stalled_from > 40, "the restream did not start");
         assert!(
             pushed.len() > resumed_from + 40,
             "the restream did not resume: {} buffers before, {} after",
