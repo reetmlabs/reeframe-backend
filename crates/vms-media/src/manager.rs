@@ -1642,4 +1642,184 @@ mod tests {
 
         media.release_live(cam).await;
     }
+
+    /// Forwards TCP connections to `target`. Every open connection is cut
+    /// each time `cut` is called.
+    struct CuttableProxy {
+        port: u16,
+        open: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    }
+
+    impl CuttableProxy {
+        fn new(target: u16) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let open = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let accepted = open.clone();
+            std::thread::spawn(move || {
+                for client in listener.incoming().flatten() {
+                    let server = std::net::TcpStream::connect(("127.0.0.1", target)).unwrap();
+                    for (from, to) in [(&client, &server), (&server, &client)] {
+                        let mut from = from.try_clone().unwrap();
+                        let mut to = to.try_clone().unwrap();
+                        std::thread::spawn(move || {
+                            std::io::copy(&mut from, &mut to).ok();
+                            to.shutdown(std::net::Shutdown::Both).ok();
+                        });
+                    }
+                    accepted.lock().unwrap().extend([client, server]);
+                }
+            });
+            Self { port, open }
+        }
+
+        fn cut(&self) {
+            for stream in self.open.lock().unwrap().drain(..) {
+                stream.shutdown(std::net::Shutdown::Both).ok();
+            }
+        }
+    }
+
+    /// Serves H264 at 10 fps with a keyframe per second over RTSP, TCP only,
+    /// and returns its port. The stream is at `/cam`.
+    fn tcp_camera() -> u16 {
+        use gstreamer_rtsp_server::prelude::*;
+
+        gstreamer::init().unwrap();
+        let context = gstreamer::glib::MainContext::new();
+        let server = gstreamer_rtsp_server::RTSPServer::new();
+        server.set_address("127.0.0.1");
+        server.set_service("0");
+        let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
+        factory.set_protocols(gstreamer_rtsp_server::gst_rtsp::RTSPLowerTrans::TCP);
+        factory.set_launch(
+            "( videotestsrc is-live=true ! video/x-raw,width=160,height=120,framerate=10/1 \
+             ! x264enc key-int-max=10 tune=zerolatency speed-preset=ultrafast \
+             ! rtph264pay name=pay0 pt=96 )",
+        );
+        server.mount_points().unwrap().add_factory("/cam", factory);
+        server.attach(Some(&context)).unwrap();
+        let port = server.bound_port() as u16;
+        std::thread::spawn(move || {
+            let _server = server;
+            gstreamer::glib::MainLoop::new(Some(&context), false).run();
+        });
+        port
+    }
+
+    /// Number of video frames a demuxer reads from `path`, which must be a
+    /// complete, readable MP4.
+    fn mp4_frames(path: &str) -> u64 {
+        use gstreamer::prelude::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let pipeline = gstreamer::parse::launch(&format!(
+            "filesrc location={path} ! qtdemux ! fakesink name=sink sync=false"
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+        let frames = std::sync::Arc::new(AtomicU64::new(0));
+        let counted = frames.clone();
+        let sink = pipeline
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap();
+        sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            gstreamer::PadProbeReturn::Ok
+        });
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        let end = pipeline.bus().unwrap().timed_pop_filtered(
+            gstreamer::ClockTime::from_seconds(10),
+            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
+        );
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        assert!(
+            end.is_some_and(|m| m.type_() == gstreamer::MessageType::Eos),
+            "{path} is not readable"
+        );
+        frames.load(Ordering::SeqCst)
+    }
+
+    /// Recording resumes after each camera disconnect, keeps rolling over to
+    /// new chunks, and every chunk closes as a readable file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recording_resumes_after_the_camera_reconnects() {
+        use std::collections::HashSet;
+        use std::time::Duration;
+        use vms_core::RecordingChunkEvent;
+
+        let dir = ScratchDir::new("record-reconnect");
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = MediaConfig {
+            recording_dir: dir.0.clone(),
+            rtsp_bind: "127.0.0.1:0".into(),
+            chunk_duration_secs: 4,
+            ..Default::default()
+        };
+        let media = MediaManager::new(config, event_tx, chunk_tx, live_tx).unwrap();
+        let cam = Uuid::new_v4();
+        let proxy = CuttableProxy::new(tcp_camera());
+        let url = format!("rtsp://127.0.0.1:{}/cam", proxy.port);
+        let session_secs = std::env::var("RECONNECT_SOAK_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+
+        media.start_recording(cam, &url, None).await.unwrap();
+        assert_eq!(live_rx.recv().await, Some(cam));
+        tokio::time::sleep(Duration::from_secs(session_secs)).await;
+        let mut sessions = Vec::new();
+        for _ in 0..2 {
+            proxy.cut();
+            let restarted = tokio::time::timeout(Duration::from_secs(30), live_rx.recv()).await;
+            assert_eq!(restarted, Ok(Some(cam)), "the camera never reconnected");
+            let mut events = Vec::new();
+            while let Ok(event) = chunk_rx.try_recv() {
+                events.push(event);
+            }
+            sessions.push(events);
+            tokio::time::sleep(Duration::from_secs(session_secs)).await;
+        }
+        media.stop_recording(cam).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let mut events = Vec::new();
+        while let Ok(event) = chunk_rx.try_recv() {
+            events.push(event);
+        }
+        sessions.push(events);
+        assert!(
+            live_rx.try_recv().is_err(),
+            "the pipeline restarted without a disconnect"
+        );
+
+        for (i, events) in sessions.iter().enumerate() {
+            let (mut opened, mut ended, mut closed) = (HashSet::new(), HashSet::new(), Vec::new());
+            for event in events {
+                match event {
+                    RecordingChunkEvent::Opened { file_path, .. } => {
+                        opened.insert(file_path.clone());
+                    }
+                    RecordingChunkEvent::Closed { file_path, .. } => {
+                        ended.insert(file_path.clone());
+                        closed.push(file_path.clone());
+                    }
+                    RecordingChunkEvent::Discarded { file_path, .. } => {
+                        ended.insert(file_path.clone());
+                    }
+                }
+            }
+            assert_eq!(opened, ended, "session {i} left a chunk open");
+            assert!(closed.len() >= 3, "session {i} closed only {closed:?}");
+            let frames: u64 = closed.iter().map(|path| mp4_frames(path)).sum();
+            assert!(
+                frames >= (session_secs - 3) * 10,
+                "session {i} recorded {frames} frames"
+            );
+        }
+    }
 }
