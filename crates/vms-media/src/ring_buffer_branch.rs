@@ -59,9 +59,15 @@ pub fn attach(
         .property("max-size-time", 0u64)
         .build()
         .map_err(|e| VmsError::Media(format!("ring buffer queue: {e}")))?;
+    crate::branch_drop::install_keyframe_gate(
+        &queue,
+        camera_id,
+        "ring_buffer",
+        crate::branch_drop::GapReport::Warn,
+    );
 
     // -- appsink --
-    // `drop = true` so a slow ring-buffer lock never stalls the recording branch.
+    // The queue's keyframe gate drops frames while the ring buffer lock is held.
     // `sync = false` so the appsink processes frames as fast as they arrive.
     let appsink = gstreamer_app::AppSink::builder()
         .name(sink_name(camera_id))

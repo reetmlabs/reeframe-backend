@@ -4,7 +4,8 @@
 //! with everything that needs to record a metric: the HTTP layer (requests
 //! by route/method/status), [`crate::EventBus`] (events published, by topic
 //! kind), and [`crate::PipelineExecutor`] (pipeline runs, by outcome).
-//! Resource state gauges are a point-in-time snapshot, so they are synced
+//! [`vms_media::branch_drop::branch_dropped_frames`] is owned by `vms-media`
+//! and only registered here. Resource state gauges are a point-in-time snapshot, so they are synced
 //! from [`crate::ResourceManager::all`] at scrape time instead of being
 //! incremented as events happen.
 //!
@@ -76,6 +77,11 @@ impl Metrics {
         registry
             .register(Box::new(events_published_total.clone()))
             .expect("unique metric name");
+        registry
+            .register(Box::new(
+                vms_media::branch_drop::branch_dropped_frames().clone(),
+            ))
+            .expect("unique metric name");
 
         Arc::new(Self {
             registry,
@@ -133,5 +139,25 @@ impl Metrics {
             .encode(&metric_families, &mut buffer)
             .expect("encoding to an in-memory buffer cannot fail");
         String::from_utf8(buffer).expect("Prometheus text encoder always produces valid UTF-8")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_drops_are_rendered() {
+        let camera = uuid::Uuid::new_v4().to_string();
+        vms_media::branch_drop::branch_dropped_frames()
+            .with_label_values(&[camera.as_str(), "ring_buffer"])
+            .inc_by(3);
+
+        let text = Metrics::new().render();
+
+        let line = format!(
+            "vms_branch_dropped_frames_total{{branch=\"ring_buffer\",camera=\"{camera}\"}} 3"
+        );
+        assert!(text.contains(&line), "{text}");
     }
 }

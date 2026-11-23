@@ -125,6 +125,12 @@ pub fn attach(
         .property("max-size-time", 0u64)
         .build()
         .map_err(|e| VmsError::Media(format!("restream bridge queue: {e}")))?;
+    crate::branch_drop::install_keyframe_gate(
+        &queue,
+        camera_id,
+        branch_suffix,
+        crate::branch_drop::GapReport::Warn,
+    );
 
     let appsink = gstreamer_app::AppSink::builder()
         .name(&sink_name)

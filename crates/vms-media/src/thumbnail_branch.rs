@@ -170,6 +170,7 @@ pub fn attach(
         .property("max-size-time", 0u64)
         .build()
         .map_err(|e| VmsError::Media(format!("thumbnail queue: {e}")))?;
+    crate::branch_drop::make_leaky(&queue, camera_id, "thumbnail");
 
     let decodebin = gstreamer::ElementFactory::make("decodebin")
         .name(decode_name(camera_id))
