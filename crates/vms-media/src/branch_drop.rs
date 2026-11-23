@@ -114,7 +114,7 @@ struct DropRun {
 }
 
 /// Drop frames at `queue`'s sink pad while the queue is full, up to the next
-/// keyframe that finds it at most half full, so the consumer only ever sees
+/// keyframe that finds it not full, so the consumer only ever sees
 /// whole GOPs and the tee never blocks on this branch. Each run of dropped
 /// frames is logged as an error with the length of the gap.
 ///
@@ -137,7 +137,7 @@ pub(crate) fn install_keyframe_gate(queue: &gstreamer::Element, camera_id: Uuid,
         let mut run = run.lock().unwrap();
         match run.as_mut() {
             Some(current) => {
-                if keyframe && limits.fill(&queue) <= 0.5 {
+                if keyframe && limits.fill(&queue) < 1.0 {
                     let gap = buffer
                         .pts()
                         .zip(current.first_pts)
