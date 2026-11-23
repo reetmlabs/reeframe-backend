@@ -2338,6 +2338,32 @@ mod attach_tests {
         );
     }
 
+    /// Two medias of one mount, kept apart by the port in the request URLs, as
+    /// behind a published port. When the older one goes away, the newer one
+    /// keeps getting frames.
+    #[test]
+    fn a_leaving_restream_media_does_not_stop_a_newer_one() {
+        let restream = TestRestream::new(300, "restream");
+        let older = rtsp_play(restream.port, &restream.url);
+        let newer = rtsp_play(restream.port, "rtsp://127.0.0.1:1/test");
+        let reader = drain(newer.try_clone().unwrap());
+        std::thread::sleep(Duration::from_secs(2));
+
+        older.shutdown(std::net::Shutdown::Both).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let before = restream.pushed.lock().unwrap().len();
+        std::thread::sleep(Duration::from_secs(2));
+        let after = restream.pushed.lock().unwrap().len();
+        newer.shutdown(std::net::Shutdown::Both).ok();
+        reader.join().unwrap();
+
+        assert!(
+            after > before + 20,
+            "the newer media got {} frames in 2 s",
+            after - before
+        );
+    }
+
     /// A viewer that connects and never plays leaves about 30 s of video in
     /// the media's appsrc.
     #[test]
