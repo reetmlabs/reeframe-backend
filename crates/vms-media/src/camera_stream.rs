@@ -1891,6 +1891,108 @@ mod attach_tests {
             "tee stalled: {before} -> {after} buffers"
         );
     }
+
+    /// Counts buffers leaving the named element's src pad.
+    fn count_src_buffers(
+        pipeline: &gstreamer::Pipeline,
+        name: &str,
+    ) -> Arc<std::sync::atomic::AtomicU64> {
+        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let in_probe = count.clone();
+        let src = pipeline.by_name(name).unwrap().static_pad("src").unwrap();
+        src.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            in_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            gstreamer::PadProbeReturn::Ok
+        });
+        count
+    }
+
+    /// A ring buffer whose lock is held, as `extract_clip` holds it while it
+    /// copies, must not stall the tee, recording or the restream, and its
+    /// branch picks up again at a keyframe once the lock is released.
+    #[test]
+    fn a_blocked_ring_buffer_does_not_stall_the_other_branches() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let camera_id = Uuid::new_v4();
+        let (pipeline, tee_count, key_rx) = live_gop_pipeline(camera_id);
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let scratch = ScratchDir::new();
+        attach_recording_branch(camera_id, &pipeline, &naming, &tx, &scratch.0, 60).unwrap();
+        let mounts = gstreamer_rtsp_server::RTSPMountPoints::new();
+        let _bridge = crate::restream_bridge::attach(
+            &pipeline,
+            &tee_name(camera_id),
+            camera_id,
+            "restream",
+            &mounts,
+            "/test",
+            "H264",
+        )
+        .unwrap();
+        let ring = Arc::new(std::sync::Mutex::new(crate::ring_buffer::RingBuffer::new(
+            Duration::from_secs(60),
+        )));
+        crate::ring_buffer_branch::attach(&pipeline, camera_id, ring.clone()).unwrap();
+
+        let rec_count = count_src_buffers(&pipeline, &recqueue_name(camera_id));
+        let restream_count = count_src_buffers(
+            &pipeline,
+            &format!("cam_{}_restreamqueue", camera_id.as_simple()),
+        );
+        std::thread::sleep(Duration::from_secs(2));
+
+        // The ring buffer queue holds 60 frames, 3 s at 20 fps.
+        let lock = ring.lock().unwrap();
+        let frames_before = lock.len();
+        let counts = || {
+            [
+                tee_count.load(SeqCst),
+                rec_count.load(SeqCst),
+                restream_count.load(SeqCst),
+            ]
+        };
+        std::thread::sleep(Duration::from_secs(4));
+        let start = counts();
+        std::thread::sleep(Duration::from_secs(3));
+        let end = counts();
+        drop(lock);
+        std::thread::sleep(Duration::from_secs(5));
+
+        let frames = {
+            let ring = ring.lock().unwrap();
+            ring.extract(60, 0, ring.latest_pts().unwrap())
+        };
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+
+        for (name, (start, end)) in ["tee", "recording", "restream"]
+            .iter()
+            .zip(start.iter().zip(end.iter()))
+        {
+            assert!(
+                end - start >= 40,
+                "{name} stalled: {start} -> {end} buffers"
+            );
+        }
+        let after_unblock = &frames[frames_before..];
+        let gap = after_unblock
+            .windows(2)
+            .position(|w| w[1].pts - w[0].pts > Duration::from_millis(75))
+            .expect("the ring buffer branch dropped no frames while blocked");
+        assert!(
+            after_unblock[gap + 1].is_keyframe,
+            "the ring buffer branch resumed on a delta frame"
+        );
+        assert!(
+            after_unblock.len() > gap + 20,
+            "the ring buffer branch did not resume"
+        );
+    }
 }
 
 #[cfg(test)]
