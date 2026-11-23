@@ -58,8 +58,9 @@ struct RestreamEntry {
 /// needed. The restream never opens its own connection to the camera and never
 /// requires recording to be active.
 ///
-/// A dedicated GLib main loop runs on a background thread to drive I/O for
-/// the RTSP server without interfering with GStreamer's own main context.
+/// A dedicated GLib main loop on a background thread accepts connections
+/// without interfering with GStreamer's own main context. Connected clients are
+/// handled on a small pool of threads that they share.
 pub struct RestreamServer {
     mounts: gstreamer_rtsp_server::RTSPMountPoints,
     bind: String,
@@ -72,10 +73,12 @@ pub struct RestreamServer {
 impl RestreamServer {
     /// `public_host`/`public_port` override the host and port advertised in
     /// restream URLs, for when the bind address isn't what clients reach (Docker).
+    /// `client_threads` is how many threads handle RTSP requests and send media.
     pub fn new(
         bind: &str,
         public_host: Option<String>,
         public_port: Option<u16>,
+        client_threads: u16,
     ) -> Result<Self, VmsError> {
         let main_context = glib::MainContext::new();
         let main_loop = glib::MainLoop::new(Some(&main_context), false);
@@ -86,6 +89,13 @@ impl RestreamServer {
             .ok_or_else(|| VmsError::Media(format!("invalid RTSP bind address: {bind}")))?;
         server.set_address(&address);
         server.set_service(&service);
+
+        // A DESCRIBE holds its thread until the camera's next keyframe, and with
+        // it the media of every other client on that thread.
+        server
+            .thread_pool()
+            .ok_or_else(|| VmsError::Media("RTSP server returned no thread pool".into()))?
+            .set_max_threads(i32::from(client_threads));
 
         let mounts = server
             .mount_points()

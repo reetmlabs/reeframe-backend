@@ -31,7 +31,7 @@ use vms_core::VmsError;
 const APPSRC_BACKLOG: Duration = Duration::from_secs(2);
 
 /// The same limit until the media has played and drained what it queued before
-/// that. Handshakes share one thread, and each waits for a keyframe.
+/// that. Clients share a few threads, and each handshake waits for a keyframe.
 const CONNECTING_BACKLOG: Duration = Duration::from_secs(30);
 
 /// Handle to a running restream bridge: the tee tap on the source pipeline and
