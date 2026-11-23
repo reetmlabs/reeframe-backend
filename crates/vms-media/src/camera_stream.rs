@@ -1887,14 +1887,15 @@ mod attach_tests {
         );
     }
 
-    /// Counts buffers leaving the named element's src pad.
-    fn count_src_buffers(
+    /// Counts buffers crossing the named element's `pad`.
+    fn count_buffers(
         pipeline: &gstreamer::Pipeline,
         name: &str,
+        pad: &str,
     ) -> Arc<std::sync::atomic::AtomicU64> {
         let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let in_probe = count.clone();
-        let src = pipeline.by_name(name).unwrap().static_pad("src").unwrap();
+        let src = pipeline.by_name(name).unwrap().static_pad(pad).unwrap();
         src.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
             in_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             gstreamer::PadProbeReturn::Ok
@@ -1935,14 +1936,14 @@ mod attach_tests {
         )));
         crate::ring_buffer_branch::attach(&pipeline, camera_id, ring.clone()).unwrap();
 
-        let rec_count = count_src_buffers(&pipeline, &recqueue_name(camera_id));
-        let restream_count = count_src_buffers(
+        let rec_count = count_buffers(&pipeline, &recqueue_name(camera_id), "src");
+        let restream_count = count_buffers(
             &pipeline,
-            &format!("cam_{}_restreamqueue", camera_id.as_simple()),
+            &format!("cam_{}_restreamsink", camera_id.as_simple()),
+            "sink",
         );
         std::thread::sleep(Duration::from_secs(2));
 
-        // The ring buffer queue holds 60 frames, 3 s at 20 fps.
         let lock = ring.lock().unwrap();
         let frames_before = lock.len();
         let counts = || {
@@ -1974,19 +1975,23 @@ mod attach_tests {
                 "{name} stalled: {start} -> {end} buffers"
             );
         }
-        let after_unblock = &frames[frames_before..];
-        let gap = after_unblock
+        let from_lock = &frames[frames_before - 1..];
+        let gap = from_lock
             .windows(2)
             .position(|w| w[1].pts - w[0].pts > Duration::from_millis(75))
             .expect("the ring buffer branch dropped no frames while blocked");
         assert!(
-            after_unblock[gap + 1].is_keyframe,
+            from_lock[gap + 1].is_keyframe,
             "the ring buffer branch resumed on a delta frame"
         );
         assert!(
-            after_unblock.len() > gap + 20,
+            from_lock.len() > gap + 20,
             "the ring buffer branch did not resume"
         );
+        let dropped = crate::branch_drop::branch_dropped_frames()
+            .with_label_values(&[camera_id.to_string().as_str(), "ring_buffer"])
+            .get();
+        assert!(dropped > 0, "no ring buffer drops were counted");
     }
 }
 
