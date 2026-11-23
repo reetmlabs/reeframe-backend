@@ -321,14 +321,41 @@ pub(crate) fn build_camera_stream(
 
 // -- Recording branch (queue -> splitmuxsink) --
 
-// Faststart: HTTP Range streaming needs `moov` before `mdat`. Setting
-// `mp4mux`'s `faststart=true` inside splitmuxsink only works through
-// `muxer-properties`, which requires `async-finalize=true`, and with that
-// enabled every reconnect later fails with "Queued GOP time is negative"
-// because the async-finalize GOP queue does not survive the Null->Playing
-// cycle. So faststart runs as a separate pass on `fragment-closed` (see
-// `remux_faststart`). It costs extra disk I/O per chunk but keeps recording
-// independent of the live pipeline's state.
+// HTTP Range streaming needs `moov` before `mdat`, so the muxer reserves header
+// space at the front of each chunk and rewrites the `moov` there as it goes. It
+// is passed through splitmuxsink's `muxer` property: `muxer-properties` needs
+// `async-finalize=true`, with which every reconnect fails with "Queued GOP time
+// is negative".
+
+/// Header space reserved beyond the chunk duration, since a chunk only ends at
+/// a keyframe and can run past it.
+const RESERVED_MOOV_MARGIN: Duration = Duration::from_secs(120);
+
+/// How often the muxer rewrites the `moov`, which bounds how much of a chunk is
+/// unreadable after a crash.
+const MOOV_UPDATE_PERIOD: Duration = Duration::from_secs(10);
+
+/// Header bytes reserved per second: 24 bytes per frame at 60 fps, for
+/// `stts` (8), `ctts` (8), `stsz` (4) and the rest of the sample tables.
+const RESERVED_MOOV_BYTES_PER_SEC: u32 = 24 * 60;
+
+/// The `mp4mux` that writes one recording's chunks.
+fn build_recording_muxer(
+    camera_id: Uuid,
+    chunk_duration_secs: u64,
+) -> Result<gstreamer::Element, VmsError> {
+    let reserved = Duration::from_secs(chunk_duration_secs) + RESERVED_MOOV_MARGIN;
+    gstreamer::ElementFactory::make("mp4mux")
+        .name(format!("cam_{}_recmux", camera_id.as_simple()))
+        .property("reserved-max-duration", reserved.as_nanos() as u64)
+        .property(
+            "reserved-moov-update-period",
+            MOOV_UPDATE_PERIOD.as_nanos() as u64,
+        )
+        .property("reserved-bytes-per-sec", RESERVED_MOOV_BYTES_PER_SEC)
+        .build()
+        .map_err(|e| VmsError::Media(format!("recording mp4mux: {e}")))
+}
 
 /// Build the unattached recording branch, `queue -> [recparse ->]
 /// splitmuxsink`, with `format-location-full` wired to chunk naming and chunk
@@ -388,8 +415,10 @@ fn build_recording_branch(
     let location = recording_location(recording_dir, camera_id);
     let chunk_ns = chunk_duration_secs * 1_000_000_000;
 
+    let muxer = build_recording_muxer(camera_id, chunk_duration_secs)?;
     let splitmux = gstreamer::ElementFactory::make("splitmuxsink")
         .name(format!("cam_{}_splitmux", camera_id.as_simple()))
+        .property("muxer", &muxer)
         .property("location", &location)
         .property("max-size-time", chunk_ns)
         .build()
