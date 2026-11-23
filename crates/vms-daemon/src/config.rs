@@ -487,6 +487,28 @@ mod tests {
     }
 
     #[test]
+    fn rtsp_client_threads_defaults_to_4_and_is_read_from_the_rtsp_section() {
+        assert_eq!(from_toml("").rtsp.client_threads, 4);
+        assert_eq!(
+            from_toml("[rtsp]\nclient_threads = 64\n")
+                .rtsp
+                .client_threads,
+            64
+        );
+    }
+
+    #[test]
+    fn rtsp_client_threads_outside_1_to_64_is_rejected() {
+        for value in ["0", "65", "-1", "\"many\""] {
+            let result = Figment::new()
+                .merge(Serialized::defaults(AppConfig::default()))
+                .merge(Toml::string(&format!("[rtsp]\nclient_threads = {value}\n")))
+                .extract::<AppConfig>();
+            assert!(result.is_err(), "client_threads = {value} was accepted");
+        }
+    }
+
+    #[test]
     fn be_id_is_read_from_the_coordinator_section() {
         let be_id = uuid::Uuid::new_v4();
         let cfg = from_toml(&format!("[coordinator]\nbe_id = \"{be_id}\"\n"));
