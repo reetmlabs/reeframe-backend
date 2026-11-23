@@ -376,12 +376,7 @@ fn build_recording_branch(
         .property("max-size-bytes", 0u32)
         .build()
         .map_err(|e| VmsError::Media(format!("queue: {e}")))?;
-    crate::branch_drop::install_keyframe_gate(
-        &queue,
-        camera_id,
-        "recording",
-        crate::branch_drop::GapReport::Error,
-    );
+    crate::branch_drop::install_keyframe_gate(&queue, camera_id, "recording");
 
     let camera_dir = camera_recording_dir(recording_dir, camera_id);
     std::fs::create_dir_all(&camera_dir).map_err(|e| {
@@ -1811,13 +1806,24 @@ mod attach_tests {
         Arc<std::sync::atomic::AtomicU64>,
         std::sync::mpsc::Receiver<()>,
     ) {
-        gstreamer::init().ok();
-        let src = gstreamer::parse::bin_from_description(
+        live_gop_pipeline_from(
+            camera_id,
             "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=20/1 \
              ! x264enc key-int-max=40 tune=zerolatency speed-preset=ultrafast ! h264parse",
-            true,
         )
-        .unwrap();
+    }
+
+    /// [`live_gop_pipeline`] with the source given as a launch description.
+    fn live_gop_pipeline_from(
+        camera_id: Uuid,
+        source: &str,
+    ) -> (
+        gstreamer::Pipeline,
+        Arc<std::sync::atomic::AtomicU64>,
+        std::sync::mpsc::Receiver<()>,
+    ) {
+        gstreamer::init().ok();
+        let src = gstreamer::parse::bin_from_description(source, true).unwrap();
         let pipeline = pipeline_with_tee(camera_id);
         let tee = pipeline.by_name(&tee_name(camera_id)).unwrap();
         tee.set_property("allow-not-linked", true);
@@ -1892,14 +1898,15 @@ mod attach_tests {
         );
     }
 
-    /// Counts buffers leaving the named element's src pad.
-    fn count_src_buffers(
+    /// Counts buffers crossing the named element's `pad`.
+    fn count_buffers(
         pipeline: &gstreamer::Pipeline,
         name: &str,
+        pad: &str,
     ) -> Arc<std::sync::atomic::AtomicU64> {
         let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let in_probe = count.clone();
-        let src = pipeline.by_name(name).unwrap().static_pad("src").unwrap();
+        let src = pipeline.by_name(name).unwrap().static_pad(pad).unwrap();
         src.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
             in_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             gstreamer::PadProbeReturn::Ok
@@ -1940,14 +1947,14 @@ mod attach_tests {
         )));
         crate::ring_buffer_branch::attach(&pipeline, camera_id, ring.clone()).unwrap();
 
-        let rec_count = count_src_buffers(&pipeline, &recqueue_name(camera_id));
-        let restream_count = count_src_buffers(
+        let rec_count = count_buffers(&pipeline, &recqueue_name(camera_id), "src");
+        let restream_count = count_buffers(
             &pipeline,
-            &format!("cam_{}_restreamqueue", camera_id.as_simple()),
+            &format!("cam_{}_restreamsink", camera_id.as_simple()),
+            "sink",
         );
         std::thread::sleep(Duration::from_secs(2));
 
-        // The ring buffer queue holds 60 frames, 3 s at 20 fps.
         let lock = ring.lock().unwrap();
         let frames_before = lock.len();
         let counts = || {
@@ -1979,18 +1986,242 @@ mod attach_tests {
                 "{name} stalled: {start} -> {end} buffers"
             );
         }
-        let after_unblock = &frames[frames_before..];
-        let gap = after_unblock
+        let from_lock = &frames[frames_before - 1..];
+        let gap = from_lock
             .windows(2)
             .position(|w| w[1].pts - w[0].pts > Duration::from_millis(75))
             .expect("the ring buffer branch dropped no frames while blocked");
         assert!(
-            after_unblock[gap + 1].is_keyframe,
+            from_lock[gap + 1].is_keyframe,
             "the ring buffer branch resumed on a delta frame"
         );
         assert!(
-            after_unblock.len() > gap + 20,
+            from_lock.len() > gap + 20,
             "the ring buffer branch did not resume"
+        );
+        let dropped = crate::branch_drop::branch_dropped_frames()
+            .with_label_values(&[camera_id.to_string().as_str(), "ring_buffer"])
+            .get();
+        assert!(dropped > 0, "no ring buffer drops were counted");
+    }
+
+    /// Sends one RTSP request on `stream` and returns the response headers
+    /// and body.
+    fn rtsp_request(stream: &mut std::net::TcpStream, request: &str) -> (String, String) {
+        use std::io::{Read, Write};
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head).into_owned();
+        let length = head
+            .lines()
+            .find_map(|l| l.strip_prefix("Content-Length:"))
+            .map_or(0, |v| v.trim().parse().unwrap());
+        let mut body = vec![0u8; length];
+        stream.read_exact(&mut body).unwrap();
+        (head, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// Connects to `url` over RTSP with TCP-interleaved transport and a small
+    /// receive buffer, and starts playback. The caller reads the media.
+    fn rtsp_play(port: u16, url: &str) -> std::net::TcpStream {
+        use std::io::Write;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut stream = runtime.block_on(async {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(64 * 1024).unwrap();
+            let stream = socket.connect(([127, 0, 0, 1], port).into()).await.unwrap();
+            stream.into_std().unwrap()
+        });
+        stream.set_nonblocking(false).unwrap();
+
+        let (_, sdp) = rtsp_request(
+            &mut stream,
+            &format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n"),
+        );
+        let control = sdp
+            .lines()
+            .filter_map(|l| l.strip_prefix("a=control:"))
+            .find(|c| c.contains("stream"))
+            .unwrap_or("stream=0")
+            .to_owned();
+        let (head, _) = rtsp_request(
+            &mut stream,
+            &format!(
+                "SETUP {url}/{control} RTSP/1.0\r\nCSeq: 2\r\n\
+                 Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n"
+            ),
+        );
+        let session = head
+            .lines()
+            .find_map(|l| l.strip_prefix("Session:"))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_owned();
+        stream
+            .write_all(
+                format!("PLAY {url} RTSP/1.0\r\nCSeq: 3\r\nSession: {session}\r\n\r\n").as_bytes(),
+            )
+            .unwrap();
+        stream
+    }
+
+    /// A restream viewer that stops reading leaves the media's `appsrc` near
+    /// its limit instead of growing it, and once the viewer reads again the
+    /// stream resumes on a keyframe.
+    #[test]
+    fn a_stalled_restream_viewer_keeps_the_appsrc_bounded() {
+        use gstreamer_rtsp_server::prelude::*;
+        use std::io::Read;
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+        let camera_id = Uuid::new_v4();
+        let (pipeline, _, key_rx) = live_gop_pipeline_from(
+            camera_id,
+            "videotestsrc is-live=true pattern=snow ! video/x-raw,width=640,height=480,framerate=20/1 \
+             ! x264enc key-int-max=40 bitrate=8000 tune=zerolatency speed-preset=ultrafast \
+             ! h264parse",
+        );
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let context = glib::MainContext::new();
+        let main_loop = glib::MainLoop::new(Some(&context), false);
+        let server = gstreamer_rtsp_server::RTSPServer::new();
+        server.set_address("127.0.0.1");
+        server.set_service("0");
+        let mounts = server.mount_points().unwrap();
+        let _source = server.attach(Some(&context)).unwrap();
+        let loop_thread = {
+            let main_loop = main_loop.clone();
+            std::thread::spawn(move || main_loop.run())
+        };
+        let _bridge = crate::restream_bridge::attach(
+            &pipeline,
+            &tee_name(camera_id),
+            camera_id,
+            "restream",
+            &mounts,
+            "/test",
+            "H264",
+        )
+        .unwrap();
+
+        // PTS and keyframe flag of every buffer leaving the media's appsrc.
+        let appsrc: Arc<std::sync::Mutex<Option<gstreamer_app::AppSrc>>> = Arc::default();
+        let pushed: Arc<std::sync::Mutex<Vec<(Duration, bool)>>> = Arc::default();
+        {
+            let appsrc = appsrc.clone();
+            let pushed = pushed.clone();
+            mounts
+                .match_("/test")
+                .0
+                .connect_media_configure(move |_, media| {
+                    let bin = media.element().downcast::<gstreamer::Bin>().unwrap();
+                    let src = bin.by_name("src").unwrap();
+                    let pushed = pushed.clone();
+                    src.static_pad("src").unwrap().add_probe(
+                        gstreamer::PadProbeType::BUFFER,
+                        move |_, info| {
+                            if let Some(buffer) = info.buffer() {
+                                pushed.lock().unwrap().push((
+                                    Duration::from_nanos(buffer.pts().unwrap().nseconds()),
+                                    !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT),
+                                ));
+                            }
+                            gstreamer::PadProbeReturn::Ok
+                        },
+                    );
+                    *appsrc.lock().unwrap() = src.downcast().ok();
+                });
+        }
+
+        let url = format!("rtsp://127.0.0.1:{}/test", server.bound_port());
+        let stream = rtsp_play(server.bound_port() as u16, &url);
+        let reading = Arc::new(AtomicBool::new(true));
+        let reader = {
+            let reading = reading.clone();
+            let mut stream = stream.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    if !reading.load(SeqCst) {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    if matches!(stream.read(&mut buf), Ok(0) | Err(_)) {
+                        break;
+                    }
+                }
+            })
+        };
+        std::thread::sleep(Duration::from_secs(3));
+
+        let stalled_from = pushed.lock().unwrap().len();
+        let dropped_before_stall = crate::branch_drop::branch_dropped_frames()
+            .with_label_values(&[camera_id.to_string().as_str(), "restream"])
+            .get();
+        reading.store(false, SeqCst);
+        let mut levels = Vec::new();
+        for _ in 0..48 {
+            std::thread::sleep(Duration::from_millis(250));
+            if let Some(appsrc) = appsrc.lock().unwrap().as_ref() {
+                levels.push((appsrc.current_level_bytes(), appsrc.max_bytes()));
+            }
+        }
+        let resumed_from = pushed.lock().unwrap().len();
+        reading.store(true, SeqCst);
+        std::thread::sleep(Duration::from_secs(5));
+
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        stream.shutdown(std::net::Shutdown::Both).ok();
+        reader.join().unwrap();
+        main_loop.quit();
+        loop_thread.join().unwrap();
+
+        let (level, max) = levels.iter().copied().max().unwrap();
+        assert!(
+            level <= max * 3 / 2,
+            "appsrc held {level} bytes over a limit of {max}"
+        );
+        let dropped = crate::branch_drop::branch_dropped_frames()
+            .with_label_values(&[camera_id.to_string().as_str(), "restream"])
+            .get();
+        assert!(
+            dropped > 0,
+            "the stalled viewer never backed up into the appsrc"
+        );
+
+        assert_eq!(
+            dropped_before_stall, 0,
+            "frames were skipped before the viewer stalled"
+        );
+        let pushed = pushed.lock().unwrap();
+        assert!(stalled_from > 40, "the restream did not start");
+        assert!(
+            pushed.len() > resumed_from + 40,
+            "the restream did not resume: {} buffers before, {} after",
+            resumed_from,
+            pushed.len()
+        );
+        let gaps: Vec<_> = pushed
+            .windows(2)
+            .filter(|w| w[1].0 - w[0].0 > Duration::from_millis(150))
+            .collect();
+        assert!(!gaps.is_empty(), "no frames were skipped");
+        assert!(
+            gaps.iter().all(|w| w[1].1),
+            "the restream resumed on a delta frame"
         );
     }
 }
