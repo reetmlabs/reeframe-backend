@@ -24,6 +24,10 @@ use gstreamer_rtsp_server::prelude::*;
 use uuid::Uuid;
 use vms_core::VmsError;
 
+/// How much video the restream media's `appsrc` may hold before the bridge
+/// stops pushing, for example while a viewer stops reading.
+const APPSRC_BACKLOG: Duration = Duration::from_secs(2);
+
 /// Handle to a running restream bridge: the tee tap on the source pipeline and
 /// the RTSP mount factory it feeds.
 pub struct RestreamBridgeHandle {
@@ -148,11 +152,18 @@ pub fn attach(
     // `seen_keyframe` starts `false` per connection, and buffers are dropped
     // until a keyframe (`!DELTA_UNIT`) arrives. A decoder starting mid-GOP has
     // no reference frame and shows corrupt frames.
+    //
+    // `appsrc` queues without blocking, so its `max-bytes` is kept at about
+    // `APPSRC_BACKLOG` of video, measured from `bytes_seen`. While the appsrc
+    // holds more than that, frames are dropped (`behind`) up to the next
+    // keyframe that finds it back under the limit.
     struct AppsrcState {
         appsrc: AppSrc,
         started_at: std::time::Instant,
         seen_keyframe: bool,
         caps_set: bool,
+        bytes_seen: u64,
+        behind: bool,
     }
     let appsrc_slot: Arc<Mutex<Option<AppsrcState>>> = Arc::new(Mutex::new(None));
 
@@ -176,6 +187,8 @@ pub fn attach(
             started_at: std::time::Instant::now(),
             seen_keyframe: false,
             caps_set: false,
+            bytes_seen: 0,
+            behind: false,
         });
 
         let slot_for_unprepared = slot_for_configure.clone();
@@ -186,6 +199,7 @@ pub fn attach(
 
     // -- Forward tapped buffers into whichever appsrc is currently active --
     let slot_for_sink = appsrc_slot;
+    let reporter = crate::branch_drop::DropReporter::new(camera_id, branch_suffix);
     appsink.set_callbacks(
         gstreamer_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -206,12 +220,26 @@ pub fn attach(
                     }
                     if let Some(buffer) = sample.buffer() {
                         let is_keyframe = !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+                        state.bytes_seen += buffer.size() as u64;
+                        let elapsed = state.started_at.elapsed();
+                        if is_keyframe && elapsed >= Duration::from_secs(1) {
+                            let limit = state.bytes_seen as u128 * APPSRC_BACKLOG.as_millis()
+                                / elapsed.as_millis();
+                            state.appsrc.set_max_bytes(limit as u64);
+                        }
                         if !state.seen_keyframe {
                             if !is_keyframe {
                                 return Ok(gstreamer::FlowSuccess::Ok);
                             }
                             state.seen_keyframe = true;
                         }
+                        let full = state.appsrc.current_level_bytes() > state.appsrc.max_bytes();
+                        if full || (state.behind && !is_keyframe) {
+                            state.behind = true;
+                            reporter.dropped(1);
+                            return Ok(gstreamer::FlowSuccess::Ok);
+                        }
+                        state.behind = false;
 
                         let pts = gstreamer::ClockTime::from_nseconds(
                             state.started_at.elapsed().as_nanos() as u64,
