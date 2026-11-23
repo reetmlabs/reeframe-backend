@@ -150,7 +150,7 @@ pub async fn list_recordings(
 /// chunk, for starting playback at a point in the past. `stream_url` is a
 /// Range-enabled MP4 (`GET /recordings/{id}/stream`); the caller loads it and
 /// seeks to `offset_secs`. No transcoding is needed because chunks are
-/// faststart-remuxed on close.
+/// written with `moov` before `mdat`.
 ///
 /// If `at` falls in a gap (camera offline, outside recorded history, or only
 /// an open chunk from a camera that isn't recording), responds `404` with the
@@ -205,8 +205,7 @@ pub async fn get_playback(
 /// Serves the chunk's MP4 file off disk with `Accept-Ranges: bytes` support
 /// (`salvo::fs::NamedFile` handles Range parsing, `206 Partial Content`,
 /// ETag/If-None-Match, etc.). A `<video>` element can seek without
-/// server-side work because chunks are faststart-remuxed (`moov` before
-/// `mdat`) when they close.
+/// server-side work because chunks are written with `moov` before `mdat`.
 #[handler]
 pub async fn stream_recording(
     req: &mut Request,

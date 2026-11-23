@@ -22,6 +22,8 @@ The `rtsp.*` settings keep their names.
 
 - New recordings are written to a folder per camera, `{recording_dir}/cam_<id>/`, and exports to `{recording_dir}/exports/`. Recordings made before this release stay where they are and still play back, export and expire as before.
 
+- Recordings are written with their index at the front, so closing a chunk no longer rewrites the whole file. A chunk cut off by a crash plays up to about 10 seconds before the crash.
+
 ### Fixed
 
 - A faststart remux or export trim that fails no longer leaves its temp file next to the chunk. Temp files left by a crash are now also cleaned up from camera folders at startup.

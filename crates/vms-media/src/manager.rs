@@ -117,9 +117,9 @@ const STALE_TMP_SUFFIXES: [&str; 2] = [".faststart.tmp", ".export_trim.tmp.mp4"]
 
 /// Remove temp files left by a previous process.
 ///
-/// `remux_faststart` and `export_range` write next to the chunk they work on
-/// and clean up on success, so a match here is usually from a process killed
-/// mid-write. Chunks sit either directly in `recording_dir` (older layout) or
+/// `export_range` writes next to the chunk it works on and cleans up on success,
+/// so a match here is usually from a process killed mid-write. The
+/// `.faststart.tmp` files come from older versions. Chunks sit either directly in `recording_dir` (older layout) or
 /// in its per-camera folders, so both levels are scanned. Runs once in
 /// `MediaManager::new()`. Best-effort: a leftover file is only clutter.
 fn cleanup_stale_tmp_files(recording_dir: &Path) {

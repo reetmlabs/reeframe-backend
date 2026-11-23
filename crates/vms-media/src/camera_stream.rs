@@ -882,10 +882,9 @@ async fn drain_recording_branch(
                 );
                 if let Some(file_path) = naming.current_path() {
                     naming.close_ack.lock().unwrap().take();
-                    let codec = naming.codec.lock().unwrap().clone();
                     let chunk_event_tx = chunk_event_tx.clone();
                     tokio::task::spawn_blocking(move || {
-                        finalize_fragment_file(camera_id, file_path, codec, chunk_event_tx);
+                        finalize_fragment_file(camera_id, file_path, chunk_event_tx);
                     });
                 }
                 return;
@@ -1322,11 +1321,7 @@ const MIN_PLAUSIBLE_CHUNK_BYTES: u64 = 1024;
 ///
 /// Wakes a drain waiting on this fragment, then on a blocking thread sends
 /// `RecordingChunkEvent::Closed` (or `Discarded`, see
-/// `MIN_PLAUSIBLE_CHUNK_BYTES`) and only afterwards runs the faststart remux.
-/// The remux can take a long time and shutdown does not wait for it, so the
-/// event must not depend on it: a chunk whose `end_time` is never written is
-/// skipped by retention and the coverage sweep. The remux is best-effort; a
-/// chunk without it still plays but cannot be streamed progressively.
+/// `MIN_PLAUSIBLE_CHUNK_BYTES`).
 fn handle_fragment_closed(
     camera_id: Uuid,
     elem: &gstreamer::message::Element,
@@ -1356,16 +1351,15 @@ fn handle_fragment_closed(
         }
     }
 
-    let codec = naming.codec.lock().unwrap().clone();
     let chunk_event_tx = chunk_event_tx.clone();
 
     tokio::task::spawn_blocking(move || {
-        finalize_fragment_file(camera_id, file_path, codec, chunk_event_tx);
+        finalize_fragment_file(camera_id, file_path, chunk_event_tx);
     });
 }
 
 /// `stat()` `file_path` and index it as `Closed` (or `Discarded` below
-/// `MIN_PLAUSIBLE_CHUNK_BYTES`), then try the faststart remux.
+/// `MIN_PLAUSIBLE_CHUNK_BYTES`).
 ///
 /// Used by `handle_fragment_closed` and by `drain_recording_branch`'s timeout
 /// fallback, so a fragment whose close message never arrives is still
@@ -1374,7 +1368,6 @@ fn handle_fragment_closed(
 fn finalize_fragment_file(
     camera_id: Uuid,
     file_path: String,
-    codec: Option<String>,
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
 ) {
     let on_disk_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
@@ -1395,116 +1388,10 @@ fn finalize_fragment_file(
 
     let _ = chunk_event_tx.send(RecordingChunkEvent::Closed {
         camera_id,
-        file_path: file_path.clone(),
+        file_path,
         end_time: chrono::Utc::now(),
         size_bytes: on_disk_size as i64,
     });
-
-    // Best-effort from here on; nothing depends on the remux succeeding.
-    if let Some(codec) = codec.as_deref().and_then(codec_for) {
-        if let Err(e) = remux_faststart(&file_path, codec.parse_factory) {
-            tracing::warn!(
-                camera_id = %camera_id,
-                file_path,
-                error = %e,
-                "Faststart remux failed, chunk stays playable, just not progressively seekable",
-            );
-        }
-    }
-}
-
-/// Rewrite `path` in place so its `moov` atom comes before `mdat`, which lets
-/// HTTP Range requests stream the chunk progressively.
-///
-/// Doing this inside `splitmuxsink` breaks reconnects (see the faststart note
-/// above `build_recording_branch`), so it runs as a separate one-shot
-/// pipeline over the closed file. That costs an extra demux and remux per
-/// chunk but cannot affect live recording.
-///
-/// Blocking; call from `spawn_blocking`, never from the async bus watcher.
-fn remux_faststart(path: &str, parse_factory: &str) -> Result<(), VmsError> {
-    let tmp_path = format!("{path}.faststart.tmp");
-
-    let pipeline = gstreamer::Pipeline::new();
-    let filesrc = gstreamer::ElementFactory::make("filesrc")
-        .property("location", path)
-        .build()
-        .map_err(|e| VmsError::Media(format!("faststart filesrc: {e}")))?;
-    let demux = gstreamer::ElementFactory::make("qtdemux")
-        .build()
-        .map_err(|e| VmsError::Media(format!("faststart qtdemux: {e}")))?;
-    let parse = gstreamer::ElementFactory::make(parse_factory)
-        .build()
-        .map_err(|e| VmsError::Media(format!("faststart {parse_factory}: {e}")))?;
-    let mux = gstreamer::ElementFactory::make("mp4mux")
-        .property("faststart", true)
-        .build()
-        .map_err(|e| VmsError::Media(format!("faststart mp4mux: {e}")))?;
-    let sink = gstreamer::ElementFactory::make("filesink")
-        .property("location", &tmp_path)
-        .build()
-        .map_err(|e| VmsError::Media(format!("faststart filesink: {e}")))?;
-
-    pipeline
-        .add_many([&filesrc, &demux, &parse, &mux, &sink])
-        .map_err(|e| VmsError::Media(format!("faststart add_many: {e}")))?;
-
-    filesrc
-        .link(&demux)
-        .map_err(|e| VmsError::Media(format!("faststart link filesrc->demux: {e}")))?;
-    gstreamer::Element::link_many([&parse, &mux, &sink])
-        .map_err(|e| VmsError::Media(format!("faststart link parse->mux->sink: {e}")))?;
-
-    // qtdemux only exposes its src pad once it has parsed the file's moov.
-    let parse_weak = parse.downgrade();
-    demux.connect_pad_added(move |_demux, pad| {
-        let Some(parse) = parse_weak.upgrade() else {
-            return;
-        };
-        let Some(sink_pad) = parse.static_pad("sink") else {
-            return;
-        };
-        if sink_pad.is_linked() {
-            return;
-        }
-        if let Err(e) = pad.link(&sink_pad) {
-            tracing::error!("faststart remux: link demux->parse failed: {e}");
-        }
-    });
-
-    let result = run_faststart_pipeline(&pipeline);
-    pipeline.set_state(gstreamer::State::Null).ok();
-
-    let result = result.and_then(|()| std::fs::rename(&tmp_path, path).map_err(VmsError::from));
-    if result.is_err() {
-        // A partial remux would otherwise sit next to the chunk until restart.
-        std::fs::remove_file(&tmp_path).ok();
-    }
-    result
-}
-
-/// Play the faststart pipeline until EOS, an error, or a 30 s stall.
-fn run_faststart_pipeline(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
-    pipeline
-        .set_state(gstreamer::State::Playing)
-        .map_err(|e| VmsError::Media(format!("faststart pipeline start: {e}")))?;
-
-    let bus = pipeline.bus().expect("pipeline bus missing");
-    loop {
-        let Some(msg) = bus.timed_pop(gstreamer::ClockTime::from_seconds(30)) else {
-            return Err(VmsError::Media("faststart remux timed out".into()));
-        };
-        match msg.view() {
-            gstreamer::MessageView::Eos(_) => return Ok(()),
-            gstreamer::MessageView::Error(e) => {
-                return Err(VmsError::Media(format!(
-                    "faststart remux error: {}",
-                    e.error()
-                )));
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Wall-clock timestamp prefix for a recording session.
@@ -2348,19 +2235,5 @@ mod recording_path_tests {
         build_recording_branch(camera_id, &dir.0, 60, &naming, &tx).unwrap();
 
         assert!(camera_recording_dir(&dir.0, camera_id).is_dir());
-    }
-
-    #[test]
-    fn failed_faststart_remux_leaves_no_tmp_file() {
-        gstreamer::init().ok();
-        let dir = ScratchDir::new();
-        let chunk = dir.0.join("not_an_mp4.mp4");
-        std::fs::write(&chunk, b"definitely not an mp4").unwrap();
-        let chunk = chunk.to_string_lossy().to_string();
-
-        assert!(remux_faststart(&chunk, "h264parse").is_err());
-
-        assert!(!std::path::Path::new(&format!("{chunk}.faststart.tmp")).exists());
-        assert!(std::path::Path::new(&chunk).exists());
     }
 }
