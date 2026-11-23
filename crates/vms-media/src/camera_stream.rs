@@ -2000,9 +2000,9 @@ mod attach_tests {
     }
 
     /// Connects to `url` over RTSP with TCP-interleaved transport and a small
-    /// receive buffer, and starts playback. The caller reads the media.
-    fn rtsp_play(port: u16, url: &str) -> std::net::TcpStream {
-        use std::io::Write;
+    /// receive buffer, up to the SETUP response. Returns the connection and the
+    /// session id.
+    fn rtsp_setup(port: u16, url: &str) -> (std::net::TcpStream, String) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2041,12 +2041,211 @@ mod attach_tests {
             .unwrap()
             .trim()
             .to_owned();
+        (stream, session)
+    }
+
+    /// Starts playback of a session from [`rtsp_setup`]. The caller reads the
+    /// media.
+    fn rtsp_start(stream: &mut std::net::TcpStream, url: &str, session: &str) {
+        use std::io::Write;
         stream
             .write_all(
                 format!("PLAY {url} RTSP/1.0\r\nCSeq: 3\r\nSession: {session}\r\n\r\n").as_bytes(),
             )
             .unwrap();
+    }
+
+    /// Connects to `url` and starts playback.
+    fn rtsp_play(port: u16, url: &str) -> std::net::TcpStream {
+        let (mut stream, session) = rtsp_setup(port, url);
+        rtsp_start(&mut stream, url, &session);
         stream
+    }
+
+    /// A live source pipeline restreamed at `/test` on a local RTSP server.
+    struct TestRestream {
+        camera_id: Uuid,
+        pipeline: gstreamer::Pipeline,
+        tee_bytes: Arc<std::sync::atomic::AtomicU64>,
+        main_loop: glib::MainLoop,
+        loop_thread: Option<std::thread::JoinHandle<()>>,
+        _server: gstreamer_rtsp_server::RTSPServer,
+        appsrc: Arc<std::sync::Mutex<Option<gstreamer_app::AppSrc>>>,
+        /// PTS of every buffer leaving the media's appsrc.
+        pushed: Arc<std::sync::Mutex<Vec<Duration>>>,
+        port: u16,
+        url: String,
+    }
+
+    impl TestRestream {
+        /// 20 fps with a keyframe every second, at about `kbps`.
+        fn new(kbps: u32, branch_suffix: &str) -> Self {
+            use gstreamer_rtsp_server::prelude::*;
+            use std::sync::atomic::Ordering::SeqCst;
+
+            let camera_id = Uuid::new_v4();
+            let (pipeline, _, key_rx) = live_gop_pipeline_from(
+                camera_id,
+                &format!(
+                    "videotestsrc is-live=true pattern=snow ! video/x-raw,width=320,height=240,framerate=20/1 \
+                     ! x264enc key-int-max=20 bitrate={kbps} tune=zerolatency speed-preset=ultrafast \
+                     ! h264parse"
+                ),
+            );
+            let tee_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counted = tee_bytes.clone();
+            let tee = pipeline.by_name(&tee_name(camera_id)).unwrap();
+            tee.static_pad("sink").unwrap().add_probe(
+                gstreamer::PadProbeType::BUFFER,
+                move |_, info| {
+                    counted.fetch_add(info.buffer().unwrap().size() as u64, SeqCst);
+                    gstreamer::PadProbeReturn::Ok
+                },
+            );
+            pipeline.set_state(gstreamer::State::Playing).unwrap();
+            key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+            let context = glib::MainContext::new();
+            let main_loop = glib::MainLoop::new(Some(&context), false);
+            let server = gstreamer_rtsp_server::RTSPServer::new();
+            server.set_address("127.0.0.1");
+            server.set_service("0");
+            let mounts = server.mount_points().unwrap();
+            server.attach(Some(&context)).unwrap();
+            let loop_thread = {
+                let main_loop = main_loop.clone();
+                std::thread::spawn(move || main_loop.run())
+            };
+            crate::restream_bridge::attach(
+                &pipeline,
+                &tee_name(camera_id),
+                camera_id,
+                branch_suffix,
+                &mounts,
+                "/test",
+                "H264",
+            )
+            .unwrap();
+
+            let appsrc: Arc<std::sync::Mutex<Option<gstreamer_app::AppSrc>>> = Arc::default();
+            let pushed: Arc<std::sync::Mutex<Vec<Duration>>> = Arc::default();
+            let (appsrc_slot, pts_log) = (appsrc.clone(), pushed.clone());
+            mounts
+                .match_("/test")
+                .0
+                .connect_media_configure(move |_, media| {
+                    let bin = media.element().downcast::<gstreamer::Bin>().unwrap();
+                    let src = bin.by_name("src").unwrap();
+                    let pts_log = pts_log.clone();
+                    src.static_pad("src").unwrap().add_probe(
+                        gstreamer::PadProbeType::BUFFER,
+                        move |_, info| {
+                            let pts = info.buffer().unwrap().pts().unwrap();
+                            pts_log
+                                .lock()
+                                .unwrap()
+                                .push(Duration::from_nanos(pts.nseconds()));
+                            gstreamer::PadProbeReturn::Ok
+                        },
+                    );
+                    *appsrc_slot.lock().unwrap() = src.downcast().ok();
+                });
+
+            let port = server.bound_port() as u16;
+            Self {
+                camera_id,
+                pipeline,
+                tee_bytes,
+                main_loop,
+                loop_thread: Some(loop_thread),
+                _server: server,
+                appsrc,
+                pushed,
+                port,
+                url: format!("rtsp://127.0.0.1:{port}/test"),
+            }
+        }
+
+        /// Bytes the media's appsrc holds and its limit.
+        fn backlog(&self) -> (u64, u64) {
+            let appsrc = self.appsrc.lock().unwrap();
+            let appsrc = appsrc.as_ref().unwrap();
+            (appsrc.current_level_bytes(), appsrc.max_bytes())
+        }
+
+        fn dropped(&self, branch_suffix: &str) -> u64 {
+            crate::branch_drop::branch_dropped_frames()
+                .with_label_values(&[self.camera_id.to_string().as_str(), branch_suffix])
+                .get()
+        }
+    }
+
+    impl Drop for TestRestream {
+        fn drop(&mut self) {
+            self.pipeline.set_state(gstreamer::State::Null).ok();
+            self.main_loop.quit();
+            if let Some(thread) = self.loop_thread.take() {
+                thread.join().ok();
+            }
+        }
+    }
+
+    /// Reads and discards `stream` until it closes.
+    fn drain(mut stream: std::net::TcpStream) -> std::thread::JoinHandle<()> {
+        use std::io::Read;
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 64 * 1024];
+            while !matches!(stream.read(&mut buf), Ok(0) | Err(_)) {}
+        })
+    }
+
+    /// A viewer that starts playing long after it connected gets every frame,
+    /// and the appsrc goes back to its 2 s limit.
+    fn late_viewer_loses_no_frames(branch_suffix: &str) {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let restream = TestRestream::new(2000, branch_suffix);
+        let start = (std::time::Instant::now(), restream.tee_bytes.load(SeqCst));
+        let (mut stream, session) = rtsp_setup(restream.port, &restream.url);
+        std::thread::sleep(Duration::from_secs(6));
+        let (connecting_level, _) = restream.backlog();
+
+        rtsp_start(&mut stream, &restream.url, &session);
+        let reader = drain(stream.try_clone().unwrap());
+        std::thread::sleep(Duration::from_secs(4));
+        let (level, limit) = restream.backlog();
+        let rate = (restream.tee_bytes.load(SeqCst) - start.1) / start.0.elapsed().as_secs();
+        let dropped = restream.dropped(branch_suffix);
+        let pushed = restream.pushed.lock().unwrap().clone();
+        stream.shutdown(std::net::Shutdown::Both).ok();
+        reader.join().unwrap();
+
+        assert!(
+            connecting_level > rate * 3,
+            "only {connecting_level} bytes were queued before PLAY at {rate} B/s"
+        );
+        assert_eq!(dropped, 0, "frames were dropped before the viewer played");
+        assert!(pushed.len() > 160, "only {} frames were sent", pushed.len());
+        let gap = pushed.windows(2).map(|w| w[1].saturating_sub(w[0])).max();
+        assert!(
+            gap < Some(Duration::from_millis(500)),
+            "frames are missing: {gap:?}"
+        );
+        assert!(level < rate, "{level} bytes are still queued");
+        assert!(
+            limit < rate * 4,
+            "the limit stayed at {limit} bytes at {rate} B/s"
+        );
+    }
+
+    #[test]
+    fn a_late_main_restream_viewer_loses_no_frames() {
+        late_viewer_loses_no_frames("restream");
+    }
+
+    #[test]
+    fn a_late_sub_restream_viewer_loses_no_frames() {
+        late_viewer_loses_no_frames("subrestream");
     }
 
     /// A restream viewer that stops reading leaves the media's `appsrc` near
