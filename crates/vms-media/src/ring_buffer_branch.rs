@@ -118,7 +118,7 @@ pub fn attach(
         .link(&appsink)
         .map_err(|e| VmsError::Media(format!("link rbqueue->appsink: {e}")))?;
     for el in [appsink.upcast_ref::<gstreamer::Element>(), &queue] {
-        el.sync_state_with_parent()
+        crate::camera_stream::sync_branch_state(el)
             .map_err(|e| VmsError::Media(format!("sync ring buffer state: {e}")))?;
     }
 

@@ -430,6 +430,24 @@ fn tee_name(camera_id: Uuid) -> String {
     format!("cam_{}_tee", camera_id.as_simple())
 }
 
+/// Bring an element added to a camera pipeline to the state the pipeline is
+/// heading for. Camera pipelines only target `Null` or `Playing`, but while an
+/// async sink like `splitmuxsink` prerolls the pipeline reports `Paused`, and a
+/// branch synced to that waits for a preroll that its own full queue prevents.
+pub(crate) fn sync_branch_state(el: &gstreamer::Element) -> Result<(), gstreamer::glib::BoolError> {
+    let parent_state = el
+        .parent()
+        .and_then(|p| p.downcast::<gstreamer::Element>().ok())
+        .map(|p| p.current_state());
+    match parent_state {
+        Some(gstreamer::State::Paused | gstreamer::State::Playing) => el
+            .set_state(gstreamer::State::Playing)
+            .map(|_| ())
+            .map_err(|e| gstreamer::glib::bool_error!("set {} to Playing: {e}", el.name())),
+        _ => el.sync_state_with_parent(),
+    }
+}
+
 /// How long to wait for the video codec to link into `tee`. SDP negotiation
 /// normally takes under a second.
 const CODEC_WIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -613,11 +631,8 @@ fn link_recording_branch(
     downstream_first.extend(recparse);
     downstream_first.push(queue);
     for el in downstream_first {
-        el.sync_state_with_parent().map_err(|e| {
-            VmsError::Media(format!(
-                "attach recording branch: sync_state_with_parent: {e}"
-            ))
-        })?;
+        sync_branch_state(el)
+            .map_err(|e| VmsError::Media(format!("attach recording branch: sync state: {e}")))?;
     }
 
     let tee_src = tee.request_pad_simple("src_%u").ok_or_else(|| {
@@ -957,6 +972,57 @@ impl ReconnectPolicy {
     }
 }
 
+// -- Data-flow watchdog --
+
+/// Records when a buffer last reached a pipeline's tee. A pipeline blocked
+/// downstream, or fed by an RTSP session that went quiet, posts no bus
+/// message, so the reconnect monitors poll this instead.
+pub(crate) struct FlowWatchdog {
+    started: std::time::Instant,
+    last_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl FlowWatchdog {
+    /// Watch buffers on the sink pad of `pipeline`'s element `tee_name`.
+    /// `None` if the pipeline has no such element.
+    pub(crate) fn install(pipeline: &gstreamer::Pipeline, tee_name: &str) -> Option<Self> {
+        let sink = pipeline.by_name(tee_name)?.static_pad("sink")?;
+        let started = std::time::Instant::now();
+        let last_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let last_in_probe = last_ms.clone();
+        sink.add_probe(
+            gstreamer::PadProbeType::BUFFER | gstreamer::PadProbeType::BUFFER_LIST,
+            move |_, _| {
+                last_in_probe.store(
+                    started.elapsed().as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                gstreamer::PadProbeReturn::Ok
+            },
+        );
+        Some(Self { started, last_ms })
+    }
+
+    /// Start a new quiet period, as if a buffer had just arrived.
+    pub(crate) fn reset(&self) {
+        self.last_ms.store(
+            self.started.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Time since the last buffer or [`Self::reset`].
+    pub(crate) fn idle(&self) -> Duration {
+        let last = Duration::from_millis(self.last_ms.load(std::sync::atomic::Ordering::Relaxed));
+        self.started.elapsed().saturating_sub(last)
+    }
+}
+
+/// How often a monitor checks its [`FlowWatchdog`] against `stall_timeout`.
+pub(crate) fn stall_check_period(stall_timeout: Duration) -> Duration {
+    (stall_timeout / 4).max(Duration::from_millis(100))
+}
+
 // -- Reconnect monitor task --
 
 /// Spawn a tokio task that watches the GStreamer bus and reconnects on error/EOS.
@@ -969,6 +1035,9 @@ impl ReconnectPolicy {
 /// Also watches for `splitmuxsink-fragment-closed` bus (element) messages to
 /// backfill each chunk's `end_time`/`size_bytes` via `chunk_event_tx` once the
 /// file is finalized on disk.
+///
+/// A pipeline whose tee receives no buffer for `stall_timeout` is restarted
+/// the same way as one that posted an error.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_monitor(
     camera_id: Uuid,
@@ -976,6 +1045,7 @@ pub(crate) fn spawn_monitor(
     naming: Arc<ChunkNaming>,
     recording_dir: PathBuf,
     chunk_duration_secs: u64,
+    stall_timeout: Duration,
     chunk_event_tx: mpsc::UnboundedSender<RecordingChunkEvent>,
     pipeline_live_tx: mpsc::UnboundedSender<Uuid>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -987,9 +1057,11 @@ pub(crate) fn spawn_monitor(
         let bus = gst_pipeline.bus().expect("pipeline bus missing");
         let mut bus_stream = bus.stream();
         let mut policy = ReconnectPolicy::new();
+        let watchdog = FlowWatchdog::install(&gst_pipeline, &tee_name(camera_id));
+        let mut stall_check = tokio::time::interval(stall_check_period(stall_timeout));
 
         'outer: loop {
-            // -- Watch bus until Error/EOS or shutdown --
+            // -- Watch bus until Error/EOS, a stall or shutdown --
             let needs_reconnect = 'watch: loop {
                 tokio::select! {
                     maybe_msg = bus_stream.next() => {
@@ -1023,6 +1095,17 @@ pub(crate) fn spawn_monitor(
                                 handle_fragment_closed(camera_id, elem, &naming, &chunk_event_tx);
                             }
                             _ => {}
+                        }
+                    }
+                    _ = stall_check.tick() => {
+                        let idle = watchdog.as_ref().map_or(Duration::ZERO, FlowWatchdog::idle);
+                        if idle >= stall_timeout {
+                            tracing::warn!(
+                                camera_id = %camera_id,
+                                idle_secs = idle.as_secs(),
+                                "No data from the camera, will reconnect",
+                            );
+                            break 'watch true;
                         }
                     }
                     _ = &mut shutdown_rx => break 'outer,
@@ -1111,6 +1194,9 @@ pub(crate) fn spawn_monitor(
                     Ok(_) => {
                         tracing::info!(camera_id = %camera_id, "Camera stream restarted");
                         policy.record_attempt();
+                        if let Some(w) = &watchdog {
+                            w.reset();
+                        }
                         // Lets the task that owns recording intent resume
                         // recording as soon as the stream is back.
                         let _ = pipeline_live_tx.send(camera_id);
@@ -1707,6 +1793,97 @@ mod attach_tests {
         pipeline.add(&tee).unwrap();
 
         assert!(wait_for_codec_wired(&pipeline, camera_id).await.is_err());
+    }
+
+    /// A live H264 source at 20 fps with a keyframe every 2 s feeding the
+    /// camera's tee, plus a counter of buffers that reach the tee and a
+    /// channel that fires on the first keyframe.
+    fn live_gop_pipeline(
+        camera_id: Uuid,
+    ) -> (
+        gstreamer::Pipeline,
+        Arc<std::sync::atomic::AtomicU64>,
+        std::sync::mpsc::Receiver<()>,
+    ) {
+        gstreamer::init().ok();
+        let src = gstreamer::parse::bin_from_description(
+            "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=20/1 \
+             ! x264enc key-int-max=40 tune=zerolatency speed-preset=ultrafast ! h264parse",
+            true,
+        )
+        .unwrap();
+        let pipeline = pipeline_with_tee(camera_id);
+        let tee = pipeline.by_name(&tee_name(camera_id)).unwrap();
+        tee.set_property("allow-not-linked", true);
+        let caps_filter = tee
+            .static_pad("sink")
+            .unwrap()
+            .peer()
+            .unwrap()
+            .parent_element()
+            .unwrap();
+        pipeline.add(&src).unwrap();
+        src.link(&caps_filter).unwrap();
+
+        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (key_tx, key_rx) = std::sync::mpsc::sync_channel(1);
+        let count_in_probe = count.clone();
+        let tee_sink = pipeline
+            .by_name(&tee_name(camera_id))
+            .unwrap()
+            .static_pad("sink")
+            .unwrap();
+        tee_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            count_in_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(buf) = info.buffer() {
+                if !buf.flags().contains(gstreamer::BufferFlags::DELTA_UNIT) {
+                    let _ = key_tx.try_send(());
+                }
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+        (pipeline, count, key_rx)
+    }
+
+    /// Recording waits for a full GOP before it prerolls. A restream branch
+    /// attached in that window must still run, or its queue fills and blocks
+    /// the tee for good.
+    #[test]
+    fn branches_attached_while_recording_prerolls_keep_the_tee_flowing() {
+        let camera_id = Uuid::new_v4();
+        let (pipeline, count, key_rx) = live_gop_pipeline(camera_id);
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Skip the first keyframe so the next one comes a full GOP later.
+        let _ = key_rx.try_recv();
+        key_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let naming = ChunkNaming::new();
+        *naming.codec.lock().unwrap() = Some("H264".into());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let scratch = ScratchDir::new();
+        attach_recording_branch(camera_id, &pipeline, &naming, &tx, &scratch.0, 60).unwrap();
+        let mounts = gstreamer_rtsp_server::RTSPMountPoints::new();
+        let _bridge = crate::restream_bridge::attach(
+            &pipeline,
+            &tee_name(camera_id),
+            camera_id,
+            "restream",
+            &mounts,
+            "/test",
+            "H264",
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_secs(4));
+        let before = count.load(std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_secs(2));
+        let after = count.load(std::sync::atomic::Ordering::SeqCst);
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        assert!(
+            after - before >= 20,
+            "tee stalled: {before} -> {after} buffers"
+        );
     }
 }
 
