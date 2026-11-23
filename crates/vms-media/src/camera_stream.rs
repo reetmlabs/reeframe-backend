@@ -2248,6 +2248,33 @@ mod attach_tests {
         late_viewer_loses_no_frames("subrestream");
     }
 
+    /// A viewer that connects and never plays leaves about 30 s of video in
+    /// the media's appsrc.
+    #[test]
+    fn a_restream_viewer_that_never_plays_keeps_the_appsrc_bounded() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let restream = TestRestream::new(300, "restream");
+        let start = (std::time::Instant::now(), restream.tee_bytes.load(SeqCst));
+        let (_stream, _session) = rtsp_setup(restream.port, &restream.url);
+        let mut highest = 0;
+        while start.0.elapsed() < Duration::from_secs(42) {
+            std::thread::sleep(Duration::from_millis(250));
+            highest = highest.max(restream.backlog().0);
+        }
+        let rate = (restream.tee_bytes.load(SeqCst) - start.1) / start.0.elapsed().as_secs();
+
+        assert!(
+            highest <= rate * 34,
+            "the appsrc held {highest} bytes at {rate} B/s"
+        );
+        assert!(
+            highest >= rate * 25,
+            "the appsrc held only {highest} bytes at {rate} B/s"
+        );
+        assert!(restream.dropped("restream") > 0, "nothing was dropped");
+    }
+
     /// A restream viewer that stops reading leaves the media's `appsrc` near
     /// its limit instead of growing it, and once the viewer reads again the
     /// stream resumes on a keyframe.
