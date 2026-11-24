@@ -1104,6 +1104,17 @@ impl FlowWatchdog {
     }
 }
 
+/// Take the messages already queued on a monitor's bus stream, without
+/// waiting. A stopped pipeline's leftover messages stay in the stream, since
+/// going to `Null` flushes only the bus itself.
+pub(crate) fn take_queued_messages(
+    bus_stream: &mut (impl futures::Stream<Item = gstreamer::Message> + Unpin),
+) -> Vec<gstreamer::Message> {
+    use futures::{FutureExt as _, StreamExt as _};
+
+    std::iter::from_fn(|| bus_stream.next().now_or_never().flatten()).collect()
+}
+
 /// How often a monitor checks its [`FlowWatchdog`] against `stall_timeout`.
 pub(crate) fn stall_check_period(stall_timeout: Duration) -> Duration {
     (stall_timeout / 4).max(Duration::from_millis(100))
@@ -1274,6 +1285,14 @@ pub(crate) fn spawn_monitor(
                         "Failed to rebuild recording branch, will retry",
                     );
                     continue 'reconnect;
+                }
+
+                // An error or EOS of the stopped session must not end the new
+                // one, but a chunk it closed still has to be indexed.
+                for msg in take_queued_messages(&mut bus_stream) {
+                    if let MessageView::Element(elem) = msg.view() {
+                        handle_fragment_closed(camera_id, elem, &naming, &chunk_event_tx);
+                    }
                 }
 
                 match gst_pipeline.set_state(gstreamer::State::Playing) {

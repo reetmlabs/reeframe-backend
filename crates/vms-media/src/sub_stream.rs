@@ -11,7 +11,7 @@ use uuid::Uuid;
 use vms_core::VmsError;
 
 use crate::camera_stream::{
-    codec_for, stall_check_period, FlowWatchdog, ReconnectPolicy, WaitPlan,
+    codec_for, stall_check_period, take_queued_messages, FlowWatchdog, ReconnectPolicy, WaitPlan,
 };
 
 fn tee_name(camera_id: Uuid) -> String {
@@ -255,6 +255,9 @@ pub(crate) fn spawn_sub_monitor(
                         }
                     }
                 }
+
+                // An error or EOS of the stopped session must not end the new one.
+                take_queued_messages(&mut bus_stream);
 
                 match gst_pipeline.set_state(gstreamer::State::Playing) {
                     Ok(_) => {
