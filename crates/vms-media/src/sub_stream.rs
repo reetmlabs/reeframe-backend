@@ -280,3 +280,63 @@ pub(crate) fn spawn_sub_monitor(
         tracing::info!(camera_id = %camera_id, "Sub-stream monitor exited");
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// On a current-thread runtime the monitor cannot run between the two
+    /// errors, so the second one is still queued when it stops the pipeline.
+    #[tokio::test]
+    async fn an_error_of_the_stopped_session_does_not_end_the_next_one() {
+        gstreamer::init().unwrap();
+        let pipeline = gstreamer::parse::launch("fakesrc is-live=true ! fakesink name=sink")
+            .unwrap()
+            .downcast::<gstreamer::Pipeline>()
+            .unwrap();
+        // Each start of the pipeline sends one segment to the sink.
+        let starts = Arc::new(AtomicU32::new(0));
+        let counted = starts.clone();
+        let sink = pipeline.by_name("sink").unwrap();
+        sink.static_pad("sink").unwrap().add_probe(
+            gstreamer::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                if info
+                    .event()
+                    .is_some_and(|e| e.type_() == gstreamer::EventType::Segment)
+                {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+                gstreamer::PadProbeReturn::Ok
+            },
+        );
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let monitor = spawn_sub_monitor(
+            Uuid::new_v4(),
+            pipeline.clone(),
+            Duration::from_secs(60),
+            shutdown_rx,
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        for text in ["first", "second"] {
+            gstreamer::element_error!(pipeline, gstreamer::ResourceError::Write, ("{}", text));
+        }
+        // The first backoff is 2 s and a second one would last until 6 s.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(
+            pipeline.current_state(),
+            gstreamer::State::Playing,
+            "the restarted pipeline was stopped again"
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+
+        shutdown_tx.send(()).unwrap();
+        monitor.await.unwrap();
+    }
+}
