@@ -58,6 +58,9 @@ pub enum ValidationCategory {
     /// A transport node has a contact list but its destination isn't email,
     /// the only transport that delivers to one.
     UnsupportedContactList,
+    /// An action setting has a value the action can't use, such as a
+    /// `transcode` codec that isn't supported.
+    UnsupportedSetting,
 }
 
 impl ValidationCategory {
@@ -370,6 +373,25 @@ pub fn check_contact_list_destinations(
                 Some(n.id),
                 "contact lists are only supported for email destinations",
             ))
+        })
+        .collect()
+}
+
+/// An action whose settings can't be used at run time. Only `transcode` has
+/// settings checked this way (see `vms_core::video_encoding::check_transcode`).
+pub fn check_action_settings(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
+    nodes
+        .iter()
+        .filter_map(|n| match n.action_config.as_ref()? {
+            ActionConfig::Transcode(cfg) => {
+                let err = vms_core::video_encoding::check_transcode(cfg).err()?;
+                Some(ValidationIssue::new(
+                    ValidationCategory::UnsupportedSetting,
+                    Some(n.id),
+                    format!("transcode: {err}"),
+                ))
+            }
+            _ => None,
         })
         .collect()
 }
