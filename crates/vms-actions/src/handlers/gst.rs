@@ -2,16 +2,25 @@ use std::path::Path;
 
 use gstreamer::prelude::*;
 use gstreamer_pbutils::prelude::*;
+use vms_core::video_encoding::{fit_h264_frame, H264Complexity};
 use vms_core::VmsError;
 
 // -- Codec detection --
 
-/// Probe the first video stream in `path` and return its GStreamer caps structure
-/// name (e.g. `"video/x-h264"`, `"video/x-h265"`, `"video/x-av1"`).
+/// The first video stream of a file: its caps structure name (e.g.
+/// `"video/x-h264"`) and frame size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoProbe {
+    pub caps_name: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Probe the first video stream in `path`.
 ///
 /// Returns `None` if the file cannot be discovered or contains no video stream.
 /// Called from a blocking context only (`spawn_blocking`).
-pub fn probe_video_codec(path: &Path) -> Option<String> {
+pub fn probe_video(path: &Path) -> Option<VideoProbe> {
     let uri = format!("file://{}", path.to_str()?);
     let timeout = gstreamer::ClockTime::from_seconds(5);
     let discoverer = gstreamer_pbutils::Discoverer::new(timeout).ok()?;
@@ -19,27 +28,123 @@ pub fn probe_video_codec(path: &Path) -> Option<String> {
 
     for stream in info.stream_list() {
         if let Ok(video) = stream.downcast::<gstreamer_pbutils::DiscovererVideoInfo>() {
-            if let Some(caps) = video.caps() {
-                if let Some(s) = caps.structure(0) {
-                    return Some(s.name().to_string());
-                }
-            }
+            let caps_name = video.caps()?.structure(0)?.name().to_string();
+            return Some(VideoProbe {
+                caps_name,
+                width: video.width(),
+                height: video.height(),
+            });
         }
     }
     None
 }
 
-/// Map a GStreamer caps structure name to an encoder element name.
+/// The caps structure name of the first video stream in `path` (e.g.
+/// `"video/x-h264"`, `"video/x-h265"`, `"video/x-av1"`). See [`probe_video`].
+#[cfg(test)]
+pub fn probe_video_codec(path: &Path) -> Option<String> {
+    probe_video(path).map(|p| p.caps_name)
+}
+
+// -- Encoders --
+
+/// Bitrate for jobs that encode without a bitrate setting (watermark and
+/// merge_clips), in bits per second.
+pub const DEFAULT_ENCODE_BITRATE_BPS: u32 = 2_048_000;
+
+/// A bin of `openh264enc` encoding at `bitrate_bps` and the `h264parse` that
+/// lets any muxer take its output. Fails with a clear error if the element
+/// (gst-plugins-bad with libopenh264) is not installed.
 ///
-/// `"video/x-h265"` → `x265enc`, `"video/x-av1"` → `svtav1enc`; everything
-/// else → `x264enc`. SVT-AV1 is used over `av1enc` (libaom) because it
-/// encodes many times faster at comparable quality.
-pub fn codec_to_encoder(caps_name: &str) -> &'static str {
-    match caps_name {
-        "video/x-h265" => "x265enc",
-        "video/x-av1" => "svtav1enc",
-        _ => "x264enc",
+/// `qp-min=1` lets the rate control use the whole quantizer range; at the
+/// default of 0 OpenH264 overshoots the bitrate several times over. Frames are
+/// never skipped, so very noisy video can still exceed the bitrate.
+pub fn make_h264_encoder(
+    bitrate_bps: u32,
+    complexity: H264Complexity,
+) -> Result<gstreamer::Element, VmsError> {
+    if gstreamer::ElementFactory::find("openh264enc").is_none() {
+        return Err(VmsError::Media(
+            "H.264 encoding needs the GStreamer element openh264enc \
+             (gstreamer1.0-plugins-bad with libopenh264), which is not available"
+                .into(),
+        ));
     }
+    let encoder = gstreamer::ElementFactory::make("openh264enc")
+        .property_from_str("rate-control", "bitrate")
+        .property("bitrate", bitrate_bps)
+        .property("qp-min", 1u32)
+        .property_from_str("complexity", complexity.as_str())
+        .property_from_str("slice-mode", "auto")
+        .build()
+        .map_err(|e| VmsError::Media(format!("openh264enc: {e}")))?;
+    let parse = gstreamer::ElementFactory::make("h264parse")
+        .build()
+        .map_err(|e| VmsError::Media(format!("h264parse: {e}")))?;
+
+    let bin = gstreamer::Bin::new();
+    bin.add_many([&encoder, &parse])
+        .and_then(|()| encoder.link(&parse))
+        .map_err(|e| VmsError::Media(format!("H.264 encoder bin: {e}")))?;
+    for (element, pad) in [(&encoder, "sink"), (&parse, "src")] {
+        let target = element.static_pad(pad).expect("static pad");
+        let ghost = gstreamer::GhostPad::builder_with_target(&target)
+            .map_err(|e| VmsError::Media(format!("H.264 encoder bin: {e}")))?
+            .name(pad)
+            .build();
+        bin.add_pad(&ghost)
+            .map_err(|e| VmsError::Media(format!("H.264 encoder bin: {e}")))?;
+    }
+    Ok(bin.upcast())
+}
+
+/// The encoder for a job that keeps the source codec where it can: AV1 stays
+/// AV1 (`svtav1enc`), everything else, H.265 included, is encoded to H.264.
+pub fn make_output_encoder(caps_name: &str) -> Result<gstreamer::Element, VmsError> {
+    if !output_is_h264(caps_name) {
+        return gstreamer::ElementFactory::make("svtav1enc")
+            .build()
+            .map_err(|e| VmsError::Media(format!("svtav1enc: {e}")));
+    }
+    make_h264_encoder(DEFAULT_ENCODE_BITRATE_BPS, H264Complexity::Medium)
+}
+
+/// Whether [`make_output_encoder`] encodes `caps_name` to H.264.
+pub fn output_is_h264(caps_name: &str) -> bool {
+    caps_name != "video/x-av1"
+}
+
+/// The size an H.264 output of `width`x`height` has to be scaled to, or
+/// `None` if it fits the encoder. Logs when scaling is needed.
+pub fn h264_fit(job: &str, width: u32, height: u32) -> Option<(u32, u32)> {
+    let (w, h) = fit_h264_frame(width, height)?;
+    tracing::info!(
+        job,
+        from = %format!("{width}x{height}"),
+        to = %format!("{w}x{h}"),
+        "Scaling the video down to fit the H.264 encoder's frame size limit",
+    );
+    Some((w, h))
+}
+
+/// A `videoscale` and the `capsfilter` after it that scale raw video to
+/// `width`x`height`.
+pub fn make_scaler(
+    width: u32,
+    height: u32,
+) -> Result<(gstreamer::Element, gstreamer::Element), VmsError> {
+    let scale = gstreamer::ElementFactory::make("videoscale")
+        .build()
+        .map_err(|e| VmsError::Media(format!("videoscale: {e}")))?;
+    let caps = gstreamer::Caps::builder("video/x-raw")
+        .field("width", width as i32)
+        .field("height", height as i32)
+        .build();
+    let filter = gstreamer::ElementFactory::make("capsfilter")
+        .property("caps", &caps)
+        .build()
+        .map_err(|e| VmsError::Media(format!("capsfilter: {e}")))?;
+    Ok((scale, filter))
 }
 
 /// Map a GStreamer caps structure name to a parser element name.
@@ -378,6 +483,6 @@ mod codec_mapping_tests {
     fn av1_maps_to_av1_elements() {
         assert_eq!(codec_to_parser("video/x-av1"), "av1parse");
         assert_eq!(codec_to_software_decoder("video/x-av1"), "av1dec");
-        assert_eq!(codec_to_encoder("video/x-av1"), "svtav1enc");
+        assert!(!output_is_h264("video/x-av1"));
     }
 }

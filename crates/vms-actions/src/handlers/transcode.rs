@@ -5,6 +5,7 @@ use vms_core::{
     action::TranscodeConfig,
     node::{NodeInput, NodeOutput},
     pipeline::NodeId,
+    video_encoding::{parse_resolution, H264Complexity, TranscodeCodec},
     VmsError,
 };
 
@@ -18,7 +19,9 @@ use crate::dispatcher::ActionContext;
 /// Pipeline: `filesrc → decodebin → videoconvert → [videoscale → capsfilter] →
 /// encoder → muxer → filesink`
 ///
-/// Audio is dropped (routed to fakesink). Only the video stream is transcoded.
+/// The scaler is there when `resolution` is set, or when an H.264 output
+/// would be larger than the encoder accepts. Audio is dropped (routed to
+/// fakesink). Only the video stream is transcoded.
 pub async fn execute(
     node_id: NodeId,
     cfg: &TranscodeConfig,
@@ -87,7 +90,16 @@ fn transcode_blocking(input: &Path, cfg: &TranscodeConfig, output: &Path) -> Res
         .build()
         .map_err(|e| VmsError::Media(format!("videoconvert: {e}")))?;
 
-    let encoder = make_encoder(cfg)?;
+    vms_core::video_encoding::check_transcode(cfg).map_err(VmsError::Media)?;
+    let codec = TranscodeCodec::parse(&cfg.codec).map_err(VmsError::Media)?;
+    let size = match &cfg.resolution {
+        Some(res) => Some(parse_resolution(res).map_err(VmsError::Media)?),
+        None if codec == TranscodeCodec::H264 => gst_util::probe_video(input)
+            .and_then(|p| gst_util::h264_fit("transcode", p.width, p.height)),
+        None => None,
+    };
+
+    let encoder = make_encoder(codec, cfg)?;
     let muxer = make_muxer(&cfg.output_format)?;
 
     let sink = gstreamer::ElementFactory::make("filesink")
@@ -96,39 +108,20 @@ fn transcode_blocking(input: &Path, cfg: &TranscodeConfig, output: &Path) -> Res
         .map_err(|e| VmsError::Media(format!("filesink: {e}")))?;
 
     // -- Assemble pipeline --
-    // With optional resolution override: convert → [scale → capsfilter] → encoder → muxer → sink
-    if let Some(ref res) = cfg.resolution {
-        let (w, h) = parse_resolution(res)?;
-
-        let scale = gstreamer::ElementFactory::make("videoscale")
-            .build()
-            .map_err(|e| VmsError::Media(format!("videoscale: {e}")))?;
-
-        let caps = gstreamer::Caps::builder("video/x-raw")
-            .field("width", w)
-            .field("height", h)
-            .build();
-        let filter = gstreamer::ElementFactory::make("capsfilter")
-            .property("caps", &caps)
-            .build()
-            .map_err(|e| VmsError::Media(format!("capsfilter: {e}")))?;
-
-        pipeline
-            .add_many([
-                &src, &decode, &convert, &scale, &filter, &encoder, &muxer, &sink,
-            ])
-            .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
-
-        gstreamer::Element::link_many([&convert, &scale, &filter, &encoder, &muxer, &sink])
-            .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
-    } else {
-        pipeline
-            .add_many([&src, &decode, &convert, &encoder, &muxer, &sink])
-            .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
-
-        gstreamer::Element::link_many([&convert, &encoder, &muxer, &sink])
-            .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
+    // convert → [scale → capsfilter] → encoder → muxer → sink
+    let mut chain = vec![convert.clone()];
+    if let Some((w, h)) = size {
+        let (scale, filter) = gst_util::make_scaler(w, h)?;
+        chain.extend([scale, filter]);
     }
+    chain.extend([encoder, muxer, sink]);
+
+    pipeline
+        .add_many([&src, &decode])
+        .and_then(|()| pipeline.add_many(&chain))
+        .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
+    gstreamer::Element::link_many(&chain)
+        .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
 
     src.link(&decode)
         .map_err(|e| VmsError::Media(format!("link src→decode: {e}")))?;
@@ -147,25 +140,21 @@ fn transcode_blocking(input: &Path, cfg: &TranscodeConfig, output: &Path) -> Res
 
 // -- Helpers --
 
-fn make_encoder(cfg: &TranscodeConfig) -> Result<gstreamer::Element, VmsError> {
-    let (factory, bitrate_prop, bitrate_val, has_preset) = match cfg.codec.as_str() {
-        "h264" => ("x264enc", "bitrate", cfg.bitrate_kbps, true),
-        "h265" | "hevc" => ("x265enc", "bitrate", cfg.bitrate_kbps, true),
-        "vp9" => ("vp9enc", "target-bitrate", cfg.bitrate_kbps * 1000, false),
-        "av1" => ("av1enc", "target-bitrate", cfg.bitrate_kbps, false),
-        other => {
-            tracing::warn!("transcode: unknown codec '{other}', falling back to x264enc");
-            ("x264enc", "bitrate", cfg.bitrate_kbps, true)
+fn make_encoder(
+    codec: TranscodeCodec,
+    cfg: &TranscodeConfig,
+) -> Result<gstreamer::Element, VmsError> {
+    let bitrate_bps = cfg.bitrate_kbps.saturating_mul(1000);
+    let (factory, bitrate_prop, bitrate) = match codec {
+        TranscodeCodec::H264 => {
+            let complexity = H264Complexity::from_preset(&cfg.preset).map_err(VmsError::Media)?;
+            return gst_util::make_h264_encoder(bitrate_bps, complexity);
         }
+        TranscodeCodec::Vp9 => ("vp9enc", "target-bitrate", bitrate_bps),
+        TranscodeCodec::Av1 => ("av1enc", "target-bitrate", cfg.bitrate_kbps),
     };
-
-    let mut builder = gstreamer::ElementFactory::make(factory).property(bitrate_prop, bitrate_val);
-
-    if has_preset && !cfg.preset.is_empty() {
-        builder = builder.property_from_str("speed-preset", &cfg.preset);
-    }
-
-    builder
+    gstreamer::ElementFactory::make(factory)
+        .property(bitrate_prop, bitrate)
         .build()
         .map_err(|e| VmsError::Media(format!("{factory}: {e}")))
 }
@@ -186,41 +175,4 @@ fn make_muxer(format: &str) -> Result<gstreamer::Element, VmsError> {
     gstreamer::ElementFactory::make(factory)
         .build()
         .map_err(|e| VmsError::Media(format!("{factory}: {e}")))
-}
-
-fn parse_resolution(res: &str) -> Result<(i32, i32), VmsError> {
-    let parts: Vec<&str> = res.split('x').collect();
-    if parts.len() != 2 {
-        return Err(VmsError::Media(format!(
-            "invalid resolution '{res}', expected WxH (e.g. 1920x1080)"
-        )));
-    }
-    let w = parts[0]
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| VmsError::Media(format!("invalid width in resolution '{res}'")))?;
-    let h = parts[1]
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| VmsError::Media(format!("invalid height in resolution '{res}'")))?;
-    Ok((w, h))
-}
-
-// -- Tests --
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_resolution_valid() {
-        assert_eq!(parse_resolution("1920x1080").unwrap(), (1920, 1080));
-        assert_eq!(parse_resolution("1280x720").unwrap(), (1280, 720));
-    }
-
-    #[test]
-    fn parse_resolution_invalid() {
-        assert!(parse_resolution("bad").is_err());
-        assert!(parse_resolution("1920").is_err());
-    }
 }
