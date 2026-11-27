@@ -126,7 +126,7 @@ sudo apt install pkg-config libssl-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice
+  gstreamer1.0-libav gstreamer1.0-nice
 
 cargo build --release
 VMS_ENCRYPTION_KEY=... VMS_AUTH__JWT_SECRET=... ./target/release/vms-daemon
