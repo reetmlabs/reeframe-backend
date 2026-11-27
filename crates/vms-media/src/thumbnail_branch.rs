@@ -522,7 +522,7 @@ mod attach_tests {
         let pipeline = gstreamer::parse::launch(&format!(
             "videotestsrc is-live=true pattern={pattern} ! \
              video/x-raw,width=320,height=180,framerate=25/1 ! \
-             x264enc tune=zerolatency key-int-max=10 ! h264parse config-interval=-1 ! \
+             openh264enc complexity=low gop-size=10 ! h264parse config-interval=-1 ! \
              video/x-h264,stream-format=byte-stream,alignment=au ! tee name={tee_name}"
         ))
         .unwrap()

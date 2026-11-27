@@ -595,7 +595,7 @@ mod tests {
         let pipeline = gstreamer::parse::launch(&format!(
             "videotestsrc is-live=true pattern=ball \
              ! video/x-raw,width=320,height=240,framerate=25/1 \
-             ! x264enc tune=zerolatency key-int-max=25 ! h264parse \
+             ! openh264enc complexity=low gop-size=25 ! h264parse \
              ! tee name={tee_name} allow-not-linked=true"
         ))
         .unwrap()
@@ -709,7 +709,7 @@ mod tests {
         let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
         let pipeline = gstreamer::parse::launch(&format!(
             "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=25/1 \
-             ! x264enc tune=zerolatency key-int-max=25 ! h264parse \
+             ! openh264enc complexity=low gop-size=25 ! h264parse \
              ! tee name={tee_name} allow-not-linked=true"
         ))
         .unwrap()
