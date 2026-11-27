@@ -10,6 +10,8 @@ env:
   CARGO_TERM_COLOR: always
   # CI uses SQLite only, so no external database is needed
   DATABASE_URL: sqlite:./feeds.db?mode=rwc
+  # cargo-deny release installed on GitHub-hosted runners; keep the self-hosted runner on the same one
+  CARGO_DENY_VERSION: 0.22.2
 
 jobs:
   lint:
@@ -58,11 +60,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Install cargo-deny
+        if: runner.environment == 'github-hosted'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
+
       # Every dependency must use a license allowed in deny.toml
       - name: License check
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check licenses
+        run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check licenses
 
   test:
     name: test
