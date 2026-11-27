@@ -14,7 +14,8 @@ env:
 jobs:
   lint:
     name: fmt · clippy · licenses
-    runs-on: ubuntu-24.04
+    # PRs from forks run on GitHub-hosted runners, everything else on the self-hosted runner
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || fromJSON('["self-hosted","linux","x64","wsl"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -61,7 +62,7 @@ jobs:
 
   test:
     name: test
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || fromJSON('["self-hosted","linux","x64","wsl"]') }}
     steps:
       - uses: actions/checkout@v4
 
