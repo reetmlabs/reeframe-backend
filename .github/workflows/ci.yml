@@ -53,6 +53,9 @@ jobs:
 
       # Caches the registry and target dir, keyed on Cargo.lock and the toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep ~/.cargo/bin as it is, so the self-hosted runner's preinstalled cargo-deny survives the post step
+          cache-bin: "false"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -138,6 +141,9 @@ jobs:
 
       # Caches the registry and target dir, keyed on Cargo.lock and the toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep ~/.cargo/bin as it is, so the self-hosted runner's preinstalled cargo-deny survives the post step
+          cache-bin: "false"
 
       - name: Test
         run: cargo test --all-targets

@@ -77,6 +77,8 @@ stable toolchain through rustup, with these components:
 
 cargo-deny 0.22.2, on the runner user's `PATH`. The version is pinned as
 `CARGO_DENY_VERSION` at the top of `ci.yml`; keep the two the same.
+CI runs `Swatinem/rust-cache` with `cache-bin: "false"`, so it leaves
+`~/.cargo/bin` alone and does not remove binaries installed there.
 
 ```sh
 cargo install --locked cargo-deny --version 0.22.2
