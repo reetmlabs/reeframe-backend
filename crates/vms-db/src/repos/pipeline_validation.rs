@@ -995,6 +995,43 @@ mod tests {
     }
 
     #[test]
+    fn supported_transcode_settings_are_not_flagged() {
+        assert!(check_action_settings(&[action_node(transcode_config())]).is_empty());
+    }
+
+    #[test]
+    fn h265_transcode_output_is_flagged_as_an_error() {
+        let mut cfg = transcode_config();
+        if let vms_core::action::ActionConfig::Transcode(t) = &mut cfg {
+            t.codec = "h265".into();
+        }
+        let node = action_node(cfg);
+
+        let issues = check_action_settings(std::slice::from_ref(&node));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::UnsupportedSetting);
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, Some(node.id));
+        assert!(issues[0].message.contains("H.265"), "{}", issues[0].message);
+    }
+
+    #[test]
+    fn a_transcode_resolution_too_large_for_h264_is_flagged() {
+        let mut cfg = transcode_config();
+        if let vms_core::action::ActionConfig::Transcode(t) = &mut cfg {
+            t.resolution = Some("7680x4320".into());
+        }
+
+        let issues = check_action_settings(&[action_node(cfg)]);
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0].message.contains("too large"),
+            "{}",
+            issues[0].message
+        );
+    }
+
+    #[test]
     fn transcode_with_no_upstream_artifact_is_flagged() {
         let root = base_node(CoreNodeType::TriggerRoot);
         let transcode = action_node(transcode_config());
