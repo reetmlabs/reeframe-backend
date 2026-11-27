@@ -137,7 +137,14 @@ jobs:
           sudo dpkg-divert --divert $PLUGINS/libgstlibav.so.distrib --rename --add $PLUGINS/libgstlibav.so
           sudo install -m644 ~/gst-libav/libgstlibav.so $PLUGINS/
           rm -rf ~/.cache/gstreamer-1.0
-          gst-inspect-1.0 libav | grep -E 'Version +1\.24\.2$'
+
+      # Runs on every runner, so a self-hosted image with the wrong plugin fails here
+      - name: Check gst-libav version
+        run: |
+          if ! gst-inspect-1.0 libav | grep -E 'Version +1\.24\.2$' >/dev/null; then
+            echo "::error::gst-libav 1.24.2 is required but gst-inspect-1.0 libav reports a different or missing version. See docs/ci-runner.md for how to install it."
+            exit 1
+          fi
 
       # Caches the registry and target dir, keyed on Cargo.lock and the toolchain
       - uses: Swatinem/rust-cache@v2

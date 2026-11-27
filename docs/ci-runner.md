@@ -57,7 +57,8 @@ dpkg-divert --divert $PLUGINS/libgstlibav.so.distrib --rename --add $PLUGINS/lib
 install -m644 build/ext/libav/libgstlibav.so $PLUGINS/
 ```
 
-Check it as the runner user (clear its GStreamer registry cache first):
+The test job fails with an error pointing here unless this check passes.
+Run it as the runner user (clear its GStreamer registry cache first):
 
 ```sh
 rm -rf ~/.cache/gstreamer-1.0
