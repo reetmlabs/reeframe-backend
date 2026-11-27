@@ -353,7 +353,7 @@ pub fn wait_for_eos(pipeline: &gstreamer::Pipeline) -> Result<(), VmsError> {
 
 #[cfg(test)]
 fn make_test_clip(path: &Path) {
-    make_test_clip_with(path, "x264enc");
+    make_test_clip_with(path, "openh264enc ! h264parse");
 }
 
 /// Writes a short 64x64 MP4 test clip encoded with `encoder`.
