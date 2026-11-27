@@ -28,3 +28,4 @@ The `rtsp.*` settings keep their names.
 ### Fixed
 
 - A faststart remux or export trim that fails no longer leaves its temp file next to the chunk. Temp files left by a crash are now also cleaned up from camera folders at startup.
+- A camera that reconnects is no longer disconnected again by an error left over from its previous session.

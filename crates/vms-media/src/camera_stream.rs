@@ -1104,6 +1104,17 @@ impl FlowWatchdog {
     }
 }
 
+/// Take the messages already queued on a monitor's bus stream, without
+/// waiting. A stopped pipeline's leftover messages stay in the stream, since
+/// going to `Null` flushes only the bus itself.
+pub(crate) fn take_queued_messages(
+    bus_stream: &mut (impl futures::Stream<Item = gstreamer::Message> + Unpin),
+) -> Vec<gstreamer::Message> {
+    use futures::{FutureExt as _, StreamExt as _};
+
+    std::iter::from_fn(|| bus_stream.next().now_or_never().flatten()).collect()
+}
+
 /// How often a monitor checks its [`FlowWatchdog`] against `stall_timeout`.
 pub(crate) fn stall_check_period(stall_timeout: Duration) -> Duration {
     (stall_timeout / 4).max(Duration::from_millis(100))
@@ -1274,6 +1285,14 @@ pub(crate) fn spawn_monitor(
                         "Failed to rebuild recording branch, will retry",
                     );
                     continue 'reconnect;
+                }
+
+                // An error or EOS of the stopped session must not end the new
+                // one, but a chunk it closed still has to be indexed.
+                for msg in take_queued_messages(&mut bus_stream) {
+                    if let MessageView::Element(elem) = msg.view() {
+                        handle_fragment_closed(camera_id, elem, &naming, &chunk_event_tx);
+                    }
                 }
 
                 match gst_pipeline.set_state(gstreamer::State::Playing) {
@@ -1548,6 +1567,70 @@ mod reconnect_policy_tests {
             WaitPlan::Backoff(d) => assert_eq!(d.as_secs(), 4),
             WaitPlan::CircuitOpen(_) => panic!("should still be below the circuit threshold"),
         }
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    /// On a current-thread runtime the monitor cannot run between the two
+    /// errors, so the second one is still queued when it stops the pipeline.
+    #[tokio::test]
+    async fn an_error_of_the_stopped_session_does_not_end_the_next_one() {
+        gstreamer::init().unwrap();
+        let pipeline = gstreamer::parse::launch("fakesrc is-live=true ! fakesink")
+            .unwrap()
+            .downcast::<gstreamer::Pipeline>()
+            .unwrap();
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        let dir = std::env::temp_dir().join(format!("vms-monitor-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let chunk = dir.join("chunk.mp4").to_str().unwrap().to_owned();
+        std::fs::write(&chunk, vec![0; 4096]).unwrap();
+        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
+        let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let camera_id = Uuid::new_v4();
+        let monitor = spawn_monitor(
+            camera_id,
+            pipeline.clone(),
+            ChunkNaming::new(),
+            dir.clone(),
+            4,
+            Duration::from_secs(60),
+            chunk_tx,
+            live_tx,
+            shutdown_rx,
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for text in ["first", "second"] {
+            gstreamer::element_error!(pipeline, gstreamer::ResourceError::Write, ("{}", text));
+        }
+        let closed = gstreamer::Structure::builder("splitmuxsink-fragment-closed")
+            .field("location", &chunk)
+            .build();
+        pipeline
+            .post_message(gstreamer::message::Element::new(closed))
+            .unwrap();
+
+        let restarted = tokio::time::timeout(Duration::from_secs(20), live_rx.recv()).await;
+        assert_eq!(restarted, Ok(Some(camera_id)), "never restarted");
+        let again = tokio::time::timeout(Duration::from_secs(6), live_rx.recv()).await;
+        assert!(again.is_err(), "the pipeline was restarted twice");
+        assert_eq!(pipeline.current_state(), gstreamer::State::Playing);
+        assert!(
+            matches!(
+                chunk_rx.try_recv(),
+                Ok(RecordingChunkEvent::Closed { file_path, .. }) if file_path == chunk
+            ),
+            "the stopped session's chunk was not indexed"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        monitor.await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
