@@ -274,4 +274,19 @@ mod tests {
             std::fs::remove_file(clip).ok();
         }
     }
+
+    #[test]
+    fn large_h265_clips_merge_to_scaled_h264() {
+        use super::{gst_util, merge_blocking};
+
+        gstreamer::init().ok();
+        let clip = gst_util::large_h265_clip();
+        let output =
+            std::env::temp_dir().join(format!("merge_h265_out_{}.mp4", std::process::id()));
+
+        merge_blocking(&[clip.clone(), clip], "mp4", &output).unwrap();
+
+        gst_util::assert_scaled_h264(&output);
+        std::fs::remove_file(&output).ok();
+    }
 }

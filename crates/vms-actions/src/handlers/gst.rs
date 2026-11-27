@@ -371,6 +371,27 @@ pub(crate) fn make_test_clip_with(path: &Path, encoder: &str) {
     pipeline.set_state(gstreamer::State::Null).ok();
 }
 
+/// A 3-frame 4000x3000 H.265 clip, larger than the H.264 encoder accepts.
+#[cfg(test)]
+pub(crate) fn large_h265_clip() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h265_4000x3000.mp4")
+}
+
+/// Asserts that `path` is H.264 scaled down from [`large_h265_clip`]: even
+/// sizes within the encoder's limit, at the source's 4:3 aspect ratio.
+#[cfg(test)]
+pub(crate) fn assert_scaled_h264(path: &Path) {
+    let probe = probe_video(path).expect("a video stream");
+    assert_eq!(probe.caps_name, "video/x-h264");
+    let (w, h) = (probe.width, probe.height);
+    assert!(vms_core::video_encoding::fits_h264(w, h), "{w}x{h}");
+    assert_eq!((w % 2, h % 2), (0, 0), "{w}x{h}");
+    assert!(
+        (f64::from(w) / f64::from(h) - 4.0 / 3.0).abs() < 0.01,
+        "{w}x{h}"
+    );
+}
+
 #[cfg(test)]
 mod wire_decodebin_tests {
     use super::*;
@@ -478,6 +499,14 @@ mod wire_demux_video_tests {
 #[cfg(test)]
 mod codec_mapping_tests {
     use super::*;
+
+    #[test]
+    fn only_av1_keeps_its_codec() {
+        assert!(output_is_h264("video/x-h264"));
+        assert!(output_is_h264("video/x-h265"));
+        assert!(output_is_h264("video/x-vp9"));
+        assert!(!output_is_h264("video/x-av1"));
+    }
 
     #[test]
     fn av1_maps_to_av1_elements() {

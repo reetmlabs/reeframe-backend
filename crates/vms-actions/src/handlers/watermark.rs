@@ -277,4 +277,22 @@ mod tests {
         std::fs::remove_file(&input).ok();
         std::fs::remove_file(&output).ok();
     }
+
+    #[test]
+    fn a_large_h265_input_is_watermarked_as_scaled_h264() {
+        gstreamer::init().ok();
+        let output =
+            std::env::temp_dir().join(format!("watermark_h265_out_{}.mp4", std::process::id()));
+        let cfg = WatermarkConfig {
+            text_template: "cam".into(),
+            position: WatermarkPosition::TopLeft,
+            font_size: 12,
+            opacity: 1.0,
+        };
+
+        watermark_blocking(&gst_util::large_h265_clip(), "cam", &cfg, &output).unwrap();
+
+        gst_util::assert_scaled_h264(&output);
+        std::fs::remove_file(&output).ok();
+    }
 }
