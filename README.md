@@ -53,7 +53,7 @@ flowchart LR
 
 Triggers can be a schedule (cron or interval), an event from a camera or an external source, a system signal such as a camera disconnecting or a recording starting, a manual run, or a CPU, RAM or disk threshold.
 
-The actions are `extract_clip`, `snapshot`, `start_recording`, `stop_recording`, `transcode`, `watermark`, `merge_clips`, `compress`, `encrypt`, `render_notification` and `delay`. Results can go to local disk, S3, SFTP, an SMB share mounted on the host, email, Slack, Telegram or a webhook.
+The actions are `extract_clip`, `snapshot`, `start_recording`, `stop_recording`, `transcode`, `watermark`, `merge_clips`, `compress`, `encrypt`, `render_notification` and `delay`. `transcode`, `watermark` and `merge_clips` encode H.264 with OpenH264, and VP9 or AV1 on request; see [docs/video-encoding.md](docs/video-encoding.md). Results can go to local disk, S3, SFTP, an SMB share mounted on the host, email, Slack, Telegram or a webhook.
 
 Pipelines reload without a restart, and each camera only runs what its enabled pipelines need.
 
