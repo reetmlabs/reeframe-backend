@@ -155,17 +155,18 @@ pub enum PtzCommand {
 /// Configuration for the `transcode` action.
 ///
 /// Re-encodes the upstream artifact to a different codec, bitrate, or
-/// resolution using FFmpeg. Use this action, rather than `compress`, to reduce
-/// video file size.
+/// resolution using GStreamer. Use this action, rather than `compress`, to
+/// reduce video file size. [`crate::video_encoding::check_transcode`] checks it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscodeConfig {
-    /// Target codec name (e.g. `"h264"`, `"h265"`, `"vp9"`, `"av1"`).
+    /// Target codec: `"h264"`, `"vp9"` or `"av1"`.
     pub codec: String,
     /// Target bitrate in kilobits per second.
     pub bitrate_kbps: u32,
     /// Optional resolution override (e.g. `"1920x1080"`); `None` keeps the source resolution.
     pub resolution: Option<String>,
-    /// Encoder preset (e.g. `"fast"`, `"slow"`), passed directly to FFmpeg `-preset`.
+    /// x264-style speed preset (e.g. `"fast"`, `"slow"`), mapped to the
+    /// nearest OpenH264 complexity for H.264 and ignored for other codecs.
     pub preset: String,
     /// Container format for the output file (e.g. `"mp4"`, `"mkv"`).
     pub output_format: String,

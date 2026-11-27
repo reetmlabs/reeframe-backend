@@ -16,6 +16,7 @@
 //! | [`node`] | [`NodeInput`] / [`NodeOutput`]: data passed between nodes at execution time |
 //! | [`plugin`] | Async plugin traits (`AuthProvider`, `AnalyticsProvider`, `AuditSink`, `ClusterCoordinator`) |
 //! | [`source`] | [`SourceType`]: discriminator for external source adapters |
+//! | [`video_encoding`] | Codec, preset and frame size rules for encoding actions |
 
 pub mod action;
 pub mod error;
@@ -28,6 +29,7 @@ pub mod resource;
 pub mod settings;
 pub mod source;
 pub mod trigger;
+pub mod video_encoding;
 
 // -- Flat re-exports for ergonomic use in other crates --
 
