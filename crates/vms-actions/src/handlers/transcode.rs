@@ -181,3 +181,71 @@ fn make_muxer(format: &str) -> Result<gstreamer::Element, VmsError> {
         .build()
         .map_err(|e| VmsError::Media(format!("{factory}: {e}")))
 }
+
+// -- Tests --
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(codec: &str, resolution: Option<&str>) -> TranscodeConfig {
+        TranscodeConfig {
+            codec: codec.into(),
+            bitrate_kbps: 1000,
+            resolution: resolution.map(Into::into),
+            preset: "veryfast".into(),
+            output_format: "mp4".into(),
+        }
+    }
+
+    fn output(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("transcode_{name}_{}.mp4", std::process::id()))
+    }
+
+    #[test]
+    fn a_large_h265_source_is_transcoded_to_scaled_h264() {
+        let out = output("h265_to_h264");
+        transcode_blocking(&gst_util::large_h265_clip(), &config("h264", None), &out).unwrap();
+        gst_util::assert_scaled_h264(&out);
+        std::fs::remove_file(&out).ok();
+    }
+
+    #[test]
+    fn an_explicit_resolution_is_used() {
+        let out = output("resolution");
+        let cfg = config("h264", Some("320x240"));
+        transcode_blocking(&gst_util::large_h265_clip(), &cfg, &out).unwrap();
+        let probe = gst_util::probe_video(&out).unwrap();
+        assert_eq!((probe.width, probe.height), (320, 240));
+        std::fs::remove_file(&out).ok();
+    }
+
+    #[test]
+    fn vp9_output_still_works() {
+        let out = output("vp9");
+        let cfg = TranscodeConfig {
+            output_format: "webm".into(),
+            ..config("vp9", Some("320x240"))
+        };
+        transcode_blocking(&gst_util::large_h265_clip(), &cfg, &out).unwrap();
+        assert_eq!(
+            gst_util::probe_video_codec(&out).as_deref(),
+            Some("video/x-vp9")
+        );
+        std::fs::remove_file(&out).ok();
+    }
+
+    #[test]
+    fn unsupported_settings_fail_before_encoding() {
+        for (cfg, expected) in [
+            (config("h265", None), "H.265 output is not available"),
+            (config("x264enc", None), "unknown codec 'x264enc'"),
+            (config("h264", Some("8192x4320")), "too large for H.264"),
+        ] {
+            let out = output("refused");
+            let err = transcode_blocking(&gst_util::large_h265_clip(), &cfg, &out).unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+            assert!(!out.exists());
+        }
+    }
+}
