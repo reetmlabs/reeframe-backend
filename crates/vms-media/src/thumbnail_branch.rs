@@ -512,10 +512,49 @@ mod attach_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Luma mean and variance of a written JPEG, the values `is_blank` checks.
+    fn jpeg_luma(path: &std::path::Path) -> String {
+        let pipeline = gstreamer::parse::launch(&format!(
+            "filesrc location={} ! jpegdec ! videoconvert ! video/x-raw,format=I420 \
+             ! appsink name=sink",
+            path.display()
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Pipeline>()
+        .unwrap();
+        let sink = pipeline
+            .by_name("sink")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        let stats = sink
+            .pull_sample()
+            .ok()
+            .and_then(|sample| sample_luma(sample.buffer()?, sample.caps()?))
+            .map_or("unreadable".to_string(), |luma| {
+                let n = luma.len() as f64;
+                let mean = luma.iter().map(|&b| f64::from(b)).sum::<f64>() / n;
+                let variance = luma
+                    .iter()
+                    .map(|&b| (f64::from(b) - mean).powi(2))
+                    .sum::<f64>()
+                    / n;
+                format!("mean {mean:.1} variance {variance:.1}")
+            });
+        pipeline.set_state(gstreamer::State::Null).unwrap();
+        stats
+    }
+
     /// Plays a 25 fps H.264 test pattern for `run`, with a keyframe every 10
     /// frames and SPS/PPS on each keyframe like the live tees. Returns (frames
-    /// that reached the decoder, JPEGs written).
-    async fn run_branch(pattern: &str, interval: Duration, run: Duration) -> (usize, usize) {
+    /// that reached the decoder, JPEGs written, the decoders used and the luma
+    /// of each JPEG).
+    async fn run_branch(
+        pattern: &str,
+        interval: Duration,
+        run: Duration,
+    ) -> (usize, usize, String) {
         gstreamer::init().unwrap();
         let camera_id = Uuid::new_v4();
         let tee_name = format!("cam_{}_tee", camera_id.as_simple());
@@ -532,6 +571,16 @@ mod attach_tests {
 
         // Attach before playing: a tee with no src pads fails the pipeline.
         let handle = attach(&pipeline, &tee_name, camera_id, dir.clone(), interval).unwrap();
+
+        let decoders: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let added = decoders.clone();
+        pipeline.connect_deep_element_added(move |_, _, element| {
+            if let Some(factory) = element.factory() {
+                if factory.has_type(gstreamer::ElementFactoryType::DECODER) {
+                    added.lock().unwrap().push(factory.name().to_string());
+                }
+            }
+        });
 
         let decoded = Arc::new(AtomicUsize::new(0));
         let counter = decoded.clone();
@@ -550,16 +599,21 @@ mod attach_tests {
         handle.stop().await;
         pipeline.set_state(gstreamer::State::Null).unwrap();
 
-        let written = std::fs::read_dir(dir.join(format!("cam_{}", camera_id.as_simple())))
-            .map(|entries| entries.count())
-            .unwrap_or(0);
+        let jpegs: Vec<_> = std::fs::read_dir(dir.join(format!("cam_{}", camera_id.as_simple())))
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        let details = format!(
+            "decoders {:?}, thumbnails {:?}",
+            decoders.lock().unwrap(),
+            jpegs.iter().map(|p| jpeg_luma(p)).collect::<Vec<_>>()
+        );
         std::fs::remove_dir_all(&dir).ok();
-        (decoded.load(Ordering::SeqCst), written)
+        (decoded.load(Ordering::SeqCst), jpegs.len(), details)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn only_frames_needed_for_each_capture_are_decoded() {
-        let (decoded, written) =
+        let (decoded, written, _) =
             run_branch("ball", Duration::from_secs(1), Duration::from_secs(3)).await;
         // ~75 frames flow through the tee; a handful per capture should reach the decoder.
         assert!(
@@ -575,9 +629,9 @@ mod attach_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn black_and_white_footage_writes_no_thumbnail() {
         for pattern in ["black", "white"] {
-            let (_, written) =
+            let (_, written, details) =
                 run_branch(pattern, Duration::from_secs(1), Duration::from_secs(2)).await;
-            assert_eq!(written, 0, "pattern {pattern}");
+            assert_eq!(written, 0, "pattern {pattern}: {details}");
         }
     }
 }
