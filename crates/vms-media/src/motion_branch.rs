@@ -210,6 +210,19 @@ pub fn attach(
         .property("drop-only", true)
         .build()
         .map_err(|e| VmsError::Media(format!("motion videorate: {e}")))?;
+    // An H.264 stream without timing info has no frame rate, so its decoded
+    // frames have no duration, and videorate aborts the process on those.
+    if let Some(rate_sink) = rate.static_pad("sink") {
+        let sample = gstreamer::ClockTime::SECOND / SAMPLE_RATE_FPS as u64;
+        rate_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            if let Some(buffer) = info.buffer_mut() {
+                if buffer.duration().is_none() {
+                    buffer.make_mut().set_duration(sample);
+                }
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+    }
 
     let convert = gstreamer::ElementFactory::make("videoconvert")
         .name(convert_name(camera_id))
