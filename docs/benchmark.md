@@ -67,7 +67,7 @@ Most of the jump when the first camera turns on thumbnails or motion detection i
 
 ## Scripts
 
-`camsrv.py`, the fake cameras:
+`camsrv.py`, the fake cameras. It encodes with `x264enc` from gstreamer1.0-plugins-ugly, since OpenH264 cannot hold a constant bitrate on noise. The daemon does not need that package, so install it on the benchmark machine only:
 
 ```python
 #!/usr/bin/env python3
