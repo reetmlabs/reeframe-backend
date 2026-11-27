@@ -602,13 +602,18 @@ mod tests {
     /// Plays 3 s of live 25 fps H.264 with a keyframe every second into a tee
     /// with the motion branch attached in `mode`.
     async fn run_branch(mode: MotionMode) -> BranchCounts {
+        run_branch_after(mode, "").await
+    }
+
+    /// [`run_branch`] with `chain` inserted between the parser and the tee.
+    async fn run_branch_after(mode: MotionMode, chain: &str) -> BranchCounts {
         gstreamer::init().unwrap();
         let camera_id = Uuid::new_v4();
         let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
         let pipeline = gstreamer::parse::launch(&format!(
             "videotestsrc is-live=true pattern=ball \
              ! video/x-raw,width=320,height=240,framerate=25/1 \
-             ! openh264enc complexity=low gop-size=25 ! h264parse \
+             ! openh264enc complexity=low gop-size=25 ! h264parse {chain} \
              ! tee name={tee_name} allow-not-linked=true"
         ))
         .unwrap()
@@ -686,6 +691,15 @@ mod tests {
             "expected about {} frames at {SAMPLE_RATE_FPS} fps over 3 s, got {frames}",
             3 * SAMPLE_RATE_FPS
         );
+    }
+
+    /// After RTP the stream has no frame rate, since OpenH264 writes no timing
+    /// info, so its decoded frames have no duration.
+    #[tokio::test]
+    async fn a_stream_without_a_frame_rate_is_sampled() {
+        let rtp = "! rtph264pay ! rtph264depay ! h264parse";
+        let frames = run_branch_after(MotionMode::Full, rtp).await.analyzed;
+        assert!((3..=8).contains(&frames), "got {frames} frames over 3 s");
     }
 
     #[tokio::test]
