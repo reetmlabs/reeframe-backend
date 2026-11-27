@@ -145,18 +145,23 @@ fn make_encoder(
     cfg: &TranscodeConfig,
 ) -> Result<gstreamer::Element, VmsError> {
     let bitrate_bps = cfg.bitrate_kbps.saturating_mul(1000);
-    let (factory, bitrate_prop, bitrate) = match codec {
+    let builder = match codec {
         TranscodeCodec::H264 => {
             let complexity = H264Complexity::from_preset(&cfg.preset).map_err(VmsError::Media)?;
             return gst_util::make_h264_encoder(bitrate_bps, complexity);
         }
-        TranscodeCodec::Vp9 => ("vp9enc", "target-bitrate", bitrate_bps),
-        TranscodeCodec::Av1 => ("av1enc", "target-bitrate", cfg.bitrate_kbps),
+        // `vp9enc` takes a signed bits per second value, `av1enc` kilobits.
+        TranscodeCodec::Vp9 => gstreamer::ElementFactory::make("vp9enc").property(
+            "target-bitrate",
+            i32::try_from(bitrate_bps).unwrap_or(i32::MAX),
+        ),
+        TranscodeCodec::Av1 => {
+            gstreamer::ElementFactory::make("av1enc").property("target-bitrate", cfg.bitrate_kbps)
+        }
     };
-    gstreamer::ElementFactory::make(factory)
-        .property(bitrate_prop, bitrate)
+    builder
         .build()
-        .map_err(|e| VmsError::Media(format!("{factory}: {e}")))
+        .map_err(|e| VmsError::Media(format!("{codec:?} encoder: {e}")))
 }
 
 fn make_muxer(format: &str) -> Result<gstreamer::Element, VmsError> {
