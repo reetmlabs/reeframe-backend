@@ -28,6 +28,7 @@ See [docs/video-encoding.md](../docs/video-encoding.md).
 
 ### What's new
 
+- `watermark` and `merge_clips` take an optional `bitrate_kbps` (100 to 100000) for H.264 output. Without it the bitrate follows the output size, 4000 kbps at 1080p and 12000 kbps at 4K, instead of a fixed 2048 kbps. See [docs/video-encoding.md](../docs/video-encoding.md).
 - `rtsp.public_host` and `rtsp.public_port` set the host and port in restream URLs, so they work from the LAN when the daemon runs in Docker.
 - `rtsp.client_threads` sets how many threads handle restream clients (default 4).
 

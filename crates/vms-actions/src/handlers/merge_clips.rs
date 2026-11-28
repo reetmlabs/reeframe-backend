@@ -70,13 +70,15 @@ pub async fn execute(
         .join(format!("merged_{ts}.{}", cfg.output_format));
 
     let out_format = cfg.output_format.clone();
+    let bitrate_kbps = cfg.bitrate_kbps;
     let out_path = output_path.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || merge_blocking(&clips, &out_format, &out_path))
-            .await
-            .map_err(|e| format!("merge_clips task panic: {e}"))
-            .and_then(|r| r.map_err(|e| e.to_string()));
+    let result = tokio::task::spawn_blocking(move || {
+        merge_blocking(&clips, &out_format, bitrate_kbps, &out_path)
+    })
+    .await
+    .map_err(|e| format!("merge_clips task panic: {e}"))
+    .and_then(|r| r.map_err(|e| e.to_string()));
 
     match result {
         Ok(()) => {
@@ -98,7 +100,12 @@ pub async fn execute(
 ///
 /// All clips must have the same resolution and frame rate (guaranteed when
 /// clips come from the same camera). `videoconvert` normalises pixel formats.
-fn merge_blocking(clips: &[PathBuf], output_format: &str, output: &Path) -> Result<(), VmsError> {
+fn merge_blocking(
+    clips: &[PathBuf],
+    output_format: &str,
+    bitrate_kbps: Option<u32>,
+    output: &Path,
+) -> Result<(), VmsError> {
     gstreamer::init().ok();
 
     let Some(output_str) = output.to_str() else {
@@ -106,14 +113,10 @@ fn merge_blocking(clips: &[PathBuf], output_format: &str, output: &Path) -> Resu
     };
 
     let probe = clips.first().and_then(|p| gst_util::probe_video(p));
-    let caps_name = probe
-        .as_ref()
-        .map_or("video/x-h264", |p| p.caps_name.as_str());
-    let encoder = gst_util::make_output_encoder(caps_name)?;
-    let fit = probe
-        .as_ref()
-        .filter(|p| gst_util::output_is_h264(&p.caps_name))
-        .and_then(|p| gst_util::h264_fit("merge_clips", p.width, p.height));
+    let gst_util::OutputEncoder {
+        encoder,
+        scale_to: fit,
+    } = gst_util::make_output_encoder("merge_clips", probe.as_ref(), bitrate_kbps)?;
 
     let pipeline = gstreamer::Pipeline::new();
 
@@ -264,7 +267,7 @@ mod tests {
         }
         let output = dir.join(format!("merge_av1_out_{pid}.mp4"));
 
-        merge_blocking(&inputs, "mp4", &output).unwrap();
+        merge_blocking(&inputs, "mp4", None, &output).unwrap();
 
         assert_eq!(
             gst_util::probe_video_codec(&output).as_deref(),
@@ -284,7 +287,7 @@ mod tests {
         let output =
             std::env::temp_dir().join(format!("merge_h265_out_{}.mp4", std::process::id()));
 
-        merge_blocking(&[clip.clone(), clip], "mp4", &output).unwrap();
+        merge_blocking(&[clip.clone(), clip], "mp4", None, &output).unwrap();
 
         gst_util::assert_scaled_h264(&output);
         std::fs::remove_file(&output).ok();

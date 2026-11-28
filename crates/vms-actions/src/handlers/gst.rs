@@ -2,7 +2,9 @@ use std::path::Path;
 
 use gstreamer::prelude::*;
 use gstreamer_pbutils::prelude::*;
-use vms_core::video_encoding::{fit_h264_frame, H264Complexity};
+use vms_core::video_encoding::{
+    check_encode_bitrate, default_h264_bitrate_kbps, fit_h264_frame, H264Complexity,
+};
 use vms_core::VmsError;
 
 // -- Codec detection --
@@ -47,10 +49,6 @@ pub fn probe_video_codec(path: &Path) -> Option<String> {
 }
 
 // -- Encoders --
-
-/// Bitrate for jobs that encode without a bitrate setting (watermark and
-/// merge_clips), in bits per second.
-pub const DEFAULT_ENCODE_BITRATE_BPS: u32 = 2_048_000;
 
 /// A bin of `openh264enc` encoding at `bitrate_bps` and the `h264parse` that
 /// lets any muxer take its output. Fails with a clear error if the element
@@ -98,15 +96,40 @@ pub fn make_h264_encoder(
     Ok(bin.upcast())
 }
 
+/// The encoder of a `watermark` or `merge_clips` job, and the size to scale
+/// the video to before it, if any.
+pub struct OutputEncoder {
+    pub encoder: gstreamer::Element,
+    pub scale_to: Option<(u32, u32)>,
+}
+
 /// The encoder for a job that keeps the source codec where it can: AV1 stays
 /// AV1 (`svtav1enc`), everything else, H.265 included, is encoded to H.264.
-pub fn make_output_encoder(caps_name: &str) -> Result<gstreamer::Element, VmsError> {
-    if !output_is_h264(caps_name) {
-        return gstreamer::ElementFactory::make("svtav1enc")
+/// H.264 is encoded at `bitrate_kbps`, or at a default for the output frame
+/// size (1920x1080 when `probe` is `None`), after scaling to fit the encoder.
+pub fn make_output_encoder(
+    job: &str,
+    probe: Option<&VideoProbe>,
+    bitrate_kbps: Option<u32>,
+) -> Result<OutputEncoder, VmsError> {
+    check_encode_bitrate(bitrate_kbps).map_err(VmsError::Media)?;
+    if probe.is_some_and(|p| !output_is_h264(&p.caps_name)) {
+        let encoder = gstreamer::ElementFactory::make("svtav1enc")
             .build()
-            .map_err(|e| VmsError::Media(format!("svtav1enc: {e}")));
+            .map_err(|e| VmsError::Media(format!("svtav1enc: {e}")))?;
+        return Ok(OutputEncoder {
+            encoder,
+            scale_to: None,
+        });
     }
-    make_h264_encoder(DEFAULT_ENCODE_BITRATE_BPS, H264Complexity::Medium)
+    let scale_to = probe.and_then(|p| h264_fit(job, p.width, p.height));
+    let (width, height) = scale_to
+        .or(probe.map(|p| (p.width, p.height)))
+        .unwrap_or((1920, 1080));
+    let kbps = bitrate_kbps.unwrap_or_else(|| default_h264_bitrate_kbps(width, height));
+    tracing::debug!(job, kbps, size = %format!("{width}x{height}"), "H.264 output bitrate");
+    let encoder = make_h264_encoder(kbps * 1000, H264Complexity::Medium)?;
+    Ok(OutputEncoder { encoder, scale_to })
 }
 
 /// Whether [`make_output_encoder`] encodes `caps_name` to H.264.
@@ -506,6 +529,57 @@ mod codec_mapping_tests {
         assert!(output_is_h264("video/x-h265"));
         assert!(output_is_h264("video/x-vp9"));
         assert!(!output_is_h264("video/x-av1"));
+    }
+
+    fn h264_bitrate(output: &OutputEncoder) -> u32 {
+        let bin = output.encoder.downcast_ref::<gstreamer::Bin>().unwrap();
+        let encoder = bin
+            .iterate_elements()
+            .find(|e| e.factory().is_some_and(|f| f.name() == "openh264enc"))
+            .unwrap();
+        encoder.property("bitrate")
+    }
+
+    fn probe(caps_name: &str, width: u32, height: u32) -> VideoProbe {
+        VideoProbe {
+            caps_name: caps_name.into(),
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn the_h264_bitrate_defaults_from_the_output_size() {
+        gstreamer::init().unwrap();
+        let uhd = probe("video/x-h265", 3840, 2160);
+        let output = make_output_encoder("test", Some(&uhd), None).unwrap();
+        assert_eq!(output.scale_to, None);
+        assert_eq!(h264_bitrate(&output), 12_000_000);
+
+        let output = make_output_encoder("test", None, None).unwrap();
+        assert_eq!(h264_bitrate(&output), 4_000_000);
+
+        let large = probe("video/x-h264", 4000, 3000);
+        let output = make_output_encoder("test", Some(&large), None).unwrap();
+        let (w, h) = output.scale_to.unwrap();
+        assert_eq!(
+            h264_bitrate(&output),
+            default_h264_bitrate_kbps(w, h) * 1000
+        );
+    }
+
+    #[test]
+    fn an_explicit_bitrate_is_used_and_checked() {
+        gstreamer::init().unwrap();
+        let hd = probe("video/x-h264", 1920, 1080);
+        let output = make_output_encoder("test", Some(&hd), Some(8000)).unwrap();
+        assert_eq!(h264_bitrate(&output), 8_000_000);
+
+        let err = make_output_encoder("test", Some(&hd), Some(50))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("out of range"), "{err}");
     }
 
     #[test]
