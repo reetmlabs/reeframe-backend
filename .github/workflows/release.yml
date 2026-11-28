@@ -156,7 +156,9 @@ jobs:
           mkdir -p "$STAGING/bin" "$STAGING/systemd"
 
           install -m 0755 artifacts/vms-daemon         "$STAGING/bin/vms-daemon"
-          install -m 0644 dist/reeframe.service           "$STAGING/systemd/reeframe.service"
+          # Manual installs go to /usr/local/bin, so the archive's unit runs it from there.
+          sed 's|^ExecStart=/usr/bin/|ExecStart=/usr/local/bin/|' dist/reeframe.service > "$STAGING/systemd/reeframe.service"
+          chmod 0644 "$STAGING/systemd/reeframe.service"
           install -m 0644 LICENSE NOTICE                  "$STAGING/"
 
           # Minimal install instructions inside the archive
