@@ -117,6 +117,31 @@ For scripts and other services, mint a long-lived API key with `vms-daemon token
 
 To connect the backend to a Reeframe Coordinator, create an enrollment code for its site there, then run `sudo -u reeframe vms-daemon enroll --coordinator https://coordinator.example.com --code <code>` on the host (in Docker: `docker exec <container> vms-daemon enroll ...`). It writes the site identity to `site_identity.json` in the working directory and prints the settings that are still needed.
 
+## Installing a package
+
+Each release has a `.deb` for Debian 12 and one for Ubuntu 24.04 (amd64), a `.deb` for Debian 12 on arm64, `.tar.gz` archives, and `SHA256SUMS` covering all of them. The service reads its secrets from `/etc/reeframe/env`, so write that file first:
+
+```bash
+sudo install -d -m 0755 /etc/reeframe
+sudo sh -c 'umask 077; { echo VMS_ENCRYPTION_KEY=$(openssl rand -base64 32); echo VMS_AUTH__JWT_SECRET=$(openssl rand -base64 32); } > /etc/reeframe/env'
+sudo apt install ./reeframe-backend_0.3.0_ubuntu24.04_amd64.deb   # or _debian12_amd64.deb
+```
+
+The package creates the `reeframe` user and `/var/lib/reeframe`, installs and starts `reeframe.service`, and keeps an existing `/etc/reeframe/env` as it is. If the secrets are missing it installs anyway, skips the start and says what to set. Then create the first admin with `POST /auth/setup` as shown above.
+
+The Ubuntu package ships its own gst-libav 1.24.2 in `/usr/lib/reeframe/gstreamer-1.0`, because the distro's 1.24.1 is refused (see below). The service loads it through `GST_PLUGIN_PATH`. The distro plugin stays installed and untouched. To run `vms-daemon` or `gst-inspect-1.0` by hand with the same plugins, set the variables the unit sets:
+
+```bash
+GST_PLUGIN_PATH=/usr/lib/reeframe/gstreamer-1.0 gst-inspect-1.0 libav | grep Version   # 1.24.2
+```
+
+The Docker image is `ghcr.io/reetmlabs/reeframe-backend:<version>` (and `latest`). It keeps its data in `/var/lib/reeframe` and works with host networking:
+
+```bash
+docker run -d --name reeframe --network host --env-file /etc/reeframe/env \
+  -v reeframe-data:/var/lib/reeframe ghcr.io/reetmlabs/reeframe-backend:0.3.0
+```
+
 ## Building from source
 
 Requires stable Rust and GStreamer 1.20 or newer, with gst-libav 1.24.2 or newer if your GStreamer is 1.24 (see below). On Debian or Ubuntu:
