@@ -25,6 +25,8 @@ EnvironmentFile=-/etc/reeframe/env
 # data, since the service account has no home directory.
 Environment=GST_PLUGIN_PATH=/usr/lib/reeframe/gstreamer-1.0
 Environment=GST_REGISTRY_1_0=/var/lib/reeframe/gstreamer-registry.bin
+# Fontconfig (watermark text) needs a writable cache directory too.
+Environment=XDG_CACHE_HOME=/var/lib/reeframe/.cache
 
 ExecStart=/usr/local/bin/vms-daemon
 
