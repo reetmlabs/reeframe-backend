@@ -46,12 +46,20 @@ EOF
         fi
 
         # ── Enable and start the service ──────────────────────────────────────
+        # A service that can't start never fails the install; it prints what
+        # to do instead.
         if [ -d /run/systemd/system ]; then
-            systemctl daemon-reload
-            systemctl enable reeframe.service
-            # Only start automatically on first install, not on upgrade.
-            if [ -z "$2" ]; then
-                systemctl start reeframe.service || true
+            systemctl daemon-reload || true
+            systemctl enable reeframe.service || true
+            missing=""
+            for key in VMS_ENCRYPTION_KEY VMS_AUTH__JWT_SECRET; do
+                grep -Eq "^[[:space:]]*${key}=[^[:space:]]" /etc/reeframe/env || missing="$missing $key"
+            done
+            if [ -n "$missing" ]; then
+                echo "reeframe: not starting the service, /etc/reeframe/env has no value for:$missing"
+                echo "reeframe: set them (openssl rand -base64 32), then run: systemctl restart reeframe.service"
+            elif ! systemctl restart reeframe.service || ! { sleep 3; systemctl is-active --quiet reeframe.service; }; then
+                echo "reeframe: the service did not start, see: journalctl -u reeframe.service"
             fi
         fi
         ;;
