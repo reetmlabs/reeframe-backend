@@ -43,3 +43,4 @@ See [docs/video-encoding.md](../docs/video-encoding.md).
 - A camera that reconnects is no longer disconnected again by an error left over from its previous session.
 - Transcoding to VP9 no longer fails: the bitrate was passed to the encoder with the wrong type.
 - Motion detection no longer crashes the daemon on an H.264 stream without timing information in its headers.
+- Black or white frames are skipped as thumbnails again on systems where the decoder pads its rows.
