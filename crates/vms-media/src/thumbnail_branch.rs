@@ -635,7 +635,23 @@ mod attach_tests {
                 gstreamer::PadProbeReturn::Ok
             });
 
+        // The run starts at the first frame, so the encoder's start-up time
+        // does not count.
+        let (first_tx, first_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        pipeline
+            .by_name(&tee_name)
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+                first_tx.try_send(()).ok();
+                gstreamer::PadProbeReturn::Remove
+            });
         pipeline.set_state(gstreamer::State::Playing).unwrap();
+        tokio::task::spawn_blocking(move || first_rx.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("no frame reached the tee");
         tokio::time::sleep(run).await;
         handle.stop().await;
         pipeline.set_state(gstreamer::State::Null).unwrap();
