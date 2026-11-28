@@ -1,9 +1,22 @@
 # CI runner requirements
 
-Pushes to main and pull requests from branches in this repo run the `lint` and
-`test` jobs of `.github/workflows/ci.yml` on a self-hosted runner with the
-labels `self-hosted`, `linux`, `x64` and `wsl`. Pull requests from forks run on
-GitHub-hosted `ubuntu-24.04` runners instead.
+The `lint` and `test` jobs of `.github/workflows/ci.yml` run on GitHub-hosted
+`ubuntu-24.04` runners by default. When the organization variable
+`CI_SELF_HOSTED` is `true`, pushes to main and pull requests from branches in
+this repo run them on a self-hosted runner with the labels `self-hosted`,
+`linux`, `x64` and `wsl` instead. Pull requests from forks always run on
+GitHub-hosted runners.
+
+## Turning the self-hosted runner on and off
+
+In the organization settings, open Secrets and variables > Actions > Variables
+and set `CI_SELF_HOSTED`:
+
+- `true`: use the self-hosted runner. Register it and bring it online first,
+  or lint and test stay queued.
+- `false` (or delete the variable): use GitHub-hosted runners.
+
+The change applies to workflow runs started after it.
 
 The runner user has no sudo, so CI skips every setup step that needs root on
 the self-hosted runner. The runner image must already contain everything below.
@@ -29,7 +42,6 @@ apt-get install -y --no-install-recommends \
   gstreamer1.0-plugins-good \
   gstreamer1.0-x \
   gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-ugly \
   gstreamer1.0-libav \
   gstreamer1.0-nice \
   gstreamer1.0-tools \

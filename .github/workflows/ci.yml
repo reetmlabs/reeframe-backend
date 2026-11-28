@@ -16,8 +16,8 @@ env:
 jobs:
   lint:
     name: fmt · clippy · licenses
-    # PRs from forks run on GitHub-hosted runners, everything else on the self-hosted runner
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || fromJSON('["self-hosted","linux","x64","wsl"]') }}
+    # GitHub-hosted unless the org variable CI_SELF_HOSTED is 'true'; fork PRs always run on GitHub-hosted runners
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && !github.event.pull_request.head.repo.fork && fromJSON('["self-hosted","linux","x64","wsl"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -74,7 +74,7 @@ jobs:
 
   test:
     name: test
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || fromJSON('["self-hosted","linux","x64","wsl"]') }}
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'true' && !github.event.pull_request.head.repo.fork && fromJSON('["self-hosted","linux","x64","wsl"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
 
