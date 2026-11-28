@@ -11,17 +11,7 @@ Description: Reeframe, a pipeline-driven video management system
  and per-credential AES-256-GCM encryption at rest.
  .
  This package installs the daemon (vms-daemon) and a systemd unit file.
+ The Ubuntu 24.04 build also ships gst-libav 1.24.2 in /usr/lib/reeframe,
+ used by the service in place of the distro plugin.
  VMS_ENCRYPTION_KEY and VMS_AUTH__JWT_SECRET must be set in /etc/reeframe/env
  before the service can start.
-Depends: libgstreamer1.0-0 (>= 1.20),
-         libgstreamer-plugins-bad1.0-0 (>= 1.20),
-         libgstrtspserver-1.0-0 (>= 1.20),
-         gstreamer1.0-plugins-base (>= 1.20),
-         gstreamer1.0-plugins-good (>= 1.20),
-         gstreamer1.0-plugins-bad (>= 1.20),
-         gstreamer1.0-libav (>= 1.20),
-         gstreamer1.0-nice,
-         libssl3,
-         ca-certificates,
-         libsqlite3-0,
-         systemd

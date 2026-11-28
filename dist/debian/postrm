@@ -3,12 +3,10 @@ set -e
 
 case "$1" in
     remove)
-        # Stop and disable the service; leave data and config intact so an
-        # accidental removal does not destroy recordings.
+        # prerm stopped the service. Data and config stay, so an accidental
+        # removal does not destroy recordings.
         if [ -d /run/systemd/system ]; then
-            systemctl stop    reeframe.service > /dev/null 2>&1 || true
-            systemctl disable reeframe.service > /dev/null 2>&1 || true
-            systemctl daemon-reload
+            systemctl daemon-reload || true
         fi
         ;;
 

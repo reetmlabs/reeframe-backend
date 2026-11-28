@@ -1,0 +1,14 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove)
+        # Stop and disable the service while its unit file is still installed.
+        if [ -d /run/systemd/system ]; then
+            systemctl stop    reeframe.service > /dev/null 2>&1 || true
+            systemctl disable reeframe.service > /dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0
