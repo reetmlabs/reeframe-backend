@@ -108,11 +108,15 @@ fn is_blank(luma: &[u8]) -> bool {
 
 /// Subsampled luma of an I420 frame, or `None` if it can't be mapped.
 fn sample_luma(buffer: &gstreamer::BufferRef, caps: &gstreamer::CapsRef) -> Option<Vec<u8>> {
+    use gstreamer_video::prelude::*;
+
     let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
     let frame = gstreamer_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).ok()?;
     let plane = frame.plane_data(0).ok()?;
-    let stride = info.stride()[0] as usize;
-    let (width, height) = (info.width() as usize, info.height() as usize);
+    // The mapped frame's stride, which a decoder's video meta can make wider
+    // than the one the caps imply.
+    let stride = frame.plane_stride()[0] as usize;
+    let (width, height) = (frame.width() as usize, frame.height() as usize);
     let mut out =
         Vec::with_capacity((width / BLANK_SAMPLE_STEP + 1) * (height / BLANK_SAMPLE_STEP + 1));
     for row in (0..height).step_by(BLANK_SAMPLE_STEP) {
