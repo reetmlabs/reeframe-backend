@@ -16,6 +16,36 @@ pub fn fits_h264(width: u32, height: u32) -> bool {
     blocks(width) * blocks(height) <= MAX_H264_FRAME_PIXELS
 }
 
+/// Smallest `bitrate_kbps` a `watermark` or `merge_clips` job accepts.
+pub const MIN_ENCODE_BITRATE_KBPS: u32 = 100;
+
+/// Largest `bitrate_kbps` a `watermark` or `merge_clips` job accepts.
+pub const MAX_ENCODE_BITRATE_KBPS: u32 = 100_000;
+
+/// The H.264 bitrate, in kbps, used when a `watermark` or `merge_clips` job
+/// sets none. It is 4000 kbps at 1920x1080 and 12000 kbps at 3840x2160,
+/// following `pixels^log4(3)` through both points and kept within 300 to
+/// 16000 kbps.
+pub fn default_h264_bitrate_kbps(width: u32, height: u32) -> u32 {
+    const FULL_HD_PIXELS: f64 = 1920.0 * 1080.0;
+    let pixels = f64::from(width) * f64::from(height);
+    let kbps = 4000.0 * (pixels / FULL_HD_PIXELS).powf(3f64.ln() / 4f64.ln());
+    ((kbps / 100.0).round() as u32 * 100).clamp(300, 16_000)
+}
+
+/// Checks the optional `bitrate_kbps` of a `watermark` or `merge_clips` job.
+pub fn check_encode_bitrate(bitrate_kbps: Option<u32>) -> Result<(), String> {
+    match bitrate_kbps {
+        Some(kbps) if !(MIN_ENCODE_BITRATE_KBPS..=MAX_ENCODE_BITRATE_KBPS).contains(&kbps) => {
+            Err(format!(
+                "bitrate_kbps {kbps} is out of range, expected \
+                 {MIN_ENCODE_BITRATE_KBPS} to {MAX_ENCODE_BITRATE_KBPS}"
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Output codec of a `transcode` job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscodeCodec {
@@ -227,5 +257,27 @@ mod tests {
         assert!(!fits_h264(3000, 3145));
         let err = check_transcode(&transcode("h264", "", Some("3000x3145"))).unwrap_err();
         assert!(err.contains("too large for H.264"), "{err}");
+    }
+
+    #[test]
+    fn the_default_bitrate_follows_the_frame_size() {
+        assert_eq!(default_h264_bitrate_kbps(1920, 1080), 4000);
+        assert_eq!(default_h264_bitrate_kbps(3840, 2160), 12_000);
+        assert_eq!(default_h264_bitrate_kbps(1280, 720), 2100);
+        assert_eq!(default_h264_bitrate_kbps(2560, 1440), 6300);
+        assert_eq!(default_h264_bitrate_kbps(4096, 2304), 13_300);
+        assert_eq!(default_h264_bitrate_kbps(160, 120), 300);
+        assert_eq!(default_h264_bitrate_kbps(7680, 4320), 16_000);
+    }
+
+    #[test]
+    fn an_encode_bitrate_out_of_range_is_rejected() {
+        for kbps in [None, Some(100), Some(4000), Some(100_000)] {
+            assert_eq!(check_encode_bitrate(kbps), Ok(()), "{kbps:?}");
+        }
+        for kbps in [0, 99, 100_001] {
+            let err = check_encode_bitrate(Some(kbps)).unwrap_err();
+            assert!(err.contains("out of range"), "{err}");
+        }
     }
 }
