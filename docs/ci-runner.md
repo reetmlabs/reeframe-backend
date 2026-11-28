@@ -55,18 +55,16 @@ default; the rest matches the workflow.
 ## gst-libav 1.24.2
 
 Ubuntu 24.04 ships gst-libav 1.24.1, which leaks memory per decoded frame and
-fails the daemon's startup check. Build 1.24.2 and put it in place of the
-packaged plugin, as root:
+fails the daemon's startup check. Build 1.24.2 with the script the Ubuntu
+package and the GitHub-hosted jobs use, which checks the tarball's SHA-256,
+and put it in place of the packaged plugin, as root from a checkout:
 
 ```sh
-curl -sSfL https://gstreamer.freedesktop.org/src/gst-libav/gst-libav-1.24.2.tar.xz | tar xJ -C /tmp
-cd /tmp/gst-libav-1.24.2
-meson setup build --buildtype=release -Ddoc=disabled -Dtests=disabled
-ninja -C build
+dist/ubuntu/build-gst-libav.sh /tmp/gst-libav
 
 PLUGINS=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
 dpkg-divert --divert $PLUGINS/libgstlibav.so.distrib --rename --add $PLUGINS/libgstlibav.so
-install -m644 build/ext/libav/libgstlibav.so $PLUGINS/
+install -m644 /tmp/gst-libav/libgstlibav.so $PLUGINS/
 ```
 
 The test job fails with an error pointing here unless this check passes.
