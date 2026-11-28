@@ -1566,7 +1566,7 @@ mod tests {
         let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
         factory.set_launch(
             "( videotestsrc is-live=true ! video/x-raw,width=160,height=120,framerate=10/1 \
-             ! x264enc key-int-max=10 tune=zerolatency speed-preset=ultrafast \
+             ! openh264enc complexity=low gop-size=10 \
              ! rtph264pay name=pay0 pt=96 )",
         );
         let sessions = Arc::new(AtomicU32::new(0));
@@ -1698,7 +1698,7 @@ mod tests {
         factory.set_protocols(gstreamer_rtsp_server::gst_rtsp::RTSPLowerTrans::TCP);
         factory.set_launch(
             "( videotestsrc is-live=true ! video/x-raw,width=160,height=120,framerate=10/1 \
-             ! x264enc key-int-max=10 tune=zerolatency speed-preset=ultrafast \
+             ! openh264enc complexity=low gop-size=10 \
              ! rtph264pay name=pay0 pt=96 )",
         );
         server.mount_points().unwrap().add_factory("/cam", factory);

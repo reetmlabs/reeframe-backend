@@ -58,6 +58,9 @@ pub enum ValidationCategory {
     /// A transport node has a contact list but its destination isn't email,
     /// the only transport that delivers to one.
     UnsupportedContactList,
+    /// An action setting has a value the action can't use, such as a
+    /// `transcode` codec that isn't supported.
+    UnsupportedSetting,
 }
 
 impl ValidationCategory {
@@ -370,6 +373,25 @@ pub fn check_contact_list_destinations(
                 Some(n.id),
                 "contact lists are only supported for email destinations",
             ))
+        })
+        .collect()
+}
+
+/// An action whose settings can't be used at run time. Only `transcode` has
+/// settings checked this way (see `vms_core::video_encoding::check_transcode`).
+pub fn check_action_settings(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
+    nodes
+        .iter()
+        .filter_map(|n| match n.action_config.as_ref()? {
+            ActionConfig::Transcode(cfg) => {
+                let err = vms_core::video_encoding::check_transcode(cfg).err()?;
+                Some(ValidationIssue::new(
+                    ValidationCategory::UnsupportedSetting,
+                    Some(n.id),
+                    format!("transcode: {err}"),
+                ))
+            }
+            _ => None,
         })
         .collect()
 }
@@ -970,6 +992,43 @@ mod tests {
         let mut n = base_node(CoreNodeType::Action);
         n.action_config = Some(cfg);
         n
+    }
+
+    #[test]
+    fn supported_transcode_settings_are_not_flagged() {
+        assert!(check_action_settings(&[action_node(transcode_config())]).is_empty());
+    }
+
+    #[test]
+    fn h265_transcode_output_is_flagged_as_an_error() {
+        let mut cfg = transcode_config();
+        if let vms_core::action::ActionConfig::Transcode(t) = &mut cfg {
+            t.codec = "h265".into();
+        }
+        let node = action_node(cfg);
+
+        let issues = check_action_settings(std::slice::from_ref(&node));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, ValidationCategory::UnsupportedSetting);
+        assert_eq!(issues[0].severity, ValidationSeverity::Error);
+        assert_eq!(issues[0].node_id, Some(node.id));
+        assert!(issues[0].message.contains("H.265"), "{}", issues[0].message);
+    }
+
+    #[test]
+    fn a_transcode_resolution_too_large_for_h264_is_flagged() {
+        let mut cfg = transcode_config();
+        if let vms_core::action::ActionConfig::Transcode(t) = &mut cfg {
+            t.resolution = Some("7680x4320".into());
+        }
+
+        let issues = check_action_settings(&[action_node(cfg)]);
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0].message.contains("too large"),
+            "{}",
+            issues[0].message
+        );
     }
 
     #[test]

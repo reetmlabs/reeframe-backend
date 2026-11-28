@@ -46,7 +46,7 @@ impl Media {
             "videotestsrc is-live=true pattern=ball \
              ! video/x-raw,width=640,height=360,framerate=15/1 \
              ! videoconvert ! queue \
-             ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=500 key-int-max=30 \
+             ! openh264enc complexity=low rate-control=bitrate bitrate=500000 qp-min=1 gop-size=30 \
              ! video/x-h264,profile=constrained-baseline \
              ! rtph264pay config-interval=-1 aggregate-mode=zero-latency pt={payload_type} \
              ! application/x-rtp,media=video,encoding-name=H264,payload={payload_type},clock-rate=90000 \

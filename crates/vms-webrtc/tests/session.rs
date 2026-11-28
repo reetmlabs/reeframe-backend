@@ -28,7 +28,7 @@ const ELEMENTS: [&str; 7] = [
     "nicesink",
     "dtlssrtpenc",
     "sctpenc",
-    "x264enc",
+    "openh264enc",
     "rtph264depay",
 ];
 
