@@ -509,6 +509,43 @@ mod capture_gate_tests {
         let textured: Vec<u8> = (0..64).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect();
         assert!(!is_blank(&textured));
     }
+
+    /// A decoder can pad each row past the frame width and say so in a video
+    /// meta. The padding here is white, so reading it would hide a black frame.
+    #[test]
+    fn a_black_frame_with_padded_rows_is_blank() {
+        gstreamer::init().unwrap();
+        let (width, height, stride) = (320usize, 180usize, 384usize);
+        let chroma = stride / 2 * height / 2;
+        let mut data = vec![128u8; stride * height + 2 * chroma];
+        for row in data[..stride * height].chunks_mut(stride) {
+            row[..width].fill(16);
+            row[width..].fill(255);
+        }
+        let mut buffer = gstreamer::Buffer::from_mut_slice(data);
+        gstreamer_video::VideoMeta::add_full(
+            buffer.get_mut().unwrap(),
+            gstreamer_video::VideoFrameFlags::empty(),
+            gstreamer_video::VideoFormat::I420,
+            width as u32,
+            height as u32,
+            &[0, stride * height, stride * height + chroma],
+            &[stride as i32, (stride / 2) as i32, (stride / 2) as i32],
+        )
+        .unwrap();
+        let caps = gstreamer_video::VideoInfo::builder(
+            gstreamer_video::VideoFormat::I420,
+            width as u32,
+            height as u32,
+        )
+        .build()
+        .unwrap()
+        .to_caps()
+        .unwrap();
+
+        let luma = sample_luma(&buffer, &caps).unwrap();
+        assert!(is_blank(&luma));
+    }
 }
 
 #[cfg(test)]
