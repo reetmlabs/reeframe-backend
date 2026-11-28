@@ -45,6 +45,13 @@ EOF
             chmod 0600 /etc/reeframe/env
         fi
 
+        # Up to 0.2.0 the unit was in /etc/systemd/system. Its enable link is
+        # left dangling once dpkg removes that file, so drop it.
+        old_link=/etc/systemd/system/multi-user.target.wants/reeframe.service
+        if [ -L "$old_link" ] && [ "$(readlink "$old_link")" = /etc/systemd/system/reeframe.service ]; then
+            rm -f "$old_link"
+        fi
+
         # ── Enable and start the service ──────────────────────────────────────
         # A service that can't start never fails the install; it prints what
         # to do instead.
