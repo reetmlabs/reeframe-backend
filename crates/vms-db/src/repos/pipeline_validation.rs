@@ -377,21 +377,36 @@ pub fn check_contact_list_destinations(
         .collect()
 }
 
-/// An action whose settings can't be used at run time. Only `transcode` has
-/// settings checked this way (see `vms_core::video_encoding::check_transcode`).
+/// An action whose settings can't be used at run time: the `transcode`
+/// settings and the `watermark` and `merge_clips` bitrate (see
+/// `vms_core::video_encoding`).
 pub fn check_action_settings(nodes: &[PipelineNode]) -> Vec<ValidationIssue> {
     nodes
         .iter()
-        .filter_map(|n| match n.action_config.as_ref()? {
-            ActionConfig::Transcode(cfg) => {
-                let err = vms_core::video_encoding::check_transcode(cfg).err()?;
-                Some(ValidationIssue::new(
+        .filter_map(|n| {
+            match n.action_config.as_ref()? {
+                ActionConfig::Transcode(cfg) => vms_core::video_encoding::check_transcode(cfg)
+                    .err()
+                    .map(|e| ("transcode", e)),
+                ActionConfig::Watermark(cfg) => {
+                    vms_core::video_encoding::check_encode_bitrate(cfg.bitrate_kbps)
+                        .err()
+                        .map(|e| ("watermark", e))
+                }
+                ActionConfig::MergeClips(cfg) => {
+                    vms_core::video_encoding::check_encode_bitrate(cfg.bitrate_kbps)
+                        .err()
+                        .map(|e| ("merge_clips", e))
+                }
+                _ => None,
+            }
+            .map(|(action, err)| {
+                ValidationIssue::new(
                     ValidationCategory::UnsupportedSetting,
                     Some(n.id),
-                    format!("transcode: {err}"),
-                ))
-            }
-            _ => None,
+                    format!("{action}: {err}"),
+                )
+            })
         })
         .collect()
 }
@@ -998,6 +1013,43 @@ mod tests {
     #[test]
     fn supported_transcode_settings_are_not_flagged() {
         assert!(check_action_settings(&[action_node(transcode_config())]).is_empty());
+    }
+
+    #[test]
+    fn an_encode_bitrate_out_of_range_is_flagged_as_an_error() {
+        let watermark =
+            vms_core::action::ActionConfig::Watermark(vms_core::action::WatermarkConfig {
+                text_template: "cam".into(),
+                position: vms_core::action::WatermarkPosition::TopLeft,
+                font_size: 12,
+                opacity: 1.0,
+                bitrate_kbps: Some(200_000),
+            });
+        let mut merge = merge_clips_config();
+        if let vms_core::action::ActionConfig::MergeClips(m) = &mut merge {
+            m.bitrate_kbps = Some(10);
+        }
+        let nodes = [action_node(watermark), action_node(merge)];
+
+        let issues = check_action_settings(&nodes);
+        assert_eq!(issues.len(), 2);
+        for (issue, (node, action)) in issues
+            .iter()
+            .zip(nodes.iter().zip(["watermark", "merge_clips"]))
+        {
+            assert_eq!(issue.category, ValidationCategory::UnsupportedSetting);
+            assert_eq!(issue.severity, ValidationSeverity::Error);
+            assert_eq!(issue.node_id, Some(node.id));
+            assert!(
+                issue
+                    .message
+                    .starts_with(&format!("{action}: bitrate_kbps")),
+                "{}",
+                issue.message
+            );
+        }
+
+        assert!(check_action_settings(&[action_node(merge_clips_config())]).is_empty());
     }
 
     #[test]
