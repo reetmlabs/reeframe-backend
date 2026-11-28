@@ -1,38 +1,63 @@
 name: Release
 
-# Runs when a version tag is pushed, for example `git tag v0.2.0 && git push --tags`
+# A version tag (`git tag v0.3.0 && git push origin v0.3.0`) builds everything,
+# pushes the Docker image and creates the GitHub release. Running the workflow
+# by hand is a dry run: it builds the same assets and uploads them as workflow
+# artifacts, without pushing images or creating a release.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE: ${{ github.repository_owner }}/reeframe-backend
+  PUBLISH: ${{ github.event_name == 'push' }}
 
 jobs:
-  # ── Job 1: compile the release binary ────────────────────────────────────────
-  # One job per architecture, each on a native amd64 or arm64 runner, so the
-  # GStreamer dev libraries need no cross-compilation sysroot and nothing runs
-  # under QEMU.
+  # ── The version, from the daemon's Cargo.toml ────────────────────────────────
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version and check it against the tag
+        id: version
+        run: |
+          VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/vms-daemon/Cargo.toml | head -1)
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the crate version $VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ── The release binary ───────────────────────────────────────────────────────
+  # Built in Debian 12 against GStreamer 1.22, so the same binary also runs on
+  # Ubuntu 24.04 (GStreamer 1.24, newer glibc). Each arch builds on its own
+  # runner, so nothing is cross-compiled or emulated.
   build:
     name: Build binary (linux/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    container: rust:1-bookworm
     strategy:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
           - arch: arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install GStreamer dev libraries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
             pkg-config \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
@@ -40,23 +65,19 @@ jobs:
             libgstrtspserver-1.0-dev \
             libssl-dev
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # Cache the Cargo registry and compiled dependencies between runs.
       # Keyed by arch too, since amd64 and arm64 artifacts are never compatible.
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.arch }}-cargo-
+          key: debian12-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: debian12-${{ matrix.arch }}-cargo-
 
       - name: Build release binary
-        run: cargo build --release --bin vms-daemon
+        run: cargo build --release --locked --bin vms-daemon
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -65,16 +86,45 @@ jobs:
           path: target/release/vms-daemon
           retention-days: 1
 
-  # ── Job 2: assemble .tar.gz and .deb ─────────────────────────────────────────
-  # Packages the already-built binary, so it runs on a plain amd64 runner
-  # for both arches, no native/arm hardware needed here.
+  # ── gst-libav 1.24.2 for the Ubuntu 24.04 package ───────────────────────────
+  # Ubuntu 24.04 ships gst-libav 1.24.1, which the daemon refuses, so the
+  # Ubuntu package carries its own plugin built against the distro FFmpeg.
+  gst-libav:
+    name: Build gst-libav (ubuntu24.04/amd64)
+    runs-on: ubuntu-24.04
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build gst-libav
+        run: dist/ubuntu/build-gst-libav.sh out
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: gst-libav-ubuntu24.04-amd64
+          path: out/libgstlibav.so
+          retention-days: 1
+
+  # ── .deb per distro, and .tar.gz per arch ────────────────────────────────────
   package:
-    name: Package (.tar.gz + .deb) [linux/${{ matrix.arch }}]
-    runs-on: ubuntu-22.04
-    needs: build
+    name: Package (${{ matrix.distro }}/${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: [version, build, gst-libav]
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - distro: debian12
+            arch: amd64
+            tarball: true
+          - distro: ubuntu24.04
+            arch: amd64
+            tarball: false
+          - distro: debian12
+            arch: arm64
+            tarball: true
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -85,11 +135,22 @@ jobs:
           name: vms-daemon-linux-${{ matrix.arch }}
           path: artifacts/
 
-      - name: Set release version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Download gst-libav
+        if: matrix.distro == 'ubuntu24.04'
+        uses: actions/download-artifact@v4
+        with:
+          name: gst-libav-ubuntu24.04-${{ matrix.arch }}
+          path: artifacts/
 
-      # ── .tar.gz ──────────────────────────────────────────────────────────────
+      - name: Assemble .deb package
+        run: |
+          LIBAV=""
+          if [ "${{ matrix.distro }}" = ubuntu24.04 ]; then LIBAV=artifacts/libgstlibav.so; fi
+          dist/debian/build-deb.sh "${{ matrix.distro }}" "${{ matrix.arch }}" "$VERSION" \
+            artifacts/vms-daemon $LIBAV
+
       - name: Assemble tar archive
+        if: matrix.tarball
         run: |
           STAGING="reeframe-backend-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "$STAGING/bin" "$STAGING/systemd"
@@ -102,6 +163,9 @@ jobs:
           cat > "$STAGING/README.txt" <<EOF
           Reeframe VMS v${VERSION}
 
+          Built on Debian 12 against GStreamer 1.22. On Ubuntu 24.04 use the
+          ubuntu24.04 .deb instead, since the distro gst-libav 1.24.1 is refused.
+
           Install:
             sudo install -m 0755 bin/vms-daemon /usr/local/bin/vms-daemon
             sudo install -m 0644 systemd/reeframe.service /etc/systemd/system/reeframe.service
@@ -111,52 +175,51 @@ jobs:
           Configuration:
             sudo mkdir -p /etc/reeframe
             echo "VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32)" | sudo tee /etc/reeframe/env
+            echo "VMS_AUTH__JWT_SECRET=\$(openssl rand -base64 32)" | sudo tee -a /etc/reeframe/env
             sudo chmod 600 /etc/reeframe/env
           EOF
 
           tar -czf "reeframe-backend-${VERSION}-linux-${{ matrix.arch }}.tar.gz" "$STAGING"
 
-      # ── .deb ─────────────────────────────────────────────────────────────────
-      - name: Assemble .deb package
-        run: |
-          PKG="reeframe-backend_${VERSION}_${{ matrix.arch }}"
-          mkdir -p \
-            "$PKG/DEBIAN" \
-            "$PKG/usr/local/bin" \
-            "$PKG/etc/systemd/system" \
-            "$PKG/usr/share/doc/reeframe-backend"
-
-          # Maintainer scripts
-          install -m 0755 dist/debian/postinst "$PKG/DEBIAN/postinst"
-          install -m 0755 dist/debian/postrm   "$PKG/DEBIAN/postrm"
-
-          # Inject the real version and this matrix leg's arch into the control file
-          sed \
-            -e "s/^Version:.*/Version: ${VERSION}/" \
-            -e "s/^Architecture:.*/Architecture: ${{ matrix.arch }}/" \
-            dist/debian/control > "$PKG/DEBIAN/control"
-
-          # Payload files
-          install -m 0755 artifacts/vms-daemon  "$PKG/usr/local/bin/vms-daemon"
-          install -m 0644 dist/reeframe.service   "$PKG/etc/systemd/system/reeframe.service"
-          install -m 0644 LICENSE NOTICE          "$PKG/usr/share/doc/reeframe-backend/"
-
-          dpkg-deb --build --root-owner-group "$PKG"
-
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: packages-${{ matrix.arch }}
+          name: packages-${{ matrix.distro }}-${{ matrix.arch }}
           path: |
             reeframe-backend-*.tar.gz
             reeframe-backend_*.deb
           retention-days: 1
 
-  # ── Job 3: build and push a per-arch Docker image, by digest only ───────────
-  # Each leg builds natively on its own architecture and pushes an untagged
-  # image identified by digest. The `docker-manifest` job below merges the
-  # digests into the multi-arch tags, which is Docker's documented way to split
-  # a multi-platform build across native runners.
+  # ── Every release asset and SHA256SUMS, as one artifact ──────────────────────
+  assets:
+    name: Release assets
+    runs-on: ubuntu-24.04
+    needs: package
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets/
+          pattern: packages-*
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        working-directory: release-assets
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/*
+          retention-days: ${{ env.PUBLISH == 'true' && 1 || 7 }}
+
+  # ── Docker image per arch; a tag push pushes it by digest only ───────────────
+  # Each leg builds natively on its own architecture. On a tag push it pushes
+  # an untagged image identified by digest, and the `docker-manifest` job below
+  # merges the digests into the multi-arch tags. A dry run only builds.
   docker-build:
     name: Docker build (linux/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -164,10 +227,10 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
             platform: linux/amd64
           - arch: arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
             platform: linux/arm64
     permissions:
       contents: read
@@ -180,6 +243,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -192,27 +256,30 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ env.PUBLISH }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       - name: Export digest
+        if: env.PUBLISH == 'true'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: env.PUBLISH == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
           retention-days: 1
 
-  # ── Job 4: merge the per-arch digests into the real multi-arch tags ─────────
+  # ── Merge the per-arch digests into the multi-arch tags ──────────────────────
   docker-manifest:
     name: Docker manifest (multi-arch)
-    runs-on: ubuntu-22.04
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
     needs: docker-build
     permissions:
       contents: read
@@ -259,11 +326,12 @@ jobs:
       - name: Inspect merged image
         run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
 
-  # ── Job 5: create GitHub Release and attach artifacts ────────────────────────
+  # ── Create the GitHub release and attach the assets ─────────────────────────
   release:
     name: GitHub Release
-    runs-on: ubuntu-22.04
-    needs: [package, docker-manifest]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    needs: [version, assets, docker-manifest]
     permissions:
       contents: write
 
@@ -291,7 +359,8 @@ jobs:
       # starts directly with the install options.
       - name: Assemble release notes
         env:
-          DOCKER_IMAGE: ghcr.io/${{ env.IMAGE }}:${{ github.ref_name }}
+          DOCKER_IMAGE: ghcr.io/${{ env.IMAGE }}:${{ needs.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
           CHANGELOG: ${{ steps.cliff.outputs.content }}
         run: |
           {
@@ -306,18 +375,20 @@ jobs:
 
             echo "## Install options"
             echo ""
-            echo "**Docker (recommended)**"
+            echo "**Docker**"
             echo '```bash'
             echo "docker pull ${DOCKER_IMAGE}"
             echo '```'
             echo ""
-            echo "**Debian / Ubuntu (.deb)**"
+            echo "**Debian 12 / Ubuntu 24.04 (.deb, amd64)**"
             echo '```bash'
-            echo "sudo dpkg -i reeframe-backend_*_\$(dpkg --print-architecture).deb"
-            echo "sudo sh -c 'echo VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32) >> /etc/reeframe/env'"
-            echo "sudo sh -c 'echo VMS_AUTH__JWT_SECRET=\$(openssl rand -base64 32) >> /etc/reeframe/env'"
-            echo "sudo systemctl start reeframe.service"
+            echo "sudo install -d -m 0755 /etc/reeframe"
+            echo "sudo sh -c 'umask 077; { echo VMS_ENCRYPTION_KEY=\$(openssl rand -base64 32); echo VMS_AUTH__JWT_SECRET=\$(openssl rand -base64 32); } > /etc/reeframe/env'"
+            echo "sudo apt install ./reeframe-backend_${VERSION}_debian12_amd64.deb      # Debian 12"
+            echo "sudo apt install ./reeframe-backend_${VERSION}_ubuntu24.04_amd64.deb   # Ubuntu 24.04"
             echo '```'
+            echo ""
+            echo "Then create the first admin with \`POST /auth/setup\` on port 8080. Check downloads against \`SHA256SUMS\`."
             echo ""
             echo "**Manual (.tar.gz)**"
             echo "See \`README.txt\` inside the archive."
@@ -329,12 +400,11 @@ jobs:
             printf '%s\n' "${CHANGELOG}"
           } > RELEASE_NOTES.md
 
-      - name: Download packages
+      - name: Download release assets
         uses: actions/download-artifact@v4
         with:
+          name: release-assets
           path: release-assets/
-          pattern: packages-*
-          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
