@@ -127,7 +127,9 @@ sudo sh -c 'umask 077; { echo VMS_ENCRYPTION_KEY=$(openssl rand -base64 32); ech
 sudo apt install ./reeframe-backend_0.3.0_ubuntu24.04_amd64.deb   # or _debian12_amd64.deb
 ```
 
-The package creates the `reeframe` user and `/var/lib/reeframe`, installs and starts `reeframe.service`, and keeps an existing `/etc/reeframe/env` as it is. If the secrets are missing it installs anyway, skips the start and says what to set. Then create the first admin with `POST /auth/setup` as shown above.
+The package installs `/usr/bin/vms-daemon` and `/usr/lib/systemd/system/reeframe.service`, creates the `reeframe` user and `/var/lib/reeframe`, starts the service, and keeps an existing `/etc/reeframe/env` as it is. If the secrets are missing it installs anyway, skips the start and says what to set. Then create the first admin with `POST /auth/setup` as shown above.
+
+The `.tar.gz` archives are for manual installs. Their `README.txt` puts the binary in `/usr/local/bin` and the unit in `/etc/systemd/system`, and the unit in the archive runs the binary from there.
 
 The Ubuntu package ships its own gst-libav 1.24.2 in `/usr/lib/reeframe/gstreamer-1.0`, because the distro's 1.24.1 is refused (see below). The service loads it through `GST_PLUGIN_PATH`. The distro plugin stays installed and untouched. To run `vms-daemon` or `gst-inspect-1.0` by hand with the same plugins, set the variables the unit sets:
 
