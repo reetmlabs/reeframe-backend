@@ -1,0 +1,22 @@
+# Depends of the Ubuntu 24.04 package, one per line. The libraries are what
+# dpkg-shlibdeps reports there for vms-daemon and the bundled gst-libav, which
+# replaces gstreamer1.0-libav (1.24.1, refused by the daemon) for the service.
+libc6 (>= 2.35)
+libgcc-s1 (>= 4.2)
+libglib2.0-0t64 (>= 2.79.0)
+zlib1g (>= 1:1.1.4)
+libssl3t64 (>= 3.0.0)
+libgstreamer1.0-0 (>= 1.24.2)
+libgstreamer-plugins-base1.0-0 (>= 1.24.2)
+libgstreamer-plugins-bad1.0-0 (>= 1.24.2)
+libgstrtspserver-1.0-0 (>= 1.24.2)
+libavcodec60 (>= 7:6.1)
+libavfilter9 (>= 7:6.1)
+libavformat60 (>= 7:6.1)
+libavutil58 (>= 7:6.1)
+gstreamer1.0-plugins-base (>= 1.24.2)
+gstreamer1.0-plugins-good (>= 1.24.2)
+gstreamer1.0-plugins-bad (>= 1.24.2)
+gstreamer1.0-nice
+ca-certificates
+systemd
