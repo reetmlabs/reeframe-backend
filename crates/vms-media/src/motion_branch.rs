@@ -210,6 +210,19 @@ pub fn attach(
         .property("drop-only", true)
         .build()
         .map_err(|e| VmsError::Media(format!("motion videorate: {e}")))?;
+    // An H.264 stream without timing info has no frame rate, so its decoded
+    // frames have no duration, and videorate aborts the process on those.
+    if let Some(rate_sink) = rate.static_pad("sink") {
+        let sample = gstreamer::ClockTime::SECOND / SAMPLE_RATE_FPS as u64;
+        rate_sink.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            if let Some(buffer) = info.buffer_mut() {
+                if buffer.duration().is_none() {
+                    buffer.make_mut().set_duration(sample);
+                }
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+    }
 
     let convert = gstreamer::ElementFactory::make("videoconvert")
         .name(convert_name(camera_id))
@@ -589,13 +602,18 @@ mod tests {
     /// Plays 3 s of live 25 fps H.264 with a keyframe every second into a tee
     /// with the motion branch attached in `mode`.
     async fn run_branch(mode: MotionMode) -> BranchCounts {
+        run_branch_after(mode, "").await
+    }
+
+    /// [`run_branch`] with `chain` inserted between the parser and the tee.
+    async fn run_branch_after(mode: MotionMode, chain: &str) -> BranchCounts {
         gstreamer::init().unwrap();
         let camera_id = Uuid::new_v4();
         let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
         let pipeline = gstreamer::parse::launch(&format!(
             "videotestsrc is-live=true pattern=ball \
              ! video/x-raw,width=320,height=240,framerate=25/1 \
-             ! x264enc tune=zerolatency key-int-max=25 ! h264parse \
+             ! openh264enc complexity=low gop-size=25 ! h264parse {chain} \
              ! tee name={tee_name} allow-not-linked=true"
         ))
         .unwrap()
@@ -675,6 +693,15 @@ mod tests {
         );
     }
 
+    /// After RTP the stream has no frame rate, since OpenH264 writes no timing
+    /// info, so its decoded frames have no duration.
+    #[tokio::test]
+    async fn a_stream_without_a_frame_rate_is_sampled() {
+        let rtp = "! rtph264pay ! rtph264depay ! h264parse";
+        let frames = run_branch_after(MotionMode::Full, rtp).await.analyzed;
+        assert!((3..=8).contains(&frames), "got {frames} frames over 3 s");
+    }
+
     #[tokio::test]
     async fn keyframes_mode_decodes_only_keyframes() {
         let counts = run_branch(MotionMode::Keyframes).await;
@@ -709,7 +736,7 @@ mod tests {
         let tee_name = format!("cam_{}_subtee", camera_id.as_simple());
         let pipeline = gstreamer::parse::launch(&format!(
             "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=25/1 \
-             ! x264enc tune=zerolatency key-int-max=25 ! h264parse \
+             ! openh264enc complexity=low gop-size=25 ! h264parse \
              ! tee name={tee_name} allow-not-linked=true"
         ))
         .unwrap()

@@ -17,15 +17,17 @@ use crate::dispatcher::ActionContext;
 /// Burn a text watermark onto every frame of the upstream video artifact.
 ///
 /// Pipeline: `filesrc → qtdemux → parser → software decoder → videoconvert →
-/// textoverlay → videoconvert → encoder → mp4mux → filesink`, with the parser,
-/// decoder and encoder matching the input codec (H.264, H.265 or AV1).
+/// textoverlay → videoconvert → [videoscale → capsfilter] → encoder → mp4mux →
+/// filesink`, with the parser and decoder matching the input codec (H.264,
+/// H.265 or AV1). AV1 is encoded to AV1 and everything else to H.264, scaled
+/// down if the frame is larger than the H.264 encoder accepts.
 ///
 /// Decoding uses an explicit software decoder rather than decodebin's own
 /// autoplug, since a hardware H.264 decoder on this machine produces
 /// corrupted frames when textoverlay follows it on content with B-frames.
 ///
 /// The text is a minijinja template rendered with `TriggerContext` variables.
-/// Audio is dropped. Output is MP4 in the input's codec.
+/// Audio is dropped. Output is MP4.
 pub async fn execute(
     node_id: NodeId,
     cfg: &WatermarkConfig,
@@ -89,11 +91,13 @@ fn watermark_blocking(
         return Err(VmsError::Media("watermark: non-UTF-8 output path".into()));
     };
 
-    let codec_caps = gst_util::probe_video_codec(input);
-    let encoder_name = codec_caps
-        .as_deref()
-        .map(gst_util::codec_to_encoder)
-        .unwrap_or("x264enc");
+    let probe = gst_util::probe_video(input);
+    let codec_caps = probe.as_ref().map(|p| p.caps_name.clone());
+    let encoder = gst_util::make_output_encoder(codec_caps.as_deref().unwrap_or("video/x-h264"))?;
+    let fit = probe
+        .as_ref()
+        .filter(|p| gst_util::output_is_h264(&p.caps_name))
+        .and_then(|p| gst_util::h264_fit("watermark", p.width, p.height));
     let parser_name = codec_caps
         .as_deref()
         .map(gst_util::codec_to_parser)
@@ -144,10 +148,6 @@ fn watermark_blocking(
         .build()
         .map_err(|e| VmsError::Media(format!("videoconvert (post-overlay): {e}")))?;
 
-    let encoder = gstreamer::ElementFactory::make(encoder_name)
-        .build()
-        .map_err(|e| VmsError::Media(format!("{encoder_name}: {e}")))?;
-
     let muxer = gstreamer::ElementFactory::make("mp4mux")
         .build()
         .map_err(|e| VmsError::Media(format!("mp4mux: {e}")))?;
@@ -157,32 +157,21 @@ fn watermark_blocking(
         .build()
         .map_err(|e| VmsError::Media(format!("filesink: {e}")))?;
 
-    pipeline
-        .add_many([
-            &src,
-            &demux,
-            &parse,
-            &decoder,
-            &convert_in,
-            &overlay,
-            &convert_out,
-            &encoder,
-            &muxer,
-            &sink,
-        ])
-        .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
+    // parse → decoder → convert → overlay → convert → [scale → capsfilter] →
+    // encoder → muxer → sink
+    let mut chain = vec![parse.clone(), decoder, convert_in, overlay, convert_out];
+    if let Some((w, h)) = fit {
+        let (scale, filter) = gst_util::make_scaler(w, h)?;
+        chain.extend([scale, filter]);
+    }
+    chain.extend([encoder, muxer, sink]);
 
-    gstreamer::Element::link_many([
-        &parse,
-        &decoder,
-        &convert_in,
-        &overlay,
-        &convert_out,
-        &encoder,
-        &muxer,
-        &sink,
-    ])
-    .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
+    pipeline
+        .add_many([&src, &demux])
+        .and_then(|()| pipeline.add_many(&chain))
+        .map_err(|e| VmsError::Media(format!("add elements: {e}")))?;
+    gstreamer::Element::link_many(&chain)
+        .map_err(|e| VmsError::Media(format!("link chain: {e}")))?;
 
     src.link(&demux)
         .map_err(|e| VmsError::Media(format!("link src→demux: {e}")))?;
@@ -286,6 +275,24 @@ mod tests {
             Some("video/x-av1")
         );
         std::fs::remove_file(&input).ok();
+        std::fs::remove_file(&output).ok();
+    }
+
+    #[test]
+    fn a_large_h265_input_is_watermarked_as_scaled_h264() {
+        gstreamer::init().ok();
+        let output =
+            std::env::temp_dir().join(format!("watermark_h265_out_{}.mp4", std::process::id()));
+        let cfg = WatermarkConfig {
+            text_template: "cam".into(),
+            position: WatermarkPosition::TopLeft,
+            font_size: 12,
+            opacity: 1.0,
+        };
+
+        watermark_blocking(&gst_util::large_h265_clip(), "cam", &cfg, &output).unwrap();
+
+        gst_util::assert_scaled_h264(&output);
         std::fs::remove_file(&output).ok();
     }
 }

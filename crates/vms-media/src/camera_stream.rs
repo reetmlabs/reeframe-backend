@@ -1865,7 +1865,7 @@ mod attach_tests {
         live_gop_pipeline_from(
             camera_id,
             "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=20/1 \
-             ! x264enc key-int-max=40 tune=zerolatency speed-preset=ultrafast ! h264parse",
+             ! openh264enc complexity=low gop-size=40 ! h264parse",
         )
     }
 
@@ -2171,7 +2171,7 @@ mod attach_tests {
                 camera_id,
                 &format!(
                     "videotestsrc is-live=true pattern=snow ! video/x-raw,width=320,height=240,framerate=20/1 \
-                     ! x264enc key-int-max=20 bitrate={kbps} tune=zerolatency speed-preset=ultrafast \
+                     ! openh264enc complexity=low gop-size=20 rate-control=bitrate bitrate={kbps}000 qp-min=1 \
                      ! h264parse"
                 ),
             );
@@ -2363,7 +2363,7 @@ mod attach_tests {
             let (pipeline, _, key_rx) = live_gop_pipeline_from(
                 camera_id,
                 "videotestsrc is-live=true pattern=snow ! video/x-raw,width=160,height=120,framerate=10/1 \
-                 ! x264enc key-int-max=40 bitrate=300 tune=zerolatency speed-preset=ultrafast \
+                 ! openh264enc complexity=low gop-size=40 rate-control=bitrate bitrate=300000 qp-min=1 \
                  ! h264parse",
             );
             pipeline.set_state(gstreamer::State::Playing).unwrap();
@@ -2487,7 +2487,7 @@ mod attach_tests {
         let (pipeline, _, key_rx) = live_gop_pipeline_from(
             camera_id,
             "videotestsrc is-live=true pattern=snow ! video/x-raw,width=640,height=480,framerate=20/1 \
-             ! x264enc key-int-max=40 bitrate=8000 tune=zerolatency speed-preset=ultrafast \
+             ! openh264enc complexity=low gop-size=40 rate-control=bitrate bitrate=8000000 qp-min=1 \
              ! h264parse",
         );
         pipeline.set_state(gstreamer::State::Playing).unwrap();
@@ -2742,7 +2742,7 @@ mod recording_path_tests {
             &format!(
                 "videotestsrc num-buffers={frames} \
                  ! video/x-raw,width=64,height=48,framerate=20/1 \
-                 ! x264enc key-int-max=40 tune=zerolatency speed-preset=ultrafast ! h264parse"
+                 ! openh264enc complexity=low gop-size=40 ! h264parse"
             ),
             true,
         )

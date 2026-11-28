@@ -196,7 +196,7 @@ mod tests {
         let path = scratch_path("valid.mp4");
 
         let pipeline = gstreamer::parse::launch(&format!(
-            "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64 ! x264enc ! mp4mux ! filesink location={}",
+            "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64 ! openh264enc complexity=low ! h264parse ! mp4mux ! filesink location={}",
             path.display()
         ))
         .unwrap();
@@ -227,7 +227,7 @@ mod tests {
         let rel_path = format!("./vms-engine-test-relative-{}.mp4", uuid::Uuid::new_v4());
 
         let pipeline = gstreamer::parse::launch(&format!(
-            "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64 ! x264enc ! mp4mux ! filesink location={rel_path}"
+            "videotestsrc num-buffers=5 ! video/x-raw,width=64,height=64 ! openh264enc complexity=low ! h264parse ! mp4mux ! filesink location={rel_path}"
         ))
         .unwrap();
         pipeline.set_state(gstreamer::State::Playing).unwrap();

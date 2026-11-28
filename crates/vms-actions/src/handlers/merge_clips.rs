@@ -92,7 +92,9 @@ pub async fn execute(
 /// Build and run a GStreamer concat pipeline for N input clips.
 ///
 /// Pipeline per clip: `filesrc → decodebin → videoconvert → concat.sink_N`
-/// Output chain: `concat → videoconvert → encoder → muxer → filesink`
+/// Output chain: `concat → videoconvert → [videoscale → capsfilter] → encoder →
+/// muxer → filesink`. AV1 clips are encoded to AV1 and all others to H.264,
+/// scaled down if the frame is larger than the H.264 encoder accepts.
 ///
 /// All clips must have the same resolution and frame rate (guaranteed when
 /// clips come from the same camera). `videoconvert` normalises pixel formats.
@@ -103,11 +105,15 @@ fn merge_blocking(clips: &[PathBuf], output_format: &str, output: &Path) -> Resu
         return Err(VmsError::Media("merge_clips: non-UTF-8 output path".into()));
     };
 
-    let encoder_name = clips
-        .first()
-        .and_then(|p| gst_util::probe_video_codec(p))
-        .map(|c| gst_util::codec_to_encoder(&c))
-        .unwrap_or("x264enc");
+    let probe = clips.first().and_then(|p| gst_util::probe_video(p));
+    let caps_name = probe
+        .as_ref()
+        .map_or("video/x-h264", |p| p.caps_name.as_str());
+    let encoder = gst_util::make_output_encoder(caps_name)?;
+    let fit = probe
+        .as_ref()
+        .filter(|p| gst_util::output_is_h264(&p.caps_name))
+        .and_then(|p| gst_util::h264_fit("merge_clips", p.width, p.height));
 
     let pipeline = gstreamer::Pipeline::new();
 
@@ -120,10 +126,6 @@ fn merge_blocking(clips: &[PathBuf], output_format: &str, output: &Path) -> Resu
         .build()
         .map_err(|e| VmsError::Media(format!("videoconvert (output): {e}")))?;
 
-    let encoder = gstreamer::ElementFactory::make(encoder_name)
-        .build()
-        .map_err(|e| VmsError::Media(format!("{encoder_name}: {e}")))?;
-
     let muxer = make_muxer(output_format)?;
 
     let sink = gstreamer::ElementFactory::make("filesink")
@@ -131,11 +133,18 @@ fn merge_blocking(clips: &[PathBuf], output_format: &str, output: &Path) -> Resu
         .build()
         .map_err(|e| VmsError::Media(format!("filesink: {e}")))?;
 
+    let mut chain = vec![concat.clone(), out_convert];
+    if let Some((w, h)) = fit {
+        let (scale, filter) = gst_util::make_scaler(w, h)?;
+        chain.extend([scale, filter]);
+    }
+    chain.extend([encoder, muxer, sink]);
+
     pipeline
-        .add_many([&concat, &out_convert, &encoder, &muxer, &sink])
+        .add_many(&chain)
         .map_err(|e| VmsError::Media(format!("add output chain: {e}")))?;
 
-    gstreamer::Element::link_many([&concat, &out_convert, &encoder, &muxer, &sink])
+    gstreamer::Element::link_many(&chain)
         .map_err(|e| VmsError::Media(format!("link output chain: {e}")))?;
 
     // -- Input chain per clip: filesrc → decodebin → videoconvert → concat.sink_N --
@@ -264,5 +273,20 @@ mod tests {
         for clip in inputs.iter().chain([&output]) {
             std::fs::remove_file(clip).ok();
         }
+    }
+
+    #[test]
+    fn large_h265_clips_merge_to_scaled_h264() {
+        use super::{gst_util, merge_blocking};
+
+        gstreamer::init().ok();
+        let clip = gst_util::large_h265_clip();
+        let output =
+            std::env::temp_dir().join(format!("merge_h265_out_{}.mp4", std::process::id()));
+
+        merge_blocking(&[clip.clone(), clip], "mp4", &output).unwrap();
+
+        gst_util::assert_scaled_h264(&output);
+        std::fs::remove_file(&output).ok();
     }
 }

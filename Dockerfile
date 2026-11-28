@@ -60,13 +60,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # Plugin sets required for RTSP receive + MP4 recording
         # good:  rtspsrc, rtph26{4,5}depay, rtpjpegdepay, splitmuxsink, mp4mux
         gstreamer1.0-plugins-good \
-        # bad:   h264parse, h265parse, rtpav1depay, av1parse
+        # bad:   h264parse, h265parse, rtpav1depay, av1parse, and openh264enc
+        #        for H.264 encoding in the transcode, watermark and merge actions.
+        #        It depends on the distro libopenh264.
         gstreamer1.0-plugins-bad \
         # libav: software decoders (avdec_*) for motion and thumbnails.
         # Bookworm ships 1.22; if the base changes, 1.24.0 and 1.24.1 must not be used (frame leak).
         gstreamer1.0-libav \
-        # ugly: x264enc, used by the transcode, watermark and merge actions
-        gstreamer1.0-plugins-ugly \
         # nice:  ICE transport of webrtcbin (bad), for WebRTC sessions
         gstreamer1.0-nice \
         # TLS + CA trust store (RTSPS, outbound HTTPS transports)

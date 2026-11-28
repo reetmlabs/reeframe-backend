@@ -22,7 +22,7 @@ use crate::entities::{
 };
 
 use super::pipeline_validation::{
-    check_artifact_lineage, check_config_completeness, check_config_shape,
+    check_action_settings, check_artifact_lineage, check_config_completeness, check_config_shape,
     check_contact_list_destinations, check_dangling_camera_references, check_disconnected,
     check_structural_violations, check_unresolved_node_references,
     check_unresolved_trigger_references, ValidationIssue, ValidationSeverity,
@@ -1398,6 +1398,7 @@ where
         issues.extend(check_unresolved_trigger_references(&triggers));
         issues.extend(check_unresolved_node_references(&nodes));
         issues.extend(check_contact_list_destinations(&nodes, &destination_types));
+        issues.extend(check_action_settings(&nodes));
         issues.extend(check_artifact_lineage(&nodes, &edges));
         Ok(issues)
     }

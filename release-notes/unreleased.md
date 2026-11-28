@@ -14,6 +14,18 @@ The RTSP relay is now called the restream, in the API, the code and the docs. Up
 
 The `rtsp.*` settings keep their names.
 
+### Breaking: H.264 encoding uses OpenH264, no H.265 output
+
+`transcode`, `watermark` and `merge_clips` encode H.264 with OpenH264 (`openh264enc` from gstreamer1.0-plugins-bad) instead of x264, and gstreamer1.0-plugins-ugly is no longer needed.
+
+- `transcode` accepts only `h264`, `vp9` and `av1` as `codec`. Pipelines that use `h265`, `hevc` or another value get a validation error and cannot be enabled until the node is changed; old settings are not converted. H.265 input is still accepted and comes out as H.264.
+- The H.264 `preset` must be an x264 preset name (or empty) and maps to OpenH264's complexity.
+- H.264 output is limited to 4096x2304 pixels. Larger video is scaled down to fit, and a larger `transcode` `resolution` is rejected.
+- H.264 output is Constrained Baseline, and odd sizes are cropped to even ones.
+- If OpenH264 is missing, only these jobs fail; recording, live view, motion detection and snapshots still work.
+
+See [docs/video-encoding.md](../docs/video-encoding.md).
+
 ### What's new
 
 - `rtsp.public_host` and `rtsp.public_port` set the host and port in restream URLs, so they work from the LAN when the daemon runs in Docker.
@@ -29,3 +41,6 @@ The `rtsp.*` settings keep their names.
 
 - A faststart remux or export trim that fails no longer leaves its temp file next to the chunk. Temp files left by a crash are now also cleaned up from camera folders at startup.
 - A camera that reconnects is no longer disconnected again by an error left over from its previous session.
+- Transcoding to VP9 no longer fails: the bitrate was passed to the encoder with the wrong type.
+- Motion detection no longer crashes the daemon on an H.264 stream without timing information in its headers.
+- Black or white frames are skipped as thumbnails again on systems where the decoder pads its rows.
