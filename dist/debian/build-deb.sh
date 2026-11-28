@@ -34,8 +34,8 @@ sed -e "s/^Version:.*/Version: ${VERSION}/" \
     "$DIST/debian/control" > "$PKG/DEBIAN/control"
 echo "Depends: $depends" >> "$PKG/DEBIAN/control"
 
-install -D -m 0755 "$BINARY" "$PKG/usr/local/bin/vms-daemon"
-install -D -m 0644 "$DIST/reeframe.service" "$PKG/etc/systemd/system/reeframe.service"
+install -D -m 0755 "$BINARY" "$PKG/usr/bin/vms-daemon"
+install -D -m 0644 "$DIST/reeframe.service" "$PKG/usr/lib/systemd/system/reeframe.service"
 install -D -m 0644 "$ROOT/LICENSE" "$PKG/usr/share/doc/reeframe-backend/LICENSE"
 install -D -m 0644 "$ROOT/NOTICE" "$PKG/usr/share/doc/reeframe-backend/NOTICE"
 if [ -n "$LIBAV" ]; then
