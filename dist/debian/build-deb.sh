@@ -26,7 +26,7 @@ trap 'rm -rf "$PKG"' EXIT
 chmod 0755 "$PKG"
 
 install -d "$PKG/DEBIAN"
-install -m 0755 "$DIST/debian/postinst" "$DIST/debian/postrm" "$PKG/DEBIAN/"
+install -m 0755 "$DIST/debian/postinst" "$DIST/debian/prerm" "$DIST/debian/postrm" "$PKG/DEBIAN/"
 # Depends is one comma-separated line built from the per-distro list.
 depends=$(grep -Ev '^\s*(#|$)' "$DEPENDS_FILE" | paste -sd, - | sed 's/,/, /g')
 sed -e "s/^Version:.*/Version: ${VERSION}/" \
