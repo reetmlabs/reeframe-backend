@@ -231,6 +231,10 @@ pub struct MergeClipsConfig {
     pub gap_fill: GapFill,
     /// Container format for the merged output (e.g. `"mp4"`).
     pub output_format: String,
+    /// H.264 bitrate in kbps. `None` picks one from the output frame size, see
+    /// [`default_h264_bitrate_kbps`](crate::video_encoding::default_h264_bitrate_kbps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
 }
 
 /// Configuration for the `compress` action.
@@ -288,6 +292,10 @@ pub struct WatermarkConfig {
     pub font_size: u32,
     /// Watermark opacity: `0.0` = fully transparent, `1.0` = fully opaque.
     pub opacity: f32,
+    /// H.264 bitrate in kbps. `None` picks one from the output frame size, see
+    /// [`default_h264_bitrate_kbps`](crate::video_encoding::default_h264_bitrate_kbps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
 }
 
 /// Configuration for the `render_notification` action.
@@ -501,5 +509,32 @@ mod tests {
         };
         assert_eq!(cfg.pre_event_secs, 20);
         assert_eq!(cfg.post_event_secs, 30);
+    }
+
+    #[test]
+    fn watermark_and_merge_configs_without_a_bitrate_still_load() {
+        let stored = serde_json::json!({
+            "action_type": "watermark",
+            "text_template": "cam",
+            "position": "top_left",
+            "font_size": 12,
+            "opacity": 1.0,
+        });
+        let ActionConfig::Watermark(cfg) = serde_json::from_value(stored).unwrap() else {
+            panic!("expected a watermark config");
+        };
+        assert_eq!(cfg.bitrate_kbps, None);
+
+        let stored = serde_json::json!({
+            "action_type": "merge_clips",
+            "order": "chronological",
+            "gap_fill": "skip",
+            "output_format": "mp4",
+            "bitrate_kbps": 8000,
+        });
+        let ActionConfig::MergeClips(cfg) = serde_json::from_value(stored).unwrap() else {
+            panic!("expected a merge_clips config");
+        };
+        assert_eq!(cfg.bitrate_kbps, Some(8000));
     }
 }

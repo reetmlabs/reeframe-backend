@@ -985,6 +985,7 @@ mod tests {
             order: vms_core::action::ClipOrder::Chronological,
             gap_fill: vms_core::action::GapFill::Skip,
             output_format: "mp4".into(),
+            bitrate_kbps: None,
         })
     }
 

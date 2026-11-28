@@ -67,12 +67,14 @@ async fn only_h264_encoding_fails_without_openh264() {
         position: WatermarkPosition::TopLeft,
         font_size: 12,
         opacity: 1.0,
+        bitrate_kbps: None,
     });
     assert_needs_openh264(&run(watermark, 1, &dir).await);
     let merge = ActionConfig::MergeClips(MergeClipsConfig {
         order: ClipOrder::Chronological,
         gap_fill: GapFill::Skip,
         output_format: "mp4".into(),
+        bitrate_kbps: None,
     });
     assert_needs_openh264(&run(merge, 2, &dir).await);
 

@@ -266,6 +266,7 @@ mod tests {
             position: WatermarkPosition::TopLeft,
             font_size: 12,
             opacity: 1.0,
+            bitrate_kbps: None,
         };
 
         watermark_blocking(&input, "cam", &cfg, &output).unwrap();
@@ -288,6 +289,7 @@ mod tests {
             position: WatermarkPosition::TopLeft,
             font_size: 12,
             opacity: 1.0,
+            bitrate_kbps: None,
         };
 
         watermark_blocking(&gst_util::large_h265_clip(), "cam", &cfg, &output).unwrap();
