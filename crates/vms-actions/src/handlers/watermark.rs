@@ -93,11 +93,10 @@ fn watermark_blocking(
 
     let probe = gst_util::probe_video(input);
     let codec_caps = probe.as_ref().map(|p| p.caps_name.clone());
-    let encoder = gst_util::make_output_encoder(codec_caps.as_deref().unwrap_or("video/x-h264"))?;
-    let fit = probe
-        .as_ref()
-        .filter(|p| gst_util::output_is_h264(&p.caps_name))
-        .and_then(|p| gst_util::h264_fit("watermark", p.width, p.height));
+    let gst_util::OutputEncoder {
+        encoder,
+        scale_to: fit,
+    } = gst_util::make_output_encoder("watermark", probe.as_ref(), cfg.bitrate_kbps)?;
     let parser_name = codec_caps
         .as_deref()
         .map(gst_util::codec_to_parser)
